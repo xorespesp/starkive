@@ -801,6 +801,7 @@ function openMembership(item) {
       addOption(await createStarList(name, ''), true);
       newName.value = '';
     } catch (err) {
+      if (isCancelled(err)) return; // The session closed, so the dialog is already closed too
       setStatus(err.message, { error: true });
     }
     createButton.disabled = false;
@@ -1505,6 +1506,7 @@ async function openImport() {
       // The server reads repository details and star lists from GitHub itself, and skips ones already there
       ({ added } = await api('archive-star-items', { method: 'POST', body: { starred_repo_ids: ids, star_list_id: Number(starListPicker.value) } }));
     } catch (err) {
+      if (isCancelled(err)) return; // The session closed, so the dialog is already closed too. Don't send the next requests
       importError = err;
     }
     // Don't guess from the request result whether the add happened. Fetch the archive again to check
@@ -1512,7 +1514,8 @@ async function openImport() {
     try {
       [state.starItems, state.starLists] = await Promise.all([api('archive-star-items'), api('archive-star-lists')]); // Importing GitHub star lists may have created new star lists
       render(); // `render` requests live details for the new items shown on screen
-    } catch {
+    } catch (err) {
+      if (isCancelled(err)) return;
       reloaded = false;
     }
     busy = false;

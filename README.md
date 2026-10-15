@@ -14,7 +14,7 @@ GitHub stars are a public bookmark list:
 
 Keeping a private list in a notes app instead means copying links by hand, writing descriptions yourself, and finding out too late that a link is dead. starkive does that bookkeeping for you, in a repository you own.
 
-starkive isn't a smart star organizer with AI tags and semantic search. It's a quiet, private record of the repositories you care about, and it stays.
+starkive is developed with a focus on keeping a private, lasting record of the repositories you care about, rather than on extras like AI tagging or smart search.
 
 ## What you get
 
