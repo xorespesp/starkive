@@ -55,6 +55,7 @@ var errDashboardOtherValue = errors.New("the dashboard is deployed with a differ
 func askDashboardURL(u ui, cfg *core.Config, defaultSite string, registered bool) (string, error) {
 	const prompt = "Dashboard address:"
 	const hint = "the production domain under the Vercel project's Domains"
+	const manualEntryLabel = "Or enter the deployed dashboard's Vercel domain manually"
 	var deployed <-chan string // Channel that receives the address confirmed in the background. `nil` if it doesn't check
 	stopWatching := func() {}
 	if defaultSite != "" {
@@ -65,7 +66,7 @@ func askDashboardURL(u ui, cfg *core.Config, defaultSite string, registered bool
 		var input string
 		if deployed != nil {
 			waiting := "Waiting for your dashboard at `" + defaultSite + "`. The setup continues on its own once it's deployed with the value above."
-			value, result, err := u.waitForValue(waiting, prompt, deployed)
+			value, result, err := u.waitForValue(waiting, prompt, manualEntryLabel, deployed)
 			if err != nil {
 				return "", err
 			}

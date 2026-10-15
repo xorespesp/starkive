@@ -53,13 +53,14 @@ type webLine struct {
 // One prompt shown on the page.
 // Usually an input box. If `Waiting` is set, it is a waiting prompt instead of an input box (`waitForValue`)
 type webPrompt struct {
-	ID      int           `json:"id"`      // Prompt number. Tells whether an answer or a switch request is for the current prompt
-	Text    string        `json:"text"`    // The prompt. On a waiting prompt, it goes in front of the received value when that value is added as a line
-	Hint    string        `json:"hint"`    // A faint example shown inside the input box. Empty string if none
-	Secret  bool          `json:"secret"`  // If `true`, the input box hides the characters, and the answer isn't added as a line
-	Waiting string        `json:"waiting"` // The sentence shown while waiting. An empty string means a normal input box
-	answer  chan string   // Channel that passes the answer. A lowercase field, so it isn't put in JSON
-	typing  chan struct{} // Channel that passes the request to enter it by hand
+	ID          int           `json:"id"`           // Prompt number. Tells whether an answer or a switch request is for the current prompt
+	Text        string        `json:"text"`         // The prompt. On a waiting prompt, it goes in front of the received value when that value is added as a line
+	Hint        string        `json:"hint"`         // A faint example shown inside the input box. Empty string if none
+	Secret      bool          `json:"secret"`       // If `true`, the input box hides the characters, and the answer isn't added as a line
+	Waiting     string        `json:"waiting"`      // The sentence shown while waiting. An empty string means a normal input box
+	ManualEntry string        `json:"manual_entry"` // On a waiting prompt, the label of the link to enter it by hand
+	answer      chan string   // Channel that passes the answer. A lowercase field, so it isn't put in JSON
+	typing      chan struct{} // Channel that passes the request to enter it by hand
 }
 
 // What the page's result card shows when the setup ends with success (`done`)
@@ -176,11 +177,11 @@ func (u *webUI) askSecret(prompt string) (string, error) {
 	return value, nil
 }
 
-// Shows the waiting sentence `waiting` and a link to enter it by hand, instead of an input box.
+// Shows the waiting sentence `waiting` and a link labeled `manualEntryLabel` to enter it by hand, instead of an input box.
 // Waits until a value comes on `received` or the link is clicked.
 // A received value is added as a line, together with the prompt `prompt`
-func (u *webUI) waitForValue(waiting string, prompt string, received <-chan string) (string, waitResult, error) {
-	value, result := u.show(&webPrompt{Text: prompt, Waiting: waiting}, received)
+func (u *webUI) waitForValue(waiting string, prompt string, manualEntryLabel string, received <-chan string) (string, waitResult, error) {
+	value, result := u.show(&webPrompt{Text: prompt, Waiting: waiting, ManualEntry: manualEntryLabel}, received)
 	return value, result, nil
 }
 

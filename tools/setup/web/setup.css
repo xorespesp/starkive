@@ -399,6 +399,12 @@ button {
   font-size: 15px;
 }
 
+/* Waiting prompt while an open button isn't clicked yet: only the link shows, without the box */
+.waiting.quiet {
+  padding: 0;
+  border-color: transparent;
+}
+
 .error {
   color: var(--danger);
 }

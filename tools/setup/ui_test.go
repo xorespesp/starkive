@@ -184,7 +184,7 @@ func TestSetupPageAnswers(t *testing.T) {
 // When the wait ends, the result is sent to `done`
 func startWaiting(t *testing.T, server *localServer, u *webUI, session map[string]string, received <-chan string, done chan<- waitResult) webState {
 	go func() { // `waitForValue` blocks until it ends, so it is called in another goroutine
-		_, result, _ := u.waitForValue("Waiting for your dashboard.", "Dashboard address:", received)
+		_, result, _ := u.waitForValue("Waiting for your dashboard.", "Dashboard address:", "Enter it manually", received)
 		done <- result
 	}()
 	var state webState
@@ -198,7 +198,7 @@ func startWaiting(t *testing.T, server *localServer, u *webUI, session map[strin
 }
 
 // Checks the prompt that waits for a value checked in the background.
-//   - The prompt comes with the waiting text (`waiting`). It has no input box, so it accepts no answer (409)
+//   - The prompt comes with the waiting text (`waiting`) and the link label (`manual_entry`). It has no input box, so it accepts no answer (409)
 //   - When the value comes, the prompt is removed, and the value is kept as an answer line with the prompt
 func TestSetupPageWaitReceives(t *testing.T) {
 	server, u := startTestWebUI(t)
@@ -206,7 +206,7 @@ func TestSetupPageWaitReceives(t *testing.T) {
 	received := make(chan string, 1)
 	done := make(chan waitResult, 1)
 	state := startWaiting(t, server, u, session, received, done)
-	if state.Prompt.Waiting != "Waiting for your dashboard." {
+	if state.Prompt.Waiting != "Waiting for your dashboard." || state.Prompt.ManualEntry != "Enter it manually" {
 		t.Errorf("prompt: %+v", state.Prompt)
 	}
 	allowed := map[string]string{"Cookie": session["Cookie"], "Origin": server.base, "Content-Type": "application/json"}

@@ -183,7 +183,7 @@ func (s *scriptedUI) done(text string, label string, target string) {}
 func (s *scriptedUI) askSecret(prompt string) (string, error) { return s.ask(prompt, "") }
 
 // Answers right away, without waiting, that it will type the value in
-func (s *scriptedUI) waitForValue(waiting string, prompt string, received <-chan string) (string, waitResult, error) {
+func (s *scriptedUI) waitForValue(waiting string, prompt string, manualEntryLabel string, received <-chan string) (string, waitResult, error) {
 	return "", switchedToTyping, nil
 }
 

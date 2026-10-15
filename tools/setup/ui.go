@@ -36,10 +36,10 @@ type ui interface {
 	askSecret(prompt string) (string, error) // Same as `ask`, but doesn't show the typed characters and keeps the answer nowhere (secrets)
 	// Waits for a value that is checked in the background to arrive on `received`.
 	// The person can also enter it by hand. `waitResult` tells which way it ended.
-	// The setup page shows the `waiting` sentence, a progress indicator and a link to enter it by hand, instead of an input box.
+	// The setup page shows the `waiting` sentence, a progress indicator and a link labeled `manualEntryLabel` to enter it by hand, instead of an input box.
 	// When that link is clicked, it returns `switchedToTyping`.
 	// The terminal prints the `waiting` sentence and `prompt`, and the person can type a line while waiting (`typedAnswer`)
-	waitForValue(waiting string, prompt string, received <-chan string) (string, waitResult, error)
+	waitForValue(waiting string, prompt string, manualEntryLabel string, received <-chan string) (string, waitResult, error)
 }
 
 // Why a wait (`ui.waitForValue`) ended
@@ -158,8 +158,9 @@ func (t *terminalUI) ask(prompt string, hint string) (string, error) {
 // Returns whichever comes first: a value from `received` or a line from standard input.
 // A received value is printed so the person can see it.
 // The prompt ends with a note that typing is optional (the person can type at any time while waiting).
-// The reason it ended is `receivedValue` or `typedAnswer`
-func (t *terminalUI) waitForValue(waiting string, prompt string, received <-chan string) (string, waitResult, error) {
+// The reason it ended is `receivedValue` or `typedAnswer`.
+// The terminal has no link, so `manualEntryLabel` isn't used
+func (t *terminalUI) waitForValue(waiting string, prompt string, manualEntryLabel string, received <-chan string) (string, waitResult, error) {
 	t.say(waiting)
 	printPrompt(prompt, "optional, it continues on its own")
 	select { // Takes whichever comes first

@@ -252,7 +252,7 @@ function showResult(state) {
  * For the same prompt, it doesn't clear what the person was typing.
  * A prompt that was already answered or switched to typing isn't shown.
  *
- * @param {{ id: number, text: string, hint: string, secret: boolean, waiting: string } | null} prompt The prompt waiting for an answer. `null` if none
+ * @param {{ id: number, text: string, hint: string, secret: boolean, waiting: string, manual_entry: string } | null} prompt The prompt waiting for an answer. `null` if none
  *
  * NOTE: The input box of a secret prompt is a text box, and CSS hides its characters (`.masked`).
  * The browser doesn't see it as a sign-in form, so it doesn't offer to save a password (measured).
@@ -271,6 +271,7 @@ function updatePrompt(prompt) {
   promptId = prompt.id;
   if (prompt.waiting) {
     $('waiting-text').replaceChildren(...richText(prompt.waiting));
+    $('switch-to-typing').textContent = prompt.manual_entry;
     form.hidden = true;
     waitingShown = true;
     return;
@@ -289,9 +290,15 @@ function updatePrompt(prompt) {
 /**
  * Updates the progress indicators (tool is working, waiting prompt) to match the current state.
  * Hides them if the setup ended, an input box is shown, or there is an open button not clicked yet.
+ *
+ * NOTE: While an open button isn't clicked, a waiting prompt shows only its link to enter the value by hand.
+ * A moving indicator would make the person hesitate to click the button, so the indicator and the waiting sentence are hidden.
+ * The link stays, because the person may not need that button at all.
  */
 function updateIndicators() {
-  $('waiting').hidden = !waitingShown || openNotClicked;
+  $('waiting').hidden = !waitingShown;
+  $('waiting').classList.toggle('quiet', openNotClicked);
+  $('waiting-line').hidden = openNotClicked;
   $('busy').hidden = finished || !$('prompt').hidden || waitingShown || openNotClicked;
 }
 
