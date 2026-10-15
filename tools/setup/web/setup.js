@@ -360,11 +360,18 @@ async function sendToTool(path, body) {
 }
 
 /**
- * Marks the current prompt as finished and removes it from the page.
+ * Marks the prompt `id` as finished and removes it from the page, if it is still the one shown.
  * The next prompt comes with the progress.
+ *
+ * @param {number} id Number of the prompt the request was sent for
+ *
+ * NOTE: The tool shows the next prompt as soon as it gets the answer.
+ * So the progress can bring the next prompt before the response to this request arrives.
+ * Judging by the prompt shown at that moment would hide that next prompt for good.
  */
-function dismissPrompt() {
-  answeredId = promptId;
+function dismissPrompt(id) {
+  answeredId = Math.max(answeredId, id);
+  if (promptId !== id) return; // A later prompt is already shown
   promptId = 0;
   waitingShown = false;
   openNotClicked = false;
@@ -381,10 +388,12 @@ function dismissPrompt() {
 async function submitAnswer(event) {
   event.preventDefault();
   const error = $('prompt-error');
+  const id = promptId;
   try {
-    await sendToTool('/answer', { id: promptId, value: $('prompt-input').value });
-    dismissPrompt();
+    await sendToTool('/answer', { id, value: $('prompt-input').value });
+    dismissPrompt(id);
   } catch (err) {
+    if (promptId !== id) return; // A later prompt is already shown, so the error isn't about it
     error.textContent = `Couldn't send the answer: ${err.message}`;
     error.hidden = false;
   }
@@ -395,9 +404,10 @@ async function submitAnswer(event) {
  * The tool stops the background check and shows a new input box prompt.
  */
 async function switchToTyping() {
+  const id = promptId;
   try {
-    await sendToTool('/switch-to-typing', { id: promptId });
-    dismissPrompt();
+    await sendToTool('/switch-to-typing', { id });
+    dismissPrompt(id);
   } catch (err) {
     $('status').textContent = `Couldn't reach the setup tool: ${err.message}`;
   }
