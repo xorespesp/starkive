@@ -220,7 +220,7 @@ async function fetchLiveMeta(nodeIds) {
 
 /**
  * Makes the live details loading state for one session.
- * `loadAll` makes a new one for each session. On the sign-in screen, `signal` is `null`.
+ * Each session gets its own state. `signal` is `null` while no session is open.
  *
  * @param {AbortSignal|null} signal This session's cancel signal
  * @returns {{ signal: AbortSignal|null, requested: Set<string>, queue: string[], workers: number, error: Error|null, reportErrors: boolean, idleWaiters: Function[] }}
@@ -240,8 +240,8 @@ let liveMetaLoader = newLiveMetaLoader(null); // Live details loading state of t
 /**
  * Queues live details for items not asked about yet.
  * If fewer than `LIVE_META_PARALLEL` workers are running, it starts more.
- * `render` calls it with the items it drew.
- * So items that appear through scrolling, star list choice or search are filled in on their own.
+ * Call it on every draw with the items drawn on screen.
+ * Then items that appear through scrolling, star list choice or search are filled in on their own.
  * Items already asked about are skipped, so calling it many times is safe.
  *
  * @param {object[]} items Archive items drawn on screen
@@ -291,7 +291,6 @@ async function runLiveMetaWorker(loader) {
 
 /**
  * Waits until all workers of the loading state `loader` finish.
- * Used to see whether the live details of the first screen have all arrived.
  *
  * @param {object} loader Loading state (`newLiveMetaLoader`)
  * @returns {Promise<void>}
@@ -1949,7 +1948,7 @@ function readPendingAdd(consume) {
  *
  * @param {unknown} dashboardURL The canonical address the server sent with the 409 for sign-in start (`dashboard_url`, the address registered in the GitHub App)
  * @returns {boolean} `true` if it moved.
- *   `false` if there is no address, it isn't https (http://localhost for the local dev server), or it is already that address
+ *   `false` if there is no address, it is neither https nor a local dev server address (`http://localhost`, `http://127.0.0.1`), or it is already that address
  *
  * NOTE: GitHub sends the sign-in result back to the canonical address.
  * The state cookie set at the start belongs only to the address where sign-in started.

@@ -111,8 +111,9 @@ const (
 )
 
 // Asks GitHub for the DB repository by ID, fills its current name and default branch into `cfg`, and returns the repository's state.
-// It also accepts an empty repository, so only the setup tool calls it directly.
-// The server always goes through `useDBRepo`.
+// It also accepts an empty or foreign repository.
+// The server must not call it directly.
+// The server goes through `useDBRepo` instead, which allows only a starkive repository.
 //
 // Returns:
 //   - The state of the repository.
@@ -166,7 +167,7 @@ func useDBRepo(cfg *Config) error {
 }
 
 // Asks GitHub for the DB repository by ID, and decides its state by looking inside it.
-// `ResolveDBRepo` calls it when the result is not in the cache.
+// It doesn't look at the cache (`dbRepoCache`).
 //
 // Returns:
 //   - The found repository.
@@ -402,7 +403,7 @@ func readSyncConfig(cfg *Config) (syncConfig, error) {
 }
 
 // Records the dashboard address for the workflow to call (`dashboard_url`).
-// Other values in the config file are not touched, and nothing is committed if the value is the same.
+// Other values in the config file are not touched, and nothing is committed if the file stays the same.
 //
 // Args:
 //   - `siteURL`: The canonical address of the dashboard, registered in the GitHub App (`GitHubApp.SiteURL`)

@@ -112,8 +112,7 @@ type Archive struct {
 var errEmptyCommitMessage = errors.New("refusing to commit changes without a commit message")
 
 // Reads several files in the DB repository from one commit, and writes the files that `change` returns in one commit.
-// Every write to the DB repository goes through this function
-// (the archive through `UpdateArchive`, the config file through `updateConfig`, the workflow through the setup tool).
+// Every write to the DB repository goes through this function.
 // The only exception is the first commit in an empty repository.
 // The Git Data API doesn't work in an empty repository, so the setup tool writes that commit with the Contents API.
 //

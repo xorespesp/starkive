@@ -234,7 +234,7 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 //   - `starredRepos`: Candidates to add, added in order (in GitHub's order, the most recently starred come first)
 //   - `starListIDs`: Star list IDs that all new items go into (chosen by a person). An empty list if none.
 //     A 400 `HTTPError` if an ID isn't in the archive
-//   - `commitPrefix`: First part of the commit subject. "sync(star-items)" for sync, "user(star-items)" for Import in the dashboard
+//   - `commitPrefix`: First part of the commit subject, `<who>(star-items)` (e.g. `sync(star-items)`)
 //
 // Returns:
 //   - Number of items actually added

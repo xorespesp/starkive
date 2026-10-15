@@ -27,7 +27,7 @@ type GitHubAPIRequest struct {
 	Method string // HTTP method. GET if empty
 	Accept string // `Accept` header. `application/vnd.github+json` if empty
 	Body   any    // Body to send as JSON. `nil` if there is none
-	Token  string // Token to send. The DB repository token if empty. Set only when GitHub sign-in asks `/user` with the user's token
+	Token  string // Token to send instead of the DB repository token. The DB repository token if empty
 }
 
 // Sends a request to the GitHub API (REST or GraphQL).

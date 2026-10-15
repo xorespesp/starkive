@@ -65,4 +65,8 @@ go test ./...
 go run ./tools/dev-server    # http://localhost:3000, reads .env.local
 ```
 
-The dev server writes to the repository in `.env.local`, so use a separate empty repository for it: run the setup tool with that repository, put the value it shows in `.env.local` as `STARKIVE_DB_REPO_ACCESS_KEY=<value>`, give the tool `http://localhost:3000` as the dashboard's address, and turn off auto sync in that dashboard's **Settings**.
+The dev server writes to the repository in `.env.local`, so use a separate empty repository for it:
+
+1. Run the setup tool with that repository. In **Deploy dashboard**, skip the Vercel project and put the value it shows in `.env.local` as `STARKIVE_DB_REPO_ACCESS_KEY=<value>`.
+2. Start the dev server, then click **Enter it yourself instead** on the setup page (with `-headless`, type it at the prompt) and enter `http://localhost:3000`.
+3. After the setup, turn off auto sync in that dashboard's **Settings**.

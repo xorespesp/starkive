@@ -117,17 +117,17 @@ func TestSignInStartsOnlyAtDashboardAddress(t *testing.T) {
 // (The sign-in response doesn't tell the causes apart.)
 func TestSignInNeedsSetUpApp(t *testing.T) {
 	setupWithoutGitHubApp(t, "", "")
-	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "setup tool") {
+	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("no app: %d %s", rec.Code, rec.Body)
 	}
 	gh := setupWithoutGitHubApp(t, "", "")
 	gh.files[core.ConfigDBPath] = makeTestConfigFile(testDashboardURL, encodeTestGitHubApp(t, "token-of-last-year", testUserID))
-	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "setup tool") {
+	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("unreadable app: %d %s", rec.Code, rec.Body)
 	}
 	gh = setupWithoutGitHubApp(t, "", "")
 	gh.files[core.ConfigDBPath] = "{ broken"
-	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "setup tool") {
+	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("broken config: %d %s", rec.Code, rec.Body)
 	}
 	if _, _, err := core.LoadGitHubApp(loadTestConfig(t)); !errors.Is(err, core.ErrConfigBroken) {
