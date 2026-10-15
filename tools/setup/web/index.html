@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Starkive Setup Wizard</title>
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Starkive Setup Wizard</h1>
+    <ol id="steps" class="stepper" aria-label="Setup steps"></ol>
+    <section id="result" class="result" hidden>
+      <h2 id="result-title"></h2>
+      <p id="result-text"></p>
+      <div id="result-action"></div>
+    </section>
+    <div id="controls">
+      <form id="prompt" class="prompt" hidden>
+        <label id="prompt-label" for="prompt-input"></label>
+        <div class="prompt-row">
+          <input id="prompt-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+          <button type="submit">Continue</button>
+        </div>
+        <p id="prompt-error" class="error" hidden></p>
+      </form>
+      <div id="waiting" class="waiting" hidden>
+        <p class="waiting-text"><span class="spinner" aria-hidden="true"><i></i><i></i><i></i></span><span id="waiting-text"></span></p>
+        <button id="switch-to-typing" class="text-button" type="button">Enter it yourself instead</button>
+      </div>
+      <p id="busy" class="busy" hidden><span class="spinner" aria-hidden="true"><i></i><i></i><i></i></span>In progress…</p>
+    </div>
+    <p id="status" class="status"></p>
+  </main>
+</body>
+</html>

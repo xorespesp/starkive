@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Starkive</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23e3b341' d='M8 .8l2.2 4.6 5 .7-3.6 3.5.9 5L8 12.2 3.5 14.6l.9-5L.8 6.1l5-.7z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Starkive</h1>
+    <!-- Icon link that opens the DB repository on GitHub. `app.js` fills in the address and tooltip after sign-in -->
+    <a id="repo-link" class="icon-link" target="_blank" rel="noopener noreferrer" hidden></a>
+    <!-- Shown only after sign-in (`app.js` removes `hidden`) -->
+    <button id="add-button" type="button" hidden>Add</button>
+    <button id="import-button" type="button" class="ghost" title="Import repositories you starred on GitHub" hidden>Import stars</button>
+    <!-- Auto sync settings and status, Sync now, the bookmarklet. If auto sync has a problem to report (`syncProblem`), a warning mark is added (`attention`) -->
+    <button id="settings-button" type="button" class="ghost" hidden>Settings</button>
+    <button id="logout" type="button" class="ghost" hidden>Sign out</button>
+  </header>
+
+  <main>
+    <!-- Sign-in screen. The user signs in with a GitHub account, without a password. Only the one GitHub account the server allows can get in -->
+    <section id="login" class="panel" hidden>
+      <h2>Sign in</h2>
+      <p class="panel-note">Only the GitHub account set up for this dashboard can sign in.</p>
+      <div class="actions">
+        <button id="login-button" type="button">Sign in with GitHub</button>
+      </div>
+    </section>
+
+    <section id="dashboard" class="layout" hidden>
+      <nav id="sidebar" class="sidebar" aria-label="Lists"></nav>
+
+      <div class="content">
+        <div id="list-header" class="list-header"></div>
+
+
+        <div class="filters">
+          <input id="search" type="search" placeholder="Search name, description, note, topics  /" spellcheck="false">
+          <select id="language" aria-label="Language"></select>
+          <select id="sort" aria-label="Sort">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="name">Name</option>
+          </select>
+        </div>
+
+        <div class="summary">
+          <span id="summary"></span>
+          <button id="reload" type="button" class="ghost">Reload</button>
+        </div>
+
+        <div id="list" class="list"></div>
+        <button id="more" type="button" class="ghost more" hidden></button>
+      </div>
+    </section>
+  </main>
+
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+</body>
+</html>

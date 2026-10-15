@@ -1,0 +1,12 @@
+node_modules/
+*.local.*
+*.exe
+.*
+
+!.gitignore
+!.gitattributes
+!.gitmodules
+!.mailmap
+!.git-blame-ignore-revs
+!.gitkeep
+!.github/

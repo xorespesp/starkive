@@ -1,0 +1,1792 @@
+// Integration tests for the APIs and the sync, plus the fake GitHub (`fakeGitHub`) and helpers that the tests share.
+// The fake GitHub runs as an `httptest` server.
+// The GitHub addresses that the server code calls (`STARKIVE_GH_API_URL`, `STARKIVE_GH_WEB_URL`) point to it, so the real GitHub isn't touched.
+// API entry functions (`api.Handle...`) are called directly without an HTTP server, and their responses are checked.
+//
+// NOTE: These tests can't live in `api/`.
+// Vercel tries to turn every .go file in `api/` into a serverless function.
+package test
+
+import (
+	"compress/gzip"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	api "github.com/xorespesp/starkive/api"
+	"github.com/xorespesp/starkive/core"
+)
+
+// Fake accounts and values used by all tests
+const (
+	testUserID       = 4242                  // The server token's owner. The only person who can sign in to the dashboard
+	testToken        = "token_4242"          // The server token. The fake GitHub treats `token_<ID>` as the token of the user with that ID
+	testRepoID       = 5150                  // ID of the DB repository (`me/archive`)
+	otherUserID      = 777                   // Another GitHub user who isn't the token owner
+	testClientID     = "test-client-id"      // Client ID of the sign-in GitHub App
+	testClientSecret = "test-client-secret"  // Client secret of the sign-in GitHub App
+	origin           = "http://example.test" // `Origin` of the requests that `call` sends. Same site as the request address
+)
+
+// A fake server that imitates only the GitHub APIs the tests need.
+// Its fields set the repository content and GitHub's behavior (outages, missing permissions, commits from another device at the same time, etc.).
+// It records the requests it received and the commits made.
+// File writes imitate GitHub's Git Data API in three steps: create a tree, create a commit, move the branch.
+// If the branch moved in between, the move is refused with 422.
+type fakeGitHub struct {
+	mu                  sync.Mutex                    // Lock for the fields below. The server code sends several requests to GitHub at the same time
+	files               map[string]string             // Files of the commit at the branch tip (`head`): path in the repository -> content
+	head                string                        // Commit sha that the branch (`main`) points to
+	snapshots           map[string]map[string]string  // Past commit sha -> that commit's files. Used for reads at a commit (`?ref=`)
+	parents             map[string]string             // Commit sha on the branch -> parent commit sha. Used to imitate the compare API
+	trees               map[string]map[string]string  // Created tree sha -> that tree's files
+	pending             map[string]fakeCommit         // Commit sha created but not yet on the branch -> commit
+	commits             []string                      // Messages of the commits on the branch, in the order they were made
+	starred             []string                      // My GitHub Stars (owner/repo). Repository IDs are made from the names (`makeRepoID`)
+	interfereOnce       func(files map[string]string) // A commit from another device that cuts in once, right before the next branch move. It gets the current files and changes them
+	interfereAll        bool                          // If `true`, another device commits first on every branch move (constant conflicts)
+	treeStatus          int                           // If not 0, tree creation fails with this status code
+	treeCalls           int                           // Number of tree creation requests
+	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
+	refMessage          string                        // GitHub message used when failing with `refStatus`
+	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
+	otherAfterLostReply bool                          // If `true`, one more commit from another device lands right after the lost response. Used with `refLostReply`
+	gone                map[string]bool               // `node_id`s that GraphQL answers with `NOT_FOUND` (repositories deleted or made private)
+	githubStarLists     map[string][]string           // My GitHub star lists: name -> repositories in it (owner/repo)
+	graphqlDown         bool                          // If `true`, all GraphQL requests fail with 502 (a temporary outage)
+	githubStarListsDown bool                          // If `true`, only the GitHub star list query (`viewer.lists`) fails with 502
+	ownerDown           bool                          // If `true`, `/user` with the server token (the token owner check) fails with 502
+	tokenRejected       bool                          // If `true`, every request with the server token is refused with 401 "Bad credentials" (token expired or revoked)
+	repoMissing         bool                          // If `true`, looking up the repository by ID gives 404 (the token doesn't select the DB repository)
+	repoLookups         int                           // Number of repository lookups by ID (`/repositories/{ID}`)
+	repoEmpty           bool                          // If `true`, it is an empty repository with no commits. Writing the first file with the Contents API clears it
+	workflowsDenied     bool                          // If `true`, the token has no Workflows permission. Writes that change `.github/workflows/` are refused with 403
+	starringDenied      bool                          // If `true`, the token has no Starring permission. Reading Stars gives 403
+	actionsDenied       bool                          // If `true`, the token has no Actions permission. The Actions API gives 403 with the needed permission in a header
+	ownerCalls          int                           // Number of `/user` requests with the server token
+	contentsHangup      bool                          // If `true`, file read requests are cut off without a response (network error)
+	branchReadsLag      bool                          // If `true`, files read by branch name have the previous commit's content (GitHub briefly shows a just-moved branch at the old commit). Reads by commit sha are correct
+	requests            int                           // Number of all requests received
+	workflowState       string                        // State of the auto sync workflow (`active`, `disabled_manually`, `disabled_inactivity`, etc.)
+	workflowToggles     int                           // Number of requests to turn the workflow on or off
+	runs                []fakeRun                     // Runs of the auto sync workflow
+	badCommitSubjects   []string                      // Commit subjects that break the format (`commitSubjectRule`). Collected when each commit is made, so none are missed even if a test clears `commits`
+}
+
+// Records the message of a commit on the branch.
+// If the subject breaks the format (`commitSubjectRule`), it also goes into `badCommitSubjects`,
+// and is reported when the test ends (`checkCommitSubjects`). Call it while holding `mu`.
+//
+// Args:
+//   - `message`: The whole commit message (subject, blank line, body)
+func (f *fakeGitHub) recordCommit(message string) {
+	f.commits = append(f.commits, message)
+	if subject, _, _ := strings.Cut(message, "\n"); !commitSubjectRule.MatchString(subject) {
+		f.badCommitSubjects = append(f.badCommitSubjects, subject)
+	}
+}
+
+// One workflow run on the fake GitHub
+type fakeRun struct {
+	event      string    // Why it ran: `schedule` (scheduled) or `workflow_dispatch` (manual)
+	status     string    // `completed` or `in_progress`
+	conclusion string    // Result when finished: `success`, `failure`, etc. Empty while in progress
+	started    time.Time // Start time
+}
+
+// A commit the fake GitHub created that isn't on the branch yet
+type fakeCommit struct {
+	tree    string // The commit's tree sha
+	parent  string // Parent commit sha. Must equal the current `head` when the branch moves
+	message string // Commit message
+}
+
+// Returns the files at a commit. Call it while holding `mu`.
+//
+// Args:
+//   - `commit`: Commit sha. If it is the current `head`, these are the current files
+//
+// Returns:
+//   - Path -> content. `nil` for an unknown commit
+func (f *fakeGitHub) readFilesAt(commit string) map[string]string {
+	if commit == f.head {
+		return f.files
+	}
+	return f.snapshots[commit]
+}
+
+// Moves the branch to a new commit.
+// The files of the current `head` stay in `snapshots`, so reads at that commit still work. Call it while holding `mu`.
+//
+// Args:
+//   - `next`: New commit sha
+//   - `files`: Files of the new commit. Don't change them after passing them (they are stored as is, not copied)
+func (f *fakeGitHub) moveHead(next string, files map[string]string) {
+	f.parents[next] = f.head
+	f.snapshots[f.head] = f.files
+	f.head = next
+	f.files = files
+}
+
+// Copies a file map, so that each commit keeps its own file state.
+//
+// Args:
+//   - `files`: Path -> content
+//
+// NOTE: Assigning a Go map copies a reference to the same content (like a pointer in C++).
+// Changing it without a copy would also change the files of past commits.
+func copyFiles(files map[string]string) map[string]string {
+	out := make(map[string]string, len(files))
+	for k, v := range files {
+		out[k] = v
+	}
+	return out
+}
+
+// Makes a fake repository ID from the repository name (`owner/repo`). It is the CRC32 of the name, so the same name always gives the same ID
+func makeRepoID(name string) int64 { return int64(crc32.ChecksumIEEE([]byte(name))) }
+
+// Answers each request like GitHub, by path and method. Paths it doesn't imitate get 404.
+// This method makes `fakeGitHub` satisfy the `http.Handler` interface, so it can be passed to `httptest.NewServer`.
+func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests++
+	// A request with a refused token gets 401 "Bad credentials", whatever the path
+	if f.tokenRejected && r.Header.Get("Authorization") == "Bearer "+testToken {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+		return
+	}
+	const contents = "/repos/me/archive/contents/"
+	const workflow = "/repos/me/archive/actions/workflows/starkive-sync.yml"
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/actions/") && f.actionsDenied:
+		w.Header().Set("X-Accepted-GitHub-Permissions", "actions=read")
+		http.Error(w, `{"message":"Resource not accessible by personal access token"}`, http.StatusForbidden)
+
+	case strings.HasPrefix(r.URL.Path, workflow) && f.files[core.SyncWorkflowPath] == "":
+		// Without the workflow file, the Actions API doesn't know the workflow either
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+
+	case r.URL.Path == workflow && r.Method == http.MethodGet:
+		// Workflow state
+		json.NewEncoder(w).Encode(map[string]any{"state": f.workflowState})
+
+	case (r.URL.Path == workflow+"/enable" || r.URL.Path == workflow+"/disable") && r.Method == http.MethodPut:
+		// Turn the workflow on or off. Turning on a workflow that is already on is harmless (measured)
+		f.workflowToggles++
+		if strings.HasSuffix(r.URL.Path, "/disable") {
+			if f.workflowState != "active" { // Disabling a disabled workflow gives 403 with the same header as a missing permission (measured)
+				w.Header().Set("X-Accepted-GitHub-Permissions", "actions=write")
+				http.Error(w, `{"message":"Unable to disable a workflow that is not active."}`, http.StatusForbidden)
+				return
+			}
+			f.workflowState = "disabled_manually"
+		} else {
+			f.workflowState = "active"
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	case r.URL.Path == workflow+"/runs" && r.Method == http.MethodGet:
+		// Workflow run list. Filtered by `event` and `status` in the query
+		query := r.URL.Query()
+		runs := []map[string]any{}
+		for i, run := range f.runs {
+			if (query.Has("event") && run.event != query.Get("event")) || (query.Has("status") && run.status != query.Get("status")) {
+				continue
+			}
+			runs = append(runs, map[string]any{"id": i + 1, "event": run.event, "status": run.status, "conclusion": run.conclusion,
+				"run_started_at": run.started, "html_url": fmt.Sprintf("https://github.com/me/archive/actions/runs/%d", i+1)})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "workflow_runs": runs})
+
+	case strings.HasPrefix(r.URL.Path, contents) && r.Method == http.MethodGet:
+		// File read (Contents API). `ref` is a branch name or a commit sha
+		if f.contentsHangup {
+			conn, _, _ := w.(http.Hijacker).Hijack() // Cuts the connection without a response. `.(http.Hijacker)`: gets the interface value as another interface
+			conn.Close()
+			return
+		}
+		if f.repoEmpty { // A file read in an empty repository gives 404
+			http.Error(w, `{"message":"This repository is empty."}`, http.StatusNotFound)
+			return
+		}
+		ref := r.URL.Query().Get("ref")
+		files := f.files // For the branch name (`main`), the current files
+		if ref != "main" {
+			files = f.readFilesAt(ref)
+		} else if previous, ok := f.snapshots[f.parents[f.head]]; f.branchReadsLag && ok {
+			files = previous
+		}
+		path := strings.TrimPrefix(r.URL.Path, contents)
+		content, ok := files[path]
+		if !ok {
+			// For a folder instead of a file, answers with a list like GitHub (here an empty array)
+			for name := range files {
+				if strings.HasPrefix(name, path+"/") {
+					io.WriteString(w, "[]")
+					return
+				}
+			}
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, content)
+
+	case strings.HasPrefix(r.URL.Path, contents) && r.Method == http.MethodPut:
+		// Write one file (Contents API). The setup tool uses it for an empty repository's first commit (the marker). In an empty repository, this commit becomes the first commit
+		path := strings.TrimPrefix(r.URL.Path, contents)
+		if f.workflowsDenied && strings.HasPrefix(path, ".github/workflows/") {
+			w.Header().Set("X-Accepted-GitHub-Permissions", "contents=write; contents=write,workflows=write")
+			http.Error(w, `{"message":"Resource not accessible by personal access token"}`, http.StatusForbidden)
+			return
+		}
+		var body struct {
+			Message string `json:"message"`
+			Content string `json:"content"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		decoded, _ := base64.StdEncoding.DecodeString(body.Content)
+		files := copyFiles(f.files)
+		if f.repoEmpty {
+			files = map[string]string{}
+			f.repoEmpty = false
+		}
+		files[path] = string(decoded)
+		f.moveHead(fmt.Sprintf("commit-put-%d", len(f.commits)+1), files)
+		f.recordCommit(body.Message)
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{}`)
+
+	case r.URL.Path == fmt.Sprintf("/repositories/%d", testRepoID) && r.Method == http.MethodGet:
+		// Look up a repository by ID. Returns the name and the default branch
+		f.repoLookups++
+		if f.repoMissing {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"id":%d,"full_name":"me/archive","private":true,"default_branch":"main"}`, testRepoID)
+
+	case r.URL.Path == "/repos/me/archive/git/ref/heads/main" && r.Method == http.MethodGet:
+		// Read the branch. An empty repository gives 409 "Git Repository is empty." (measured)
+		if f.repoEmpty {
+			http.Error(w, `{"message":"Git Repository is empty."}`, http.StatusConflict)
+			return
+		}
+		fmt.Fprintf(w, `{"object":{"sha":%q}}`, f.head)
+
+	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/commits/") && r.Method == http.MethodGet:
+		// Read a commit. The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
+		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
+
+	case r.URL.Path == "/repos/me/archive/git/trees" && r.Method == http.MethodPost:
+		// Create a tree: the received files overwrite the files of `base_tree`. An empty repository gives 409, and writing a workflow without the Workflows permission gives 403 (measured)
+		f.treeCalls++
+		if f.treeStatus != 0 {
+			http.Error(w, `{"message":"Invalid tree"}`, f.treeStatus)
+			return
+		}
+		if f.repoEmpty {
+			http.Error(w, `{"message":"Git Repository is empty."}`, http.StatusConflict)
+			return
+		}
+		var body struct {
+			BaseTree string `json:"base_tree"`
+			Tree     []struct {
+				Path    string `json:"path"`
+				Content string `json:"content"`
+			} `json:"tree"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		for _, e := range body.Tree {
+			if f.workflowsDenied && strings.HasPrefix(e.Path, ".github/workflows/") {
+				w.Header().Set("X-Accepted-GitHub-Permissions", "contents=write; contents=write,workflows=write")
+				http.Error(w, `{"message":"Resource not accessible by personal access token"}`, http.StatusForbidden)
+				return
+			}
+		}
+		files := copyFiles(f.readFilesAt(strings.TrimPrefix(body.BaseTree, "tree-of-")))
+		for _, e := range body.Tree {
+			files[e.Path] = e.Content
+		}
+		sha := fmt.Sprintf("tree-%d", len(f.trees)+1)
+		f.trees[sha] = files
+		fmt.Fprintf(w, `{"sha":%q}`, sha)
+
+	case r.URL.Path == "/repos/me/archive/git/commits" && r.Method == http.MethodPost:
+		// Create a commit. It isn't on the branch yet
+		var body struct {
+			Message string   `json:"message"`
+			Tree    string   `json:"tree"`
+			Parents []string `json:"parents"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		sha := fmt.Sprintf("commit-%d", len(f.pending)+len(f.snapshots)+1)
+		f.pending[sha] = fakeCommit{tree: body.Tree, parent: body.Parents[0], message: body.Message}
+		fmt.Fprintf(w, `{"sha":%q}`, sha)
+
+	case r.URL.Path == "/repos/me/archive/git/refs/heads/main" && r.Method == http.MethodPatch:
+		// Move the branch (no force). If the commit's parent isn't the current `head`, it gives 422 "Update is not a fast forward"
+		var body struct {
+			SHA string `json:"sha"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if f.refStatus != 0 {
+			http.Error(w, fmt.Sprintf(`{"message":%q}`, f.refMessage), f.refStatus)
+			return
+		}
+		if f.interfereAll { // Another device always commits first
+			f.moveHead(f.head+"-other", copyFiles(f.files))
+		}
+		if f.interfereOnce != nil {
+			// Another device committed once first, so the branch moved
+			files := copyFiles(f.files)
+			f.interfereOnce(files)
+			f.interfereOnce = nil
+			f.moveHead(f.head+"-other", files)
+		}
+		commit := f.pending[body.SHA]
+		if commit.parent != f.head {
+			http.Error(w, `{"message":"Update is not a fast forward"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		f.moveHead(body.SHA, f.trees[commit.tree])
+		f.recordCommit(commit.message)
+		if f.refLostReply { // The move was applied, and only the response was lost
+			if f.otherAfterLostReply {
+				f.moveHead(f.head+"-other", copyFiles(f.files))
+			}
+			http.Error(w, `{"message":"Bad Gateway"}`, http.StatusBadGateway)
+			return
+		}
+		fmt.Fprintf(w, `{"object":{"sha":%q}}`, body.SHA)
+
+	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/compare/") && r.Method == http.MethodGet:
+		// Compare two commits (`base...tip`). If following parents from tip reaches base, tip contains base (`ahead`, or `identical` for the same commit)
+		base, tip, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/repos/me/archive/compare/"), "...")
+		status := "diverged"
+		for c := tip; c != ""; c = f.parents[c] {
+			if c == base && c == tip {
+				status = "identical"
+				break
+			}
+			if c == base {
+				status = "ahead"
+				break
+			}
+		}
+		fmt.Fprintf(w, `{"status":%q}`, status)
+
+	case r.URL.Path == "/login/oauth/access_token" && r.Method == http.MethodPost:
+		// Exchange a sign-in code for a user token. Like GitHub, a failure also answers 200 with the reason in `error`.
+		// The code `user-<ID>` becomes that user's token `token_<ID>`
+		r.ParseForm()
+		var id int64
+		switch {
+		case r.Form.Get("client_id") != testClientID || r.Form.Get("client_secret") != testClientSecret:
+			io.WriteString(w, `{"error":"incorrect_client_credentials"}`)
+		case func() bool { _, err := fmt.Sscanf(r.Form.Get("code"), "user-%d", &id); return err == nil }():
+			fmt.Fprintf(w, `{"access_token":"token_%d","token_type":"bearer","scope":""}`, id)
+		default:
+			io.WriteString(w, `{"error":"bad_verification_code"}`)
+		}
+
+	case r.URL.Path == "/user" && r.Method == http.MethodGet:
+		// The token's owner. `token_<ID>` belongs to the user with that ID. Other tokens get 401
+		if r.Header.Get("Authorization") == "Bearer "+testToken {
+			f.ownerCalls++
+			if f.ownerDown {
+				http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+				return
+			}
+		}
+		var id int64
+		if _, err := fmt.Sscanf(r.Header.Get("Authorization"), "Bearer token_%d", &id); err != nil {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, `{"id":%d,"login":"user%d"}`, id, id)
+
+	case r.URL.Path == "/repos/torvalds/linux":
+		// One repository to look up when adding a repository directly (Add)
+		io.WriteString(w, `{"id":2325298,"node_id":"R_linux","full_name":"torvalds/linux"}`)
+
+	case r.URL.Path == "/user/starred" && r.Method == http.MethodGet:
+		// One page of my Stars (`per_page`, `page`)
+		if f.starringDenied {
+			http.Error(w, `{"message":"Resource not accessible by personal access token"}`, http.StatusForbidden)
+			return
+		}
+		page := 1 // Like GitHub, the first page if `page` is missing
+		var perPage int
+		fmt.Sscan(r.URL.Query().Get("page"), &page)
+		fmt.Sscan(r.URL.Query().Get("per_page"), &perPage)
+		items := []string{}
+		for i := (page - 1) * perPage; i < min(page*perPage, len(f.starred)); i++ {
+			name := f.starred[i]
+			items = append(items, fmt.Sprintf(`{"starred_at":"2026-10-01T00:00:00Z","repo":{"id":%d,"node_id":"R_%d","full_name":%q,"stargazers_count":7}}`,
+				makeRepoID(name), makeRepoID(name), name))
+		}
+		// Like GitHub, if it isn't the last page, the `Link` header gives the last page number
+		lastPage := max(1, (len(f.starred)+perPage-1)/perPage)
+		if page < lastPage {
+			w.Header().Set("Link", fmt.Sprintf(`<https://api.github.com/user/starred?per_page=%d&page=%d>; rel="next", <https://api.github.com/user/starred?per_page=%d&page=%d>; rel="last"`,
+				perPage, page+1, perPage, lastPage))
+		}
+		io.WriteString(w, "["+strings.Join(items, ",")+"]")
+
+	case r.URL.Path == "/graphql":
+		// GraphQL: the DB repository state (`isEmpty` and the marker), the GitHub star list query (`viewer`), and repository info by `node_id` (`nodes`)
+		if f.graphqlDown {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			return
+		}
+		var body struct {
+			Query     string `json:"query"`
+			Variables struct {
+				IDs    []string `json:"ids"`
+				Owner  string   `json:"owner"`
+				Name   string   `json:"name"`
+				Marker string   `json:"marker"`
+			} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if strings.Contains(body.Query, "isEmpty") {
+			// DB repository state: `isEmpty` for an empty repository. Otherwise the file at `HEAD:<path>` is answered as `marker`. A missing file is `null`
+			if body.Variables.Owner+"/"+body.Variables.Name != "me/archive" {
+				io.WriteString(w, `{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository"}]}`)
+				return
+			}
+			marker := "null"
+			if content, ok := f.files[strings.TrimPrefix(body.Variables.Marker, "HEAD:")]; ok && !f.repoEmpty {
+				text, _ := json.Marshal(content)
+				marker = `{"text":` + string(text) + `}`
+			}
+			fmt.Fprintf(w, `{"data":{"repository":{"isEmpty":%t,"marker":%s}}}`, f.repoEmpty, marker)
+			return
+		}
+		if strings.Contains(body.Query, "viewer") {
+			if f.githubStarListsDown {
+				http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+				return
+			}
+			// GitHub star lists and their repositories. Go's map order changes each time, so the answer is sorted by name to stay the same
+			names := make([]string, 0, len(f.githubStarLists))
+			for name := range f.githubStarLists {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			githubStarLists := []string{}
+			for i, name := range names {
+				items := []string{}
+				for _, repo := range f.githubStarLists[name] {
+					items = append(items, fmt.Sprintf(`{"databaseId":%d}`, makeRepoID(repo)))
+				}
+				githubStarLists = append(githubStarLists, fmt.Sprintf(`{"id":"UL_%d","name":%q,"items":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[%s]}}`,
+					i, name, strings.Join(items, ",")))
+			}
+			fmt.Fprintf(w, `{"data":{"viewer":{"lists":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[%s]}}}}`, strings.Join(githubStarLists, ","))
+			return
+		}
+		// Repository info: `R_1` and the repositories in my Stars (`R_<ID>`) get their info.
+		// `gone` gets `null` with a `NOT_FOUND` error,
+		// `R_3` gets an ID that isn't a repository (`{}`), and everything else gets `null`
+		nodes := []string{}
+		errs := []string{}
+		for i, id := range body.Variables.IDs {
+			node := "null"
+			switch {
+			case f.gone[id]:
+				errs = append(errs, fmt.Sprintf(`{"type":"NOT_FOUND","path":["nodes",%d],"message":"Could not resolve to a node"}`, i))
+			case id == "R_1":
+				node = `{"id":"R_1","nameWithOwner":"a/one","stargazerCount":42}`
+			case id == "R_3":
+				node = "{}" // An ID of another kind, not a repository
+			default:
+				for _, name := range f.starred {
+					if id == fmt.Sprintf("R_%d", makeRepoID(name)) {
+						node = fmt.Sprintf(`{"id":%q,"nameWithOwner":%q,"description":"about %s","primaryLanguage":{"name":"Go","color":"#00ADD8"},"repositoryTopics":{"nodes":[{"topic":{"name":"cli"}}]},"homepageUrl":"","licenseInfo":{"spdxId":"MIT"},"stargazerCount":7,"isArchived":false}`, id, name, name)
+					}
+				}
+			}
+			nodes = append(nodes, node)
+		}
+		fmt.Fprintf(w, `{"data":{"nodes":[%s]},"errors":[%s]}`, strings.Join(nodes, ","), strings.Join(errs, ","))
+
+	default: // A path it doesn't imitate
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}
+}
+
+// Reads one file at the branch tip. Tests use it to check what the server wrote.
+//
+// Args:
+//   - `path`: Path in the repository
+//
+// Returns:
+//   - The file content. An empty string if the file doesn't exist
+func (f *fakeGitHub) readFile(path string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.files[path]
+}
+
+// Dashboard address that test requests arrive at.
+// `call` sends requests to `http://example.test`.
+// The server (`core.ReadSiteURL`) treats any address that isn't localhost as https, so this becomes the address
+const testDashboardURL = "https://example.test"
+
+// Starts a fake GitHub with a DB repository that finished setup, and sets the environment variables.
+// On top of the repository from `setupWithoutGitHubApp`,
+// the config file has the sign-in GitHub App (encrypted with the server token, owned by `testUserID`) and the dashboard address (`testDashboardURL`).
+//
+// Args:
+//   - `starItems`, `starLists`: Contents of `db/star-items.json` and `db/star-lists.json`. An empty string means no file
+//
+// Returns:
+//   - The fake GitHub. Tests change its fields to set GitHub's behavior, and check the results (files, commits, request counts)
+func setup(t *testing.T, starItems string, starLists string) *fakeGitHub {
+	gh := setupWithoutGitHubApp(t, starItems, starLists)
+	gh.files[core.ConfigDBPath] = makeTestConfigFile(testDashboardURL, encodeTestGitHubApp(t, testToken, testUserID))
+	return gh
+}
+
+// Starts a fake GitHub with a DB repository that has no sign-in GitHub App yet (before the setup tool creates the App), and sets the environment variables.
+// The repository has the marker for this version (`.starkive`),
+// a config file with the sync interval and a time turned on one hour ago, and an auto sync workflow file that is on.
+// To test with an empty or foreign repository, change `files` or turn on `repoEmpty` after calling it.
+//
+// Args:
+//   - `starItems`, `starLists`: Contents of `db/star-items.json` and `db/star-lists.json`. An empty string means no file
+//
+// Returns:
+//   - The fake GitHub
+//
+// NOTE: When the test ends, it closes the fake server and checks the subject format of every commit made in that test (`checkCommitSubjects`).
+// The environment variables are changed with `t.Setenv`, so they go back when the test ends.
+func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fakeGitHub {
+	gh := &fakeGitHub{files: map[string]string{}, head: "commit-0", snapshots: map[string]map[string]string{},
+		trees: map[string]map[string]string{}, pending: map[string]fakeCommit{}, parents: map[string]string{},
+		workflowState: "active"}
+	if starItems != "" {
+		gh.files[core.StarItemsDBPath] = starItems
+	}
+	if starLists != "" {
+		gh.files[core.StarListsDBPath] = starLists
+	}
+	gh.files[core.MarkerDBPath] = string(core.EncodeMarker())
+	gh.files[core.ConfigDBPath] = makeTestConfigFile("", "")
+	gh.files[core.SyncWorkflowPath] = "name: starkive sync\n" // The server doesn't read the workflow content. It only checks the state with the Actions API
+	srv := httptest.NewServer(gh)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { checkCommitSubjects(t, gh) }) // When the test ends, checks the format of the commit subjects made so far
+	// Makes the server code call the fake GitHub. `t.Setenv` restores the original value when the test ends
+	t.Setenv("STARKIVE_GH_API_URL", srv.URL)
+	t.Setenv("STARKIVE_GH_WEB_URL", srv.URL)
+	t.Setenv(core.DBRepoAccessKeyEnv, core.FormatDBRepoAccessKey(testRepoID, testToken))
+	return gh
+}
+
+// Format of DB repository commit subjects: `<who>(<file>): <summary>`.
+// Who is `user` (a person's edit) or `sync` (auto sync).
+// File is the name of the DB repository file that the commit changed
+var commitSubjectRule = regexp.MustCompile(`^(user|sync)\((star-items|star-lists|repo-meta|config|workflow)\): \S`)
+
+// Reports a test failure for each commit made on the fake GitHub during the test whose subject breaks the format (`commitSubjectRule`).
+// `setupWithoutGitHubApp` calls it when the test ends.
+//
+// Args:
+//   - `gh`: The fake GitHub to check
+//
+// NOTE: Each write path in the server sets its own commit subject.
+// This check runs in every test, so if any path breaks the format, the tests that go through that path fail.
+func checkCommitSubjects(t *testing.T, gh *fakeGitHub) {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	for _, subject := range gh.badCommitSubjects {
+		t.Errorf("commit subject breaks the rule: %q", subject)
+	}
+}
+
+// Makes the content of the config file (`config.json`).
+// The sync interval is daily (1), and auto sync was turned on one hour ago (`enabled_since`).
+//
+// Args:
+//   - `dashboardURL`: Dashboard address. Left out if empty
+//   - `app`: Sign-in GitHub App settings (the `sign_in_app` value, made by `encodeTestGitHubApp` and others). Left out if empty
+func makeTestConfigFile(dashboardURL string, app string) string {
+	content := `{`
+	if dashboardURL != "" {
+		content += `"dashboard_url":"` + dashboardURL + `",`
+	}
+	content += `"sync":{"interval_days":1,"enabled_since":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) + `"}`
+	if app != "" {
+		content += `,"sign_in_app":` + app
+	}
+	return content + "}\n"
+}
+
+// Makes sign-in GitHub App settings (the `sign_in_app` value) encrypted with the server token.
+// The App owner is the token owner (`testUserID`).
+//
+// Args:
+//   - `siteURL`: Dashboard address registered in the App (`site_url`)
+func encodeTestGitHubAppAt(t *testing.T, siteURL string) string {
+	content, err := core.EncodeGitHubApp(&core.Config{DBRepoAccessToken: testToken},
+		core.GitHubApp{AppID: 1, Slug: "starkive-test", OwnerID: testUserID, ClientID: testClientID, ClientSecret: testClientSecret, SiteURL: siteURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+// Makes sign-in GitHub App settings (the `sign_in_app` value). The address registered in the App is `testDashboardURL`.
+//
+// Args:
+//   - `token`: Token used to encrypt the client secret. If it differs from the server token, the server can't decrypt the settings (as after a token change)
+//   - `ownerID`: GitHub user ID of the App owner
+func encodeTestGitHubApp(t *testing.T, token string, ownerID int64) string {
+	content, err := core.EncodeGitHubApp(&core.Config{DBRepoAccessToken: token},
+		core.GitHubApp{AppID: 1, Slug: "starkive-test", OwnerID: ownerID, ClientID: testClientID, ClientSecret: testClientSecret, SiteURL: testDashboardURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+// Calls an API entry function directly without an HTTP server, and returns the response.
+// The request goes to `http://example.test` with a same-site `Origin`.
+//
+// Args:
+//   - `h`: API entry function (`api.HandleArchiveStarItems`, etc.)
+//   - `method`: HTTP method
+//   - `target`: Path and query (e.g. `/api/archive-star-items?id=1`)
+//   - `body`: Request body. No body if empty
+//   - `cookie`: Value of the `Cookie` header. Not sent if empty
+//
+// Returns:
+//   - The recorded response (status code, headers, body)
+func call(h http.HandlerFunc, method string, target string, body string, cookie string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "http://example.test"+target, strings.NewReader(body))
+	req.Header.Set("Origin", origin)
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec
+}
+
+// Imitates the whole GitHub sign-in and gets a session cookie for the token owner (`testUserID`).
+// Stops the test on failure.
+//
+// Returns:
+//   - The session cookie `session=<value>`. Pass it as `cookie` to `call`
+func login(t *testing.T) string {
+	state, stateCookie := startGitHubLogin(t)
+	rec := callGitHubLoginCallback(fmt.Sprintf("code=user-%d&state=%s", testUserID, state), stateCookie)
+	session := readSetCookie(rec, "session")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" || session == "" {
+		t.Fatalf("login failed: %d %s %q", rec.Code, rec.Header().Get("Location"), rec.Header().Values("Set-Cookie"))
+	}
+	return session
+}
+
+// Starts GitHub sign-in (`POST /api/login-session`). Stops the test on failure.
+//
+// Returns:
+//   - The state in the GitHub authorization address
+//   - The state cookie the browser got (`github_login_state=<value>`)
+func startGitHubLogin(t *testing.T) (string, string) {
+	rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", "")
+	var body struct {
+		URL string `json:"url"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	u, err := url.Parse(body.URL)
+	if rec.Code != 200 || err != nil || u.Query().Get("state") == "" {
+		t.Fatalf("start login: %d %s", rec.Code, rec.Body)
+	}
+	return u.Query().Get("state"), readSetCookie(rec, "github_login_state")
+}
+
+// Imitates the request after GitHub finishes sign-in and sends the browser back to the callback (`GET /api/login-session?...`).
+//
+// Args:
+//   - `query`: Query of the callback address (`code=...&state=...` or `error=...`)
+//   - `cookie`: The state cookie the browser sends. Not sent if empty
+//
+// Returns:
+//   - The server's response (a 302 to the page, on success or failure)
+func callGitHubLoginCallback(query string, cookie string) *httptest.ResponseRecorder {
+	return call(api.HandleLoginSession, "GET", "/api/login-session?"+query, "", cookie)
+}
+
+// Finds the cookie named `name` with a value among the `Set-Cookie` headers of a response.
+//
+// Args:
+//   - `rec`: The response
+//   - `name`: Cookie name
+//
+// Returns:
+//   - `name=value`. An empty string if the cookie is missing, or if there is only a `Set-Cookie` with an empty value (one that deletes the cookie)
+func readSetCookie(rec *httptest.ResponseRecorder, name string) string {
+	for _, header := range rec.Header().Values("Set-Cookie") {
+		pair := strings.SplitN(header, ";", 2)[0]
+		if strings.HasPrefix(pair, name+"=") && pair != name+"=" {
+			return pair
+		}
+	}
+	return ""
+}
+
+// Two archive items for tests, in the file format (one item per line).
+// a/one belongs to Graphics (100), and b/two has no star list
+const sampleStarItems = "[\n" +
+	`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[100],"starred_at":"2026-01-01T00:00:00Z"}` + ",\n" +
+	`{"id":2,"node_id":"R_2","name":"b/two","note":"","star_list_ids":[],"starred_at":"2026-01-01T00:00:00Z"}` +
+	"\n]\n"
+
+// Two star lists for tests: Graphics (100), HPE (200)
+const sampleStarLists = "[\n" +
+	`{"id":100,"name":"Graphics","description":""}` + ",\n" +
+	`{"id":200,"name":"HPE","description":"pose"}` +
+	"\n]\n"
+
+// Tests success and failure of GitHub sign-in (web flow).
+//   - The authorization address has only the App's Client ID and the state.
+//     It doesn't send permissions (`scope`) or a callback address (`redirect_uri`)
+//   - For the token owner, a session cookie is made and the state cookie is deleted. The session can use the APIs
+//   - These cases redirect to `/?login_error=<reason>` without a session:
+//     another user, a different or missing state, a forged state cookie, an expired state, cancel on GitHub, a wrong code
+//   - Sign-in can't be started from another site
+func TestGitHubLogin(t *testing.T) {
+	setup(t, sampleStarItems, sampleStarLists)
+
+	// Authorization address: only the App's Client ID and the state
+	rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", "")
+	var start struct {
+		URL string `json:"url"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &start)
+	u, _ := url.Parse(start.URL)
+	if u.Path != "/login/oauth/authorize" || u.Query().Get("client_id") != testClientID || u.Query().Has("scope") || u.Query().Has("redirect_uri") {
+		t.Errorf("authorize url = %s", start.URL)
+	}
+
+	// Allowed user: a session is made and can use the APIs. The state cookie is deleted
+	state, stateCookie := startGitHubLogin(t)
+	rec = callGitHubLoginCallback(fmt.Sprintf("code=user-%d&state=%s", testUserID, state), stateCookie)
+	session := readSetCookie(rec, "session")
+	if rec.Header().Get("Location") != "/" || session == "" || !slices.ContainsFunc(rec.Header().Values("Set-Cookie"), func(h string) bool { return strings.HasPrefix(h, "github_login_state=;") }) {
+		t.Fatalf("allowed user: %d %s %q", rec.Code, rec.Header().Get("Location"), rec.Header().Values("Set-Cookie"))
+	}
+	if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", session); rec.Code != 200 {
+		t.Errorf("session from GitHub login: %d", rec.Code)
+	}
+
+	// Failing cases: never a session cookie. Redirect to the page with a reason.
+	// Expired state: the state and cookie of a sign-in started 11 minutes ago (the state cookie is valid for only 10 minutes)
+	expiredState, expiredCookie := func() (string, string) {
+		cfg, err := core.LoadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		app, _, err := core.LoadGitHubApp(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorizeURL, cookie, _ := core.StartGitHubLogin(cfg, app, time.Now().Add(-11*time.Minute))
+		u, _ := url.Parse(authorizeURL)
+		return u.Query().Get("state"), strings.SplitN(cookie, ";", 2)[0]
+	}()
+	freshState, freshCookie := startGitHubLogin(t)
+	otherState, otherCookie := startGitHubLogin(t)
+	tamperedCookie := "github_login_state=" + otherState + strings.TrimPrefix(freshCookie, "github_login_state="+freshState) // Forged cookie: another state with this cookie's expiry and signature
+	cases := []struct {
+		name   string
+		query  string
+		cookie string
+		want   string
+	}{
+		{"other GitHub user", fmt.Sprintf("code=user-%d&state=%s", otherUserID, freshState), freshCookie, "not_allowed"},
+		{"state differs from cookie", fmt.Sprintf("code=user-%d&state=%s", testUserID, otherState), freshCookie, "expired"},
+		{"no state cookie", fmt.Sprintf("code=user-%d&state=%s", testUserID, freshState), "", "expired"},
+		{"no state in callback", fmt.Sprintf("code=user-%d", testUserID), freshCookie, "expired"},
+		{"forged state cookie", fmt.Sprintf("code=user-%d&state=%s", testUserID, otherState), tamperedCookie, "expired"},
+		{"state cookie expired", fmt.Sprintf("code=user-%d&state=%s", testUserID, expiredState), expiredCookie, "expired"},
+		{"cancelled on GitHub", "error=access_denied&state=" + otherState, otherCookie, "cancelled"},
+		{"bad code", "code=nonsense&state=" + otherState, otherCookie, "failed"},
+	}
+	for _, c := range cases {
+		rec := callGitHubLoginCallback(c.query, c.cookie)
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/?login_error="+c.want || readSetCookie(rec, "session") != "" {
+			t.Errorf("%s: %d %s %q", c.name, rec.Code, rec.Header().Get("Location"), rec.Header().Values("Set-Cookie"))
+		}
+	}
+
+	// Another site can't start a sign-in
+	req := httptest.NewRequest("POST", "http://example.test/api/login-session", nil)
+	req.Header.Set("Origin", "https://evil.test")
+	cross := httptest.NewRecorder()
+	api.HandleLoginSession(cross, req)
+	if cross.Code != 403 {
+		t.Errorf("cross-origin start: %d", cross.Code)
+	}
+}
+
+// Tests that nobody can sign in when the token owner can't be checked.
+// There must be no path where "unknown" means "allow anyone".
+//   - If looking up the token owner (`/user`) fails during the callback, it redirects with `failed` and no session
+//   - The allow check (`core.IsGitHubLoginAllowed`) also allows nobody when the token owner is unknown (0)
+func TestGitHubLoginFailsClosedWithoutTokenOwner(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	state, stateCookie := startGitHubLogin(t)
+	gh.mu.Lock()
+	gh.ownerDown = true
+	gh.mu.Unlock()
+	rec := callGitHubLoginCallback(fmt.Sprintf("code=user-%d&state=%s", testUserID, state), stateCookie)
+	if rec.Header().Get("Location") != "/?login_error=failed" || readSetCookie(rec, "session") != "" {
+		t.Errorf("owner lookup failed: %d %s %q", rec.Code, rec.Header().Get("Location"), rec.Header().Values("Set-Cookie"))
+	}
+	// The check also allows nobody when the token owner is unknown (0)
+	if core.IsGitHubLoginAllowed(0, 0) || core.IsGitHubLoginAllowed(testUserID, otherUserID) || !core.IsGitHubLoginAllowed(testUserID, testUserID) {
+		t.Error("IsGitHubLoginAllowed decided wrong")
+	}
+}
+
+// Tests parsing of the environment variable `STARKIVE_DB_REPO_ACCESS_KEY` (`starkive-v1:<repository ID>:<token>`).
+//   - With a valid value, it asks GitHub by ID and fills in the repository name and default branch.
+//     It caches the result, so the next request doesn't ask again
+//   - Leading and trailing spaces and newlines (picked up when copying) are ignored
+//   - If it is missing or malformed, every API gives 500.
+//     (Malformed: empty, only the token by mistake, another format version, a name instead of an ID, a negative number,
+//     characters a token can't have, header injection)
+//   - If the token can't see the repository (the token doesn't select it), it gives 409 and doesn't guess another repository
+func TestDBRepoAccessKey(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg, err := core.LoadConfig()
+	if err != nil || cfg.DBRepoID != testRepoID || cfg.DBRepoAccessToken != testToken || cfg.DBRepoFullName != "me/archive" || cfg.DBRepoBranch != "main" {
+		t.Fatalf("resolved: %+v %v", cfg, err)
+	}
+	cookie := login(t)
+	before := gh.repoLookups
+	for i := 0; i < 3; i++ {
+		if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie); rec.Code != 200 {
+			t.Fatalf("list: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if gh.repoLookups != before {
+		t.Errorf("looked the DB repository up again: %d times", gh.repoLookups-before)
+	}
+
+	// Spaces and newlines picked up when copying the printed line are ignored
+	for _, value := range []string{
+		" starkive-v1:5150:token_4242",
+		"starkive-v1:5150:token_4242 ",
+		"starkive-v1:5150:token_4242\n",
+		"\tstarkive-v1:5150:token_4242\r\n",
+	} {
+		t.Setenv(core.DBRepoAccessKeyEnv, value)
+		if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie); rec.Code != 200 {
+			t.Errorf("%q: %d %s", value, rec.Code, rec.Body)
+		}
+	}
+
+	// Malformed values
+	for _, value := range []string{
+		"",
+		testToken,
+		"github_pat_11ABCDEF",
+		"starkive-v1:5150",
+		"starkive-v2:5150:token_4242",
+		"starkive-v1:me/archive:token_4242",
+		"starkive-v1:-1:token_4242",
+		"starkive-v1:5150:token-4242",
+		"starkive-v1:5150:token_4242\r\nX: y",
+		"starkive-v1:5150:token_4242 extra", // Spaces inside the value aren't removed
+	} {
+		t.Setenv(core.DBRepoAccessKeyEnv, value)
+		for _, rec := range []*httptest.ResponseRecorder{
+			call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie),
+			call(api.HandleLoginSession, "POST", "/api/login-session", "", ""),
+		} {
+			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "missing or malformed") {
+				t.Errorf("%q: %d %s", value, rec.Code, rec.Body)
+			}
+		}
+	}
+
+	// If the token can't see the repository (the token doesn't select it), it reports 409 and doesn't guess the repository
+	gh = setup(t, sampleStarItems, sampleStarLists)
+	gh.repoMissing = true
+	if _, err := core.LoadConfig(); !errors.Is(err, core.ErrDBRepoNotFound) {
+		t.Errorf("repository not visible: %v", err)
+	}
+}
+
+// Tests that the server writes nothing to a repository that isn't a starkive repository
+// (a foreign repository without the marker, or an empty repository not prepared yet).
+// Reading the config, the scheduled sync, Sync now, adding directly and turning off auto sync must all give 409.
+// There must be no commits and no requests to turn the workflow on or off.
+//
+// NOTE: The test uses a live session.
+// It checks that a session made before the token's repository selection changed can't write to the new repository.
+func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(gh *fakeGitHub)
+		want    error
+	}{
+		{"another repository", func(gh *fakeGitHub) { gh.files = map[string]string{"README.md": "# my project\n"} }, core.ErrDBRepoNotStarkive},
+		{"empty repository", func(gh *fakeGitHub) { gh.files = map[string]string{}; gh.repoEmpty = true }, core.ErrDBRepoNotSetUp},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gh := setupWithoutGitHubApp(t, "", "")
+			gh.starred = []string{"a/one"}
+			c.prepare(gh)
+			// A live session. This repository has no App settings, so sign-in isn't possible. The session cookie is made directly, signed with the server token
+			cookie := strings.SplitN(core.NewSessionCookie(&core.Config{DBRepoAccessToken: testToken}, time.Now()), ";", 2)[0]
+
+			if _, err := core.LoadConfig(); !errors.Is(err, c.want) {
+				t.Errorf("config: %v", err)
+			}
+			if rec := callScheduledSync(); rec.Code != http.StatusConflict {
+				t.Errorf("scheduled sync: %d %s", rec.Code, rec.Body)
+			}
+			if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); rec.Code != http.StatusConflict {
+				t.Errorf("sync now: %d %s", rec.Code, rec.Body)
+			}
+			if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"a/one"}`, cookie); rec.Code != http.StatusConflict {
+				t.Errorf("add: %d %s", rec.Code, rec.Body)
+			}
+			if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", `{"enabled":false}`, cookie); rec.Code != http.StatusConflict {
+				t.Errorf("turn off auto sync: %d %s", rec.Code, rec.Body)
+			}
+			gh.mu.Lock()
+			defer gh.mu.Unlock()
+			if len(gh.commits) != 0 || gh.workflowToggles != 0 {
+				t.Errorf("wrote to the repository: commits %q, workflow toggles %d", gh.commits, gh.workflowToggles)
+			}
+		})
+	}
+}
+
+// Tests that when GitHub refuses the server token (401), the browser gets 502 and the session cookie is left alone.
+//
+// NOTE: The browser treats a 401 from our API as "session expired" and signs out.
+// If GitHub's 401 were passed through, a token problem would look like a sign-out.
+// So a GitHub failure is always 502, whatever its status code.
+func TestGitHubRejectingTheTokenIsNotSignOut(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	gh.mu.Lock()
+	gh.tokenRejected = true
+	gh.mu.Unlock()
+	// The session is live but GitHub refuses the token. It must be 502, with no `Set-Cookie` that deletes the session cookie
+	rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "GitHub 401: Bad credentials") || len(rec.Header().Values("Set-Cookie")) != 0 {
+		t.Errorf("token rejected: %d %s %q", rec.Code, rec.Body, rec.Header().Values("Set-Cookie"))
+	}
+}
+
+// Tests the session and same-site checks.
+// A request without a session cookie gets 401. After sign-in, the sign-in status has the DB repository name.
+// A write request from another site (`Origin`) gets 403
+func TestRequiresSessionAndSameOrigin(t *testing.T) {
+	setup(t, sampleStarItems, sampleStarLists)
+	if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", ""); rec.Code != 401 {
+		t.Errorf("no cookie: got %d", rec.Code)
+	}
+	cookie := login(t)
+	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); !strings.Contains(rec.Body.String(), `"repo":"me/archive"`) {
+		t.Errorf("session: %d %s", rec.Code, rec.Body)
+	}
+	req := httptest.NewRequest("DELETE", "http://example.test/api/archive-star-items?id=1", nil)
+	req.Header.Set("Origin", "https://evil.test")
+	req.Header.Set("Cookie", cookie)
+	rec := httptest.NewRecorder()
+	api.HandleArchiveStarItems(rec, req)
+	if rec.Code != 403 {
+		t.Errorf("cross-origin: got %d", rec.Code)
+	}
+}
+
+// Tests that the three archive file GETs (star items, star lists, snapshots) return the raw file, or `[]` if there is no file.
+// It is personal data, so all must have `Cache-Control: no-store` and a JSON `Content-Type`.
+// If the browser accepts gzip, the response is compressed.
+func TestArchiveFilesGetReturnsFile(t *testing.T) {
+	setup(t, sampleStarItems, "")
+	cookie := login(t)
+	for _, c := range []struct {
+		handler http.HandlerFunc
+		path    string
+		want    string
+	}{
+		{api.HandleArchiveStarItems, "/api/archive-star-items", sampleStarItems},
+		{api.HandleArchiveStarLists, "/api/archive-star-lists", "[]"},
+		{api.HandleArchiveRepoMeta, "/api/archive-repo-meta", "[]"},
+	} {
+		rec := call(c.handler, "GET", c.path, "", cookie)
+		if rec.Code != 200 || rec.Body.String() != c.want || rec.Header().Get("Cache-Control") != "no-store" || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+			t.Errorf("%s: %d %q %v", c.path, rec.Code, rec.Body, rec.Header())
+		}
+	}
+
+	// If the browser says it accepts gzip, the response is compressed, and it equals the original when decompressed. With `q=0` (not accepted), it isn't compressed
+	for _, c := range []struct {
+		acceptEncoding string
+		wantGzip       bool
+	}{
+		{"gzip, deflate, br, zstd", true},
+		{"br;q=1.0, GZIP;q=0.5", true},
+		{"gzip;q=0", false},
+		{"deflate, br", false},
+	} {
+		req := httptest.NewRequest("GET", "http://example.test/api/archive-star-items", nil)
+		req.Header.Set("Cookie", cookie)
+		req.Header.Set("Accept-Encoding", c.acceptEncoding)
+		rec := httptest.NewRecorder()
+		api.HandleArchiveStarItems(rec, req)
+		body := rec.Body.String()
+		if c.wantGzip {
+			zr, err := gzip.NewReader(rec.Body)
+			if err != nil {
+				t.Fatalf("%q: not gzip: %v", c.acceptEncoding, err)
+			}
+			raw, _ := io.ReadAll(zr)
+			body = string(raw)
+		}
+		gotGzip := rec.Header().Get("Content-Encoding") == "gzip"
+		if rec.Code != 200 || gotGzip != c.wantGzip || body != sampleStarItems || rec.Header().Get("Vary") != "Accept-Encoding" {
+			t.Errorf("%q: %d gzip=%v %v %q", c.acceptEncoding, rec.Code, gotGzip, rec.Header(), body)
+		}
+	}
+}
+
+// Tests adding a repository directly (`repo_full_name_or_url` in `POST /api/archive-star-items`).
+//   - It also accepts a GitHub address (including a trailing `/tree/...`).
+//     It puts the repository in the chosen star list and adds it at the top of the archive
+//   - Already there: 409. A missing star list: 400. Path tricks (`../user`): 400. A repository not on GitHub: 404
+func TestStarItemsAdd(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+
+	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"https://github.com/torvalds/linux/tree/master","star_list_id":200}`, cookie)
+	var added core.StarItem
+	json.Unmarshal(rec.Body.Bytes(), &added)
+	if rec.Code != 200 || added.Name != "torvalds/linux" || len(added.StarListIDs) != 1 || added.StarListIDs[0] != 200 {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	firstLine := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")[1]
+	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_linux","name":"torvalds/linux","note":"","star_list_ids":[200],`) {
+		t.Errorf("new entry should be first: %s", firstLine)
+	}
+
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"repo_full_name_or_url":"torvalds/linux"}`, 409},                    // Already there
+		{`{"repo_full_name_or_url":"torvalds/linux","star_list_id":999}`, 400}, // Missing star list
+		{`{"repo_full_name_or_url":"../user"}`, 400},                           // Path trick
+		{`{"repo_full_name_or_url":"nobody/missing-repo"}`, 404},               // Not on GitHub
+	}
+	for _, c := range cases {
+		if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", c.body, cookie); rec.Code != c.want {
+			t.Errorf("%s: got %d %s, want %d", c.body, rec.Code, rec.Body, c.want)
+		}
+	}
+}
+
+// Tests editing an item's note and star lists, and deleting an item.
+//   - Star list IDs are saved sorted by ID. `<` and Korean text in the note are saved as is
+//   - Editing a missing item gives 404
+//   - The commit subject says what was done (star list change, delete)
+func TestStarItemsPatchAndDelete(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+
+	// Star lists are sorted by ID (200, 100 -> 100, 200). `<` and Korean text in the note are saved as is
+	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"메모 <중요>","star_list_ids":[200,100]}`, cookie)
+	if rec.Code != 200 {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
+	}
+	if line := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")[2]; !strings.Contains(line, `"note":"메모 <중요>","star_list_ids":[100,200]`) {
+		t.Errorf("patched line: %s", line)
+	}
+	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=999", `{"note":"x"}`, cookie); rec.Code != 404 {
+		t.Errorf("missing id: got %d", rec.Code)
+	}
+	if rec := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id=1", "", cookie); rec.Code != 200 || strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":1,`) {
+		t.Errorf("delete: %d %s", rec.Code, gh.readFile(core.StarItemsDBPath))
+	}
+	want := []string{"user(star-items): change star lists of b/two", "user(star-items): remove a/one"}
+	if strings.Join(gh.commits, "|") != strings.Join(want, "|") {
+		t.Errorf("commits = %v, want %v", gh.commits, want)
+	}
+}
+
+// Tests that both changes remain when a commit from another device cuts in during a save.
+// The server applies the change again from the start on top of the new commit
+func TestUpdateRetriesOnConflict(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	// Another device deleted a/one right before the note-saving commit
+	gh.interfereOnce = func(files map[string]string) {
+		files[core.StarItemsDBPath] = strings.Replace(files[core.StarItemsDBPath], strings.Split(sampleStarItems, "\n")[1]+"\n", "", 1)
+	}
+	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"after conflict"}`, cookie)
+	content := gh.readFile(core.StarItemsDBPath)
+	if rec.Code != 200 || !strings.Contains(content, "after conflict") || strings.Contains(content, `"id":1,`) {
+		t.Errorf("both changes should survive: %d\n%s", rec.Code, content)
+	}
+}
+
+// Tests creating, renaming and deleting a star list.
+//   - The ID is the creation time (milliseconds), and it grows in creation order
+//   - A name that differs only in case is the same name, so it gives 409
+//   - Deleting also removes the star list from items. Deleting the definition and cleaning up the items is one commit
+func TestStarLists(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+
+	before := time.Now().UnixMilli()
+	var a core.StarList
+	var b core.StarList
+	json.Unmarshal(call(api.HandleArchiveStarLists, "POST", "/api/archive-star-lists", `{"name":"Rust","description":""}`, cookie).Body.Bytes(), &a)
+	json.Unmarshal(call(api.HandleArchiveStarLists, "POST", "/api/archive-star-lists", `{"name":"Go","description":""}`, cookie).Body.Bytes(), &b)
+	if a.ID < before || b.ID <= a.ID {
+		t.Errorf("ids should be creation time and increasing: %d, %d (before %d)", a.ID, b.ID, before)
+	}
+	if rec := call(api.HandleArchiveStarLists, "POST", "/api/archive-star-lists", `{"name":"graphics"}`, cookie); rec.Code != 409 {
+		t.Errorf("duplicate name: got %d", rec.Code)
+	}
+	if rec := call(api.HandleArchiveStarLists, "PATCH", fmt.Sprintf("/api/archive-star-lists?id=%d", a.ID), `{"name":"Rustlang","description":"x"}`, cookie); rec.Code != 200 {
+		t.Errorf("rename: %d %s", rec.Code, rec.Body)
+	}
+
+	// Delete: removes the star list and removes it from items. Clears the record to count commits from here
+	gh.commits = nil
+	if rec := call(api.HandleArchiveStarLists, "DELETE", "/api/archive-star-lists?id=100", "", cookie); rec.Code != 200 {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(gh.readFile(core.StarItemsDBPath), "[100]") || strings.Contains(gh.readFile(core.StarListsDBPath), `"id":100,`) {
+		t.Errorf("star list 100 should be gone everywhere")
+	}
+	// Deleting the star list and cleaning up the items is one commit
+	if strings.Join(gh.commits, "|") != "user(star-lists): delete Graphics\n\nRemoved from 1 repo" {
+		t.Errorf("delete commits: %q", gh.commits)
+	}
+}
+
+// Tests the current repository info query (`POST /api/github-repo-meta`).
+// Only repositories that were found go in `repos`.
+// IDs that GitHub says it can't find go in `missing`, and IDs that aren't repositories are left out.
+// A malformed ID gives 400
+func TestRepoMetaDropsInaccessible(t *testing.T) {
+	gh := setup(t, "", "")
+	cookie := login(t)
+	gh.gone = map[string]bool{"R_gone": true}
+	rec := call(api.HandleGitHubRepoMeta, "POST", "/api/github-repo-meta", `{"ids":["R_1","R_gone","R_3"]}`, cookie)
+	if strings.TrimSpace(rec.Body.String()) != `{"missing":["R_gone"],"repos":[{"id":"R_1","nameWithOwner":"a/one","stargazerCount":42}]}` {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+	if rec := call(api.HandleGitHubRepoMeta, "POST", "/api/github-repo-meta", `{"ids":["bad id!"]}`, cookie); rec.Code != 400 {
+		t.Errorf("bad id: got %d", rec.Code)
+	}
+}
+
+// Tests the sync (`core.Sync`).
+//   - New Stars go at the top of the archive in GitHub's order. Existing items (including notes) aren't touched
+//   - Metadata snapshots are made in archive order
+//   - There are two commits, one for adding and one for refreshing snapshots. The add commit's body lists the added repositories
+//   - Running it again changes nothing, so there is no commit
+func TestSync(t *testing.T) {
+	gh := setup(t, "", "")
+	gh.starred = []string{"new/first", "new/second", "new/third", "old/archived"}
+	gh.files[core.StarItemsDBPath] = fmt.Sprintf("["+"\n"+
+		`{"id":%d,"node_id":"R_%d","name":"old/archived","note":"memo","star_list_ids":[],"starred_at":"x"}`+
+		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
+
+	cfg := newTestConfig()
+	result, err := core.Sync(cfg, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != (core.SyncResult{Starred: 4, Added: 3, MetaChecked: 4, Unavailable: 0}) {
+		t.Errorf("result = %+v", result)
+	}
+	lines := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")
+	// Three new Stars go at the top in GitHub's order. Existing items (including notes) stay as they are
+	if len(lines) != 7 || !strings.Contains(lines[1], `"name":"new/first"`) || !strings.Contains(lines[4], `"note":"memo"`) {
+		t.Errorf("archive:"+"\n"+"%s", strings.Join(lines, "\n"))
+	}
+	// Four snapshots are made, also in archive order
+	metas := readMeta(t, gh)
+	if len(metas) != 4 || metas[0].Name != "new/first" || metas[0].Description != "about new/first" || metas[0].License != "MIT" || metas[0].UpdatedAt == "" {
+		t.Errorf("meta = %+v", metas)
+	}
+
+	// Commit message: the subject is `<who>(<file>): <summary>`, with a list in the body for several items
+	want := []string{
+		"sync(star-items): archive 3 stars\n\n- new/first\n- new/second\n- new/third",
+		"sync(repo-meta): refresh 4 repos, 0 unavailable",
+	}
+	if strings.Join(gh.commits, "|") != strings.Join(want, "|") {
+		t.Errorf("commits = %q", gh.commits)
+	}
+
+	// Running it again has nothing to add and no changed metadata, so no commit is made
+	if result, err = core.Sync(cfg, time.Minute); err != nil || result != (core.SyncResult{Starred: 4, Added: 0, MetaChecked: 4, Unavailable: 0}) {
+		t.Errorf("second run: %+v %v", result, err)
+	}
+	if len(gh.commits) != 2 {
+		t.Errorf("second run should not commit: %q", gh.commits[2:])
+	}
+}
+
+// Tests snapshots of repositories that disappeared.
+//   - If the query itself fails (an outage), nothing is recorded as gone
+//   - If GitHub says it can't find a repository, the snapshot content stays and only the first time it was seen gone (`unavailable_since`) is added.
+//     The next run keeps that time
+//   - If it shows up again, the mark is removed
+//   - With no time budget, nothing is asked
+func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
+	gh := setup(t, "", "")
+	gh.starred = []string{"a/kept", "a/vanishing"}
+	cfg := newTestConfig()
+	if _, err := core.Sync(cfg, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
+
+	// If the query fails because of a GitHub outage, nothing is recorded as "gone"
+	gh.graphqlDown = true
+	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || result.Unavailable != 0 || result.Checked != 0 {
+		t.Errorf("outage: %+v %v", result, err)
+	}
+	gh.graphqlDown = false
+
+	// When deleted, the snapshot (description, etc.) stays and only the time is added
+	gh.gone = map[string]bool{vanishingID: true}
+	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || result.Unavailable != 1 {
+		t.Errorf("vanished: %+v %v", result, err)
+	}
+	m := readMeta(t, gh)[1]
+	if m.Name != "a/vanishing" || m.Description != "about a/vanishing" || m.UnavailableSince == "" {
+		t.Errorf("vanished snapshot = %+v", m)
+	}
+	if last := gh.commits[len(gh.commits)-1]; last != "sync(repo-meta): refresh 2 repos, 1 unavailable\n\nUnavailable:\n- a/vanishing" {
+		t.Errorf("vanish commit = %q", last)
+	}
+	since := m.UnavailableSince
+
+	// The next run keeps the time it first disappeared
+	core.RefreshMeta(cfg, time.Minute)
+	if got := readMeta(t, gh)[1].UnavailableSince; got != since {
+		t.Errorf("unavailable_since changed: %s -> %s", since, got)
+	}
+
+	// If it shows up again (for example, private then public), the mark is removed
+	gh.gone = nil
+	core.RefreshMeta(cfg, time.Minute)
+	if got := readMeta(t, gh)[1]; got.UnavailableSince != "" {
+		t.Errorf("revived snapshot = %+v", got)
+	}
+	if last := gh.commits[len(gh.commits)-1]; !strings.HasSuffix(last, "Available again:\n- a/vanishing") {
+		t.Errorf("revive commit = %q", last)
+	}
+
+	// With no time, it neither asks nor changes anything
+	if result, err := core.RefreshMeta(cfg, 0); err != nil || result.Checked != 0 {
+		t.Errorf("no budget: %+v %v", result, err)
+	}
+}
+
+// Makes a server config that points to the fake GitHub's DB repository (`me/archive`, branch `main`).
+// Use it to call functions like `core.Sync` directly, without the environment variables and the repository check.
+func newTestConfig() *core.Config {
+	return &core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
+		GitHubAPI: os.Getenv("STARKIVE_GH_API_URL")}
+}
+
+// Reads and decodes the fake repository's metadata snapshot file (`db/repo-meta.json`). Stops the test if it can't be read.
+//
+// Args:
+//   - `gh`: The fake GitHub
+func readMeta(t *testing.T, gh *fakeGitHub) []core.RepoMeta {
+	var metas []core.RepoMeta
+	if err := json.Unmarshal([]byte(gh.readFile(core.RepoMetaDBPath)), &metas); err != nil {
+		t.Fatalf("repo-meta.json: %v", err)
+	}
+	return metas
+}
+
+// Makes distinct fake Star names: `<prefix>/repo-0000`, `<prefix>/repo-0001`, ...
+//
+// Args:
+//   - `prefix`: Name to use as the repository owner
+//   - `n`: How many
+func makeManyStars(prefix string, n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("%s/repo-%04d", prefix, i)
+	}
+	return names
+}
+
+// Fetches all Star pages the way the browser does.
+// It gets the first page with `GET /api/github-stars` to learn the last page number, then gets the other pages and joins them.
+//
+// Args:
+//   - `cookie`: Session cookie
+//
+// Returns:
+//   - The Stars of all pages, in page order
+func fetchAllStarred(t *testing.T, cookie string) []core.StarredRepo {
+	var first struct {
+		StarredRepos []core.StarredRepo `json:"starred_repos"`
+		LastPage     int                `json:"last_page"`
+	}
+	rec := call(api.HandleGitHubStars, "GET", "/api/github-stars?page=1", "", cookie)
+	json.Unmarshal(rec.Body.Bytes(), &first)
+	all := first.StarredRepos
+	for page := 2; page <= first.LastPage; page++ {
+		var next struct {
+			StarredRepos []core.StarredRepo `json:"starred_repos"`
+		}
+		json.Unmarshal(call(api.HandleGitHubStars, "GET", fmt.Sprintf("/api/github-stars?page=%d", page), "", cookie).Body.Bytes(), &next)
+		all = append(all, next.StarredRepos...)
+	}
+	return all
+}
+
+// Tests the Stars page API (`GET /api/github-stars`).
+// A page has 100 Stars, and the last page number (`last_page`) is given, so all 2,500 can be fetched over all pages.
+// A wrong page number such as 0 gives 400
+func TestGitHubStarsListsAllPages(t *testing.T) {
+	gh := setup(t, sampleStarItems, "")
+	gh.starred = makeManyStars("big", 2500)
+	cookie := login(t)
+
+	var first struct {
+		StarredRepos []core.StarredRepo `json:"starred_repos"`
+		LastPage     int                `json:"last_page"`
+	}
+	json.Unmarshal(call(api.HandleGitHubStars, "GET", "/api/github-stars?page=1", "", cookie).Body.Bytes(), &first)
+	if len(first.StarredRepos) != 100 || first.LastPage != 25 || first.StarredRepos[0].Repo.StargazersCount != 7 {
+		t.Fatalf("page 1: %d stars, last_page %d", len(first.StarredRepos), first.LastPage)
+	}
+	if all := fetchAllStarred(t, cookie); len(all) != 2500 {
+		t.Errorf("all pages: %d stars, want 2500", len(all))
+	}
+	if rec := call(api.HandleGitHubStars, "GET", "/api/github-stars?page=0", "", cookie); rec.Code != 400 {
+		t.Errorf("page 0: got %d", rec.Code)
+	}
+}
+
+// Tests importing many Stars.
+//   - The browser sends only the IDs of the chosen repositories. Even 2,500 is one request and one commit.
+//     IDs that aren't my Stars are skipped
+//   - The list in the commit body has at most 20 entries, and the rest is shortened to a count
+//   - Sending the same request again changes nothing and makes no commit (idempotent)
+//   - Items go at the top in GitHub's order, and the starred time is GitHub's value
+//   - An empty list, or a body that mixes the two request shapes, gives 400
+func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = makeManyStars("big", 2500)
+	cookie := login(t)
+	all := fetchAllStarred(t, cookie)
+
+	// The browser sends only the IDs of the chosen repositories. The server reads the repository info from GitHub itself
+	post := func(ids []int64) map[string]int {
+		body, _ := json.Marshal(map[string]any{"starred_repo_ids": ids, "star_list_id": 200})
+		rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
+		var out map[string]int
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		if rec.Code != 200 {
+			t.Fatalf("import: %d %s", rec.Code, rec.Body)
+		}
+		return out
+	}
+	ids := []int64{}
+	for _, s := range all {
+		ids = append(ids, s.Repo.ID)
+	}
+
+	// Even 2500 is one request and one commit. IDs that aren't my Stars (1, 999) are skipped
+	if r := post(append(ids, 1, 999)); r["added"] != 2500 || r["skipped"] != 2 {
+		t.Errorf("import: %v", r)
+	}
+	if len(gh.commits) != 1 {
+		t.Errorf("one commit per import: %q", gh.commits)
+	}
+	// The body list has at most 20 entries, and the rest is shortened to a count
+	lines := strings.Split(gh.commits[0], "\n")
+	if lines[0] != "user(star-items): archive 2500 stars" || len(lines) != 23 || lines[22] != "… and 2480 more" {
+		t.Errorf("import commit: %d lines, first %q, last %q", len(lines), lines[0], lines[len(lines)-1])
+	}
+
+	// Sending the same request again changes nothing (and makes no commit)
+	if r := post(ids[:1000]); r["added"] != 0 || len(gh.commits) != 1 {
+		t.Errorf("re-import: %v, commits %d", r, len(gh.commits))
+	}
+
+	var archive []core.StarItem
+	json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &archive)
+	seen := map[int64]bool{}
+	for _, s := range archive {
+		if seen[s.ID] {
+			t.Fatalf("duplicate id %d in archive", s.ID)
+		}
+		seen[s.ID] = true
+	}
+	// Items go at the top in GitHub's order, and the starred time is GitHub's value
+	if len(archive) != 2502 || archive[0].Name != all[0].Repo.FullName || archive[0].StarredAt != "2026-10-01T00:00:00Z" || archive[0].StarListIDs[0] != 200 {
+		t.Errorf("archive has %d entries (want 2500 + 2 existing), first %+v", len(archive), archive[0])
+	}
+
+	// Bad input: empty, or both shapes mixed
+	for _, body := range []string{`{"starred_repo_ids":[]}`, `{"repo_full_name_or_url":"a/b","starred_repo_ids":[1]}`} {
+		if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", body, cookie); rec.Code != 400 {
+			t.Errorf("%s: got %d", body, rec.Code)
+		}
+	}
+}
+
+// Tests that Import doesn't add a Star again when the sync archived it first while the dialog was open.
+// Duplicates are checked against the archive at save time, not the browser's list
+func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
+	gh := setup(t, sampleStarItems, "")
+	gh.starred = makeManyStars("race", 3)
+	cookie := login(t)
+	all := fetchAllStarred(t, cookie)
+
+	// While the page was open, the daily sync archived the first repository first
+	core.ArchiveStarredRepos(&core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
+		GitHubAPI: os.Getenv("STARKIVE_GH_API_URL")}, all[:1], []int64{}, "sync(star-items)")
+
+	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{all[0].Repo.ID, all[1].Repo.ID, all[2].Repo.ID}})
+	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
+	if !strings.Contains(rec.Body.String(), `"added":2`) || strings.Count(gh.readFile(core.StarItemsDBPath), "race/repo-0000") != 1 {
+		t.Errorf("got %s\n%s", rec.Body, gh.readFile(core.StarItemsDBPath))
+	}
+}
+
+// Tests that Import and the sync map GitHub star list membership to archive star lists with the same rules.
+//   - A GitHub star list name that differs only in leading or trailing spaces, case, or Korean normalization (NFD) is the same archive star list
+//   - A name not in the archive (Rust) becomes a new star list. The new star list and the new items go in one commit
+//   - Import adds both the star list chosen in the dialog and the GitHub membership. The sync gives the same result
+//   - Star lists of items already in the archive aren't changed
+func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
+	// Archive star lists: Graphics (100) and a Korean name (200).
+	// The GitHub star lists with the same names are written with different spaces, case and Korean normalization
+	nfdKorean := "\u1112\u1161\u11ab\u1100\u1173\u11af" // The Korean name split into jamo (NFD). A name typed on macOS can arrive like this
+	gh := setup(t, sampleStarItems, "["+"\n"+`{"id":100,"name":"Graphics","description":""},`+"\n"+`{"id":200,"name":"한글","description":""}`+"\n"+"]"+"\n")
+	gh.starred = []string{"a/one", "new/imported", "new/synced", "new/plain"}
+	gh.githubStarLists = map[string][]string{
+		" graphics ": {"a/one", "new/imported", "new/synced"}, // a/one is already in the archive
+		nfdKorean:    {"new/imported", "new/synced"},
+		"Rust":       {"new/imported", "new/synced"}, // A star list not in the archive -> created
+	}
+	cookie := login(t)
+
+	// Import: new/imported is chosen, with Graphics (100) also chosen in the dialog
+	var page struct {
+		StarredRepos    []core.StarredRepo  `json:"starred_repos"`
+		GitHubStarLists map[string][]string `json:"github_star_lists"`
+	}
+	json.Unmarshal(call(api.HandleGitHubStars, "GET", "/api/github-stars?page=1", "", cookie).Body.Bytes(), &page)
+	if got := page.GitHubStarLists[fmt.Sprint(makeRepoID("new/imported"))]; len(got) != 3 {
+		t.Errorf("github_star_lists for the dialog = %v", page.GitHubStarLists)
+	}
+	var imported core.StarredRepo
+	for _, s := range page.StarredRepos {
+		if s.Repo.FullName == "new/imported" {
+			imported = s
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{imported.Repo.ID}, "star_list_id": 100})
+	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie); rec.Code != 200 {
+		t.Fatalf("import: %d %s", rec.Code, rec.Body)
+	}
+	// The new star list and the new item go in one commit
+	if strings.Join(gh.commits, "|") != "user(star-items): archive 1 star\n\n- new/imported\n\nNew star lists:\n- Rust" {
+		t.Errorf("import commits = %q", gh.commits)
+	}
+
+	// Sync: adds the other new Stars. For the same GitHub star list, they must go into the same star list as Import
+	if _, err := core.Sync(newTestConfig(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var starLists []core.StarList
+	json.Unmarshal([]byte(gh.readFile(core.StarListsDBPath)), &starLists)
+	if len(starLists) != 3 || starLists[2].Name != "Rust" {
+		t.Fatalf("star lists = %+v", starLists)
+	}
+	rust := starLists[2].ID
+	var archive []core.StarItem
+	json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &archive)
+	byName := map[string][]int64{}
+	for _, s := range archive {
+		byName[s.Name] = s.StarListIDs
+	}
+	want := map[string][]int64{
+		"new/imported": {100, 200, rust}, // Graphics (dialog + GitHub), the Korean name, Rust
+		"new/synced":   {100, 200, rust}, // The sync gives the same result
+		"new/plain":    {},               // Not in a GitHub star list
+		"a/one":        {100},            // An existing item stays as it is
+	}
+	for name, ids := range want {
+		if !slices.Equal(byName[name], ids) {
+			t.Errorf("%s star lists = %v, want %v", name, byName[name], ids)
+		}
+	}
+}
+
+// Tests the case where GitHub applied the branch move but the response was lost,
+// and one more commit from another device landed before the check.
+// The branch contains our commit, so adding directly, Import and deleting a star list must all succeed.
+// The same change must not be applied twice (three commits).
+func TestCommitAppliedButReplyLostWhileAnotherCommitLands(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"new/one"}
+	cookie := login(t)
+	// Every branch move is applied and then the response is lost. Right after, one commit from another device lands
+	gh.refLostReply, gh.otherAfterLostReply = true, true
+
+	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, cookie); rec.Code != 200 {
+		t.Errorf("add: %d %s", rec.Code, rec.Body)
+	}
+	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{makeRepoID("new/one")}})
+	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"added":1`) {
+		t.Errorf("import: %d %s", rec.Code, rec.Body)
+	}
+	if rec := call(api.HandleArchiveStarLists, "DELETE", "/api/archive-star-lists?id=100", "", cookie); rec.Code != 200 {
+		t.Errorf("delete star list: %d %s", rec.Code, rec.Body)
+	}
+	if len(gh.commits) != 3 {
+		t.Errorf("each change must be committed once: %q", gh.commits)
+	}
+}
+
+// Tests the note length limit (`core.MaxNoteLength`).
+// It counts characters, not bytes. Going over gives 400 and nothing is saved.
+// Leading and trailing spaces are removed before counting
+func TestNoteLengthLimit(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	patch := func(note string) int {
+		body, _ := json.Marshal(map[string]string{"note": note})
+		return call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", string(body), cookie).Code
+	}
+	// Counts characters. A Korean character is 3 bytes in UTF-8, so counting bytes would go over even at 2,000 characters
+	if code := patch(strings.Repeat("메", core.MaxNoteLength)); code != 200 {
+		t.Errorf("note at the limit: %d", code)
+	}
+	if code := patch(strings.Repeat("메", core.MaxNoteLength+1)); code != 400 || len(gh.commits) != 1 {
+		t.Errorf("note over the limit: %d, commits %d", code, len(gh.commits))
+	}
+	// Leading and trailing spaces are removed before counting
+	if code := patch("  " + strings.Repeat("a", core.MaxNoteLength) + "  "); code != 200 {
+		t.Errorf("note with surrounding spaces: %d", code)
+	}
+}
+
+// Tests that the two sync steps (adding new Stars, refreshing snapshots) don't block each other.
+// If adding fails, the snapshot refresh still runs to the end and commits.
+// The error has the name of the failed step. When the outage ends, the next run fills in the missing Stars
+func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"new/one"}
+	gh.githubStarListsDown = true // Adding new Stars needs the GitHub star lists, and only that query fails
+
+	// Adding new Stars fails, but the unrelated snapshot refresh runs to the end and commits. The error comes back with the step name
+	result, err := core.Sync(newTestConfig(), time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
+		t.Errorf("sync error = %v", err)
+	}
+	if result.MetaChecked == 0 || len(gh.commits) != 1 || !strings.HasPrefix(gh.commits[0], "sync(repo-meta): ") {
+		t.Errorf("meta refresh must still run: %+v, commits %q", result, gh.commits)
+	}
+
+	// When the outage ends, the next run fills in the missing Stars
+	gh.githubStarListsDown = false
+	if result, err := core.Sync(newTestConfig(), time.Minute); err != nil || result.Added != 1 {
+		t.Errorf("next sync: %+v %v", result, err)
+	}
+}
+
+// Tests edge cases of Import.
+//   - If the branch move was applied but only the response was lost, it still succeeds and the added count is correct
+//   - A request that chooses a missing star list gives 400, even if all chosen repositories are already there
+//   - Sending the same request again changes nothing
+func TestImportChecksStarListEvenIfNothingIsNew(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"new/one"}
+	cookie := login(t)
+	ids := []int64{makeRepoID("new/one")}
+	post := func(starListID int64) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"starred_repo_ids": ids, "star_list_id": starListID})
+		return call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
+	}
+	// If GitHub applied the commit but only the response was lost, it still succeeds and the added count is correct
+	gh.refLostReply = true
+	rec := post(100)
+	gh.refLostReply = false
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"added":1`) || len(gh.commits) != 1 {
+		t.Fatalf("import with lost reply: %d %s, commits %q", rec.Code, rec.Body, gh.commits)
+	}
+	// A bad request that chooses a missing star list gives 400, even if everything chosen is already there
+	if rec := post(999); rec.Code != 400 || len(gh.commits) != 1 {
+		t.Errorf("unknown star list: %d %s, commits %q", rec.Code, rec.Body, gh.commits)
+	}
+	// Sending it again changes nothing
+	if rec := post(100); rec.Code != 200 || len(gh.commits) != 1 {
+		t.Errorf("re-import: %d %s, commits %q", rec.Code, rec.Body, gh.commits)
+	}
+}
+
+// Tests what happens when the GitHub star lists can't be read.
+// The list of Stars in the Import dialog is only for display, so it is still returned, with `github_star_lists_failed` added.
+// Adding to the archive needs the membership, so it fails and writes nothing
+func TestGitHubStarsWithoutGitHubStarLists(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"new/one"}
+	gh.githubStarListsDown = true // Only the GitHub star list query fails. Other GraphQL requests (DB repository state, etc.) work
+	cookie := login(t)
+
+	// The list of Stars is for the dialog display, so it is returned as is with only the failure flag added
+	rec := call(api.HandleGitHubStars, "GET", "/api/github-stars?page=1", "", cookie)
+	var page map[string]json.RawMessage
+	json.Unmarshal(rec.Body.Bytes(), &page)
+	if _, ok := page["github_star_lists"]; rec.Code != 200 || ok || string(page["github_star_lists_failed"]) != "true" || !strings.Contains(string(page["starred_repos"]), "new/one") {
+		t.Errorf("page 1: %d %s", rec.Code, rec.Body)
+	}
+
+	// Adding to the archive needs the star lists, so it fails and writes nothing
+	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{makeRepoID("new/one")}})
+	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie); rec.Code == 200 || len(gh.commits) != 0 {
+		t.Errorf("import without GitHub star lists: %d %s, commits %q", rec.Code, rec.Body, gh.commits)
+	}
+}
+
+// Tests the case where another device deleted a star list right before a save that puts an item in it.
+// The archive read again doesn't have that star list, so it gives 400,
+// and no ID pointing to a missing star list is saved
+func TestStarListDeletedWhileAssigning(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	// Right before the save that puts b/two in Graphics (100), another device deleted Graphics
+	gh.interfereOnce = func(files map[string]string) {
+		files[core.StarListsDBPath] = strings.Replace(files[core.StarListsDBPath], `{"id":100,"name":"Graphics","description":""},`+"\n", "", 1)
+	}
+	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"star_list_ids":[100]}`, cookie)
+	// The archive read again has no Graphics, so the save is refused, and no ID pointing to a missing star list is saved
+	if rec.Code != 400 || strings.Contains(gh.readFile(core.StarItemsDBPath), `"name":"b/two","note":"","star_list_ids":[100]`) {
+		t.Errorf("got %d %s\n%s", rec.Code, rec.Body, gh.readFile(core.StarItemsDBPath))
+	}
+}
+
+// Tests cleaning (`CleanStarListIDs`) and checking (`CheckStarListIDs`) the star list IDs saved on an item.
+// Cleaning drops missing IDs, removes duplicates and sorts by ID.
+// Checking refuses if even one ID is missing
+func TestCleanStarListIDs(t *testing.T) {
+	a := &core.Archive{StarLists: []core.StarList{{ID: 300}, {ID: 100}, {ID: 200}}}
+	// The missing ID (999) is dropped, duplicates become one, and the order is by ID (which is creation order)
+	if got := a.CleanStarListIDs([]int64{200, 999, 100, 200}); !slices.Equal(got, []int64{100, 200}) {
+		t.Errorf("got %v", got)
+	}
+	if _, err := a.CheckStarListIDs([]int64{100, 999}); err == nil {
+		t.Errorf("unknown id should be rejected")
+	}
+}
+
+// Tests when a save is retried. It retries only when the branch really moved.
+//   - A failed tree creation isn't a conflict, so there is no retry. It gives 502 right away (a GitHub failure)
+//   - If another device keeps committing first, it tries up to 5 times in all, then gives 409 "changed while saving"
+//   - If the branch didn't move but the move is refused (no branch, empty repository, etc.), it doesn't retry, whatever the status code.
+//     It returns GitHub's error as 502
+func TestUpdateRetriesOnlyWhenBranchMoved(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+
+	// A failed tree creation isn't a conflict, so it returns the error right away without a retry. A GitHub failure is 502
+	gh.treeStatus = http.StatusUnprocessableEntity
+	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"x"}`, cookie); rec.Code != http.StatusBadGateway || gh.treeCalls != 1 {
+		t.Errorf("tree failure: %d %s, tree calls %d", rec.Code, rec.Body, gh.treeCalls)
+	}
+
+	// If another device keeps committing first, it retries up to the limit, then reports 409
+	gh.treeStatus = 0
+	gh.treeCalls = 0
+	gh.interfereAll = true
+	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"y"}`, cookie)
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "changed while saving") || gh.treeCalls != 5 || len(gh.commits) != 0 {
+		t.Errorf("branch always moved: %d %s, tree calls %d, commits %q", rec.Code, rec.Body, gh.treeCalls, gh.commits)
+	}
+
+	// If the branch didn't move but the move is refused (no branch, empty repository, etc.), it isn't a conflict, whatever the status code.
+	// It doesn't retry and returns GitHub's error as 502. GitHub's 409 isn't read as our save conflict (409 "changed while saving")
+	gh.interfereAll = false
+	for _, c := range []fakeRefFailure{{http.StatusUnprocessableEntity, "Reference does not exist"}, {http.StatusConflict, "Git Repository is empty."}} {
+		gh.treeCalls = 0
+		gh.refStatus, gh.refMessage = c.status, c.message
+		rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"z"}`, cookie)
+		if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), fmt.Sprintf("GitHub %d: %s", c.status, c.message)) || gh.treeCalls != 1 {
+			t.Errorf("ref %d: %d %s, tree calls %d", c.status, rec.Code, rec.Body, gh.treeCalls)
+		}
+	}
+}
+
+// One branch move failure to test
+type fakeRefFailure struct {
+	status  int    // GitHub's response status code
+	message string // GitHub's message
+}
+
+// Tests that a save that doesn't touch a missing data file doesn't create that file.
+// A missing file counts as the same state as an empty list
+func TestUpdateSkipsUntouchedMissingFiles(t *testing.T) {
+	gh := setup(t, sampleStarItems, "") // There is no `star-lists.json` or `repo-meta.json`
+	cookie := login(t)
+	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"x"}`, cookie); rec.Code != 200 {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
+	}
+	// A missing file is the same state as an empty list, so if it wasn't touched, it isn't in the commit
+	for _, path := range []string{core.StarListsDBPath, core.RepoMetaDBPath} {
+		if _, ok := gh.files[path]; ok {
+			t.Errorf("%s was created by an unrelated change", path)
+		}
+	}
+}
+
+// Tests the snapshot of a repository that was already gone at the first check.
+// The only thing known is the name saved in the archive,
+// so the snapshot is made with that name and the time it was gone is recorded
+func TestSnapshotOfRepoVanishedBeforeFirstCheck(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.gone = map[string]bool{"R_2": true} // A repository already gone at the first check
+	if result, err := core.RefreshMeta(newTestConfig(), time.Minute); err != nil || result.Unavailable != 1 {
+		t.Fatalf("refresh: %+v %v", result, err)
+	}
+	m := readMeta(t, gh)[1]
+	if m.ID != 2 || m.Name != "b/two" || m.UnavailableSince == "" || m.UpdatedAt == "" {
+		t.Errorf("snapshot = %+v", m)
+	}
+}
