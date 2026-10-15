@@ -21,12 +21,9 @@ starkive isn't a smart star organizer with AI tags and semantic search. It's a q
 - **Save without starring.** Add any repository from the dashboard, or from any GitHub repository page with the **Add to starkive** bookmarklet. Nothing shows up on your public profile.
 - **Entries outlive the repository.** starkive keeps each repository's description, language, topics and license. When a repository is deleted or made private, its entry stays readable and is marked as unavailable, so you still know what it was. Renames are followed, and unstarring on GitHub doesn't remove anything.
 - **Yours, in your own repository.** The archive is plain JSON in a repository on your GitHub account (private by default), and every change is a commit, so you have the full history and can take it anywhere. Lists and notes are yours alone, and only your GitHub account can sign in.
-
-And the rest of what you'd expect:
-
-- **Bring your stars along.** Import the stars you already have, with their GitHub star lists, and let starkive pick up new stars automatically (every day by default).
-- **One place on every device.** A web dashboard you can open from your laptop or phone, with search, lists and notes.
 - **No server to run, no bill.** It runs on Vercel's free plan and GitHub, with no database to host or maintain.
+- **One place on every device.** A web dashboard you can open from your laptop or phone, with search, lists and notes.
+- **Bring your stars along.** Import the stars you already have, with their GitHub star lists, and let starkive pick up new stars automatically (every day by default).
 - **Read-only toward your stars.** starkive never stars or unstars anything. Its token can write only to your archive repository, and otherwise just reads your stars.
 
 ## Quickstart
@@ -34,7 +31,7 @@ And the rest of what you'd expect:
 ### Prerequisites
 
 - A GitHub account
-- A [Vercel](https://vercel.com) account connected to that GitHub account (the free plan is enough). Vercel creates the dashboard's code repository in your GitHub account, so sign up with GitHub or connect GitHub in Vercel first.
+- A [Vercel](https://vercel.com) account connected to your GitHub account (the free plan is enough)
 - [Git](https://git-scm.com/)
 - [Go](https://go.dev/dl/) 1.22 or later
 
