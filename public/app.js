@@ -470,6 +470,18 @@ function starListIdsOf(item) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Makes the progress indicator: three dots that rise in turn (`.spinner`).
+ * It is decoration, so screen readers skip it. The text next to it says what is going on.
+ *
+ * @returns {HTMLSpanElement}
+ */
+function spinner() {
+  const box = el('span', { className: 'spinner' }, el('i'), el('i'), el('i'));
+  box.setAttribute('aria-hidden', 'true');
+  return box;
+}
+
+/**
  * Makes a DOM element from a tag, properties and children.
  *
  * @param {string} tag Tag name
@@ -566,6 +578,8 @@ const openModals = new Set();
  * This way, selecting text in an input by dragging and releasing outside doesn't close it.
  * If `dialog` had the padding, a click on that padding would also count as a backdrop click (`ev.target === dialog`).
  * So the padding goes on the inner `panel`.
+ * The dialog closes at once, so the page takes focus and input right away.
+ * Only the element is removed a moment later, so the fade-out in `style.css` can play.
  */
 function openModal({ panel, className = '', onClose }) {
   panel.classList.add('dialog-panel'); // Padding goes here, not on `dialog` (so a click on the padding isn't a backdrop click)
@@ -574,7 +588,7 @@ function openModal({ panel, className = '', onClose }) {
     close: () => {
       if (!openModals.delete(modal)) return; // Already closed. Whatever the way, the code below runs only once
       dialog.close();
-      dialog.remove();
+      setTimeout(() => dialog.remove(), DIALOG_CLOSE_MS);
       onClose?.();
     },
   };
@@ -595,6 +609,8 @@ function openModal({ panel, className = '', onClose }) {
   dialog.showModal();
   return modal;
 }
+
+const DIALOG_CLOSE_MS = 200; // Time a closed dialog stays in the page before it is removed (milliseconds). Longer than the fade-out in `style.css`
 
 /** Closes all open dialogs. Called when the session closes. */
 function closeAllModals() {
@@ -629,6 +645,8 @@ function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm 
     form.onsubmit = async (ev) => {
       ev.preventDefault();
       confirm.disabled = true;
+      const indicator = spinner();
+      confirm.prepend(indicator); // Saving can take a second or two (a commit on GitHub), so show that it is working
       try {
         await onConfirm?.();
         confirmed = true;
@@ -638,6 +656,7 @@ function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm 
         error.textContent = err.message;
         error.hidden = false;
         confirm.disabled = false;
+        indicator.remove();
       }
     };
     // First focus: cancel for dangerous work, otherwise the first input (or the confirm button if there is none)
@@ -1818,16 +1837,18 @@ let statusTimer; // Timer that clears the status line on its own
  * Shows a message in the status line at the bottom of the page. Errors stay longer, so the user can read them.
  *
  * @param {string} message The text to show. An empty string hides the status line
- * @param {{ error?: boolean, sticky?: boolean }} [options] `error`: shown as an error for 8 seconds (otherwise 3 seconds).
- *   `sticky`: not cleared on its own (for progress messages)
+ * @param {{ error?: boolean, sticky?: boolean, busy?: boolean }} [options] `error`: shown as an error for 8 seconds (otherwise 3 seconds).
+ *   `sticky`: not cleared on its own.
+ *   `busy`: work in progress. It shows the progress indicator and isn't cleared on its own (the next message replaces it)
  */
-function setStatus(message, { error = false, sticky = false } = {}) {
+function setStatus(message, { error = false, sticky = false, busy = false } = {}) {
   const box = $('status');
   box.textContent = message;
+  if (busy && message) box.prepend(spinner());
   box.classList.toggle('error', error);
   box.classList.toggle('visible', Boolean(message));
   clearTimeout(statusTimer);
-  if (message && !sticky) statusTimer = setTimeout(() => setStatus(''), error ? 8000 : 3000);
+  if (message && !sticky && !busy) statusTimer = setTimeout(() => setStatus(''), error ? 8000 : 3000);
 }
 
 /**
@@ -1840,7 +1861,7 @@ function setStatus(message, { error = false, sticky = false } = {}) {
  *   On failure, it shows the error message and returns `false` (work cancelled because the session closed is not reported)
  */
 async function run(task, pending, done) {
-  setStatus(`${pending}…`, { sticky: true });
+  setStatus(`${pending}…`, { busy: true });
   try {
     await task();
     setStatus(done);
@@ -2002,7 +2023,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
   for (const id of ['logout', 'add-button', 'import-button', 'settings-button']) $(id).hidden = false;
   updateSettingsButton();
 
-  setStatus('Loading…', { sticky: true });
+  setStatus('Loading…', { busy: true });
   try {
     await loadAll(signal, preloaded?.archive);
     render();
@@ -2011,7 +2032,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
     const pendingAdd = readPendingAdd(true);
     if (pendingAdd) openAddRepo(pendingAdd);
     // Wait only for the live details of items drawn on the first screen. After that, workers report failed batches right away
-    setStatus('Loading details from GitHub…', { sticky: true });
+    setStatus('Loading details from GitHub…', { busy: true });
     await waitForLiveMetaIdle(liveMetaLoader);
     signal.throwIfAborted();
     const metaError = liveMetaLoader.error;
@@ -2068,7 +2089,7 @@ function bindEvents() {
   $('login-button').onclick = async () => {
     const button = $('login-button');
     button.disabled = true;
-    setStatus('Redirecting to GitHub…', { sticky: true });
+    setStatus('Redirecting to GitHub…', { busy: true });
     try {
       const url = safeUrl((await api('login-session', { method: 'POST' })).url);
       if (!url) throw new Error("Couldn't start GitHub sign-in");
