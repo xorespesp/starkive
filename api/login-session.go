@@ -2,9 +2,9 @@
 //
 //	GET              -> { repo, sync, sync_error? }. 401 if not signed in. 409 if the DB repository can't be used.
 //	                 `repo` is the DB repository `owner/repo`. `sync` is the auto sync status (`core.SyncStatus`).
-//	                 If the auto sync status can't be read, `sync` is `null` and `sync_error` holds the reason (GitHub's error text)
+//	                 If the auto sync status can't be read, `sync` is `null` and `sync_error` holds the reason (`formatSyncReadError`)
 //	POST             -> { url }: The GitHub authorization address the browser goes to. Also sets the state cookie.
-//	                 409 { error } if the sign-in GitHub App is missing or can't be decrypted (tells you to run the setup tool).
+//	                 409 { error } if the sign-in GitHub App is missing, can't be decrypted, or `config.json` is broken (tells you to run the setup tool).
 //	                 409 { error, dashboard_url } if called from an address that isn't the dashboard's canonical address (the page moves there)
 //	GET ?code&state  The callback GitHub sends the browser back to after sign-in.
 //	                 For the token owner, sets a session cookie (about 6 months) and redirects to `/`.
@@ -21,6 +21,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/xorespesp/starkive/core"
@@ -42,15 +44,14 @@ func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	// The auto sync status is used only in the Settings dialog and the "sync stopped" warning.
-	// If only this can't be read, the dashboard still opens.
+	// The auto sync status is not needed to open the dashboard, so the dashboard still opens if only this can't be read.
 	// The reason is sent along, so the failure doesn't look like "no problem" (the page shows a warning)
 	response := loginSessionStatus{Repo: cfg.DBRepoFullName}
 	if status, err := core.ReadSyncStatus(cfg); err == nil {
 		response.Sync = &status
 	} else {
 		log.Printf("sync status: %v", err)
-		response.SyncError = err.Error()
+		response.SyncError = formatSyncReadError(err)
 	}
 	core.WriteJSON(w, http.StatusOK, response)
 	return nil
@@ -60,7 +61,37 @@ func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
 type loginSessionStatus struct {
 	Repo      string           `json:"repo"`                 // DB repository `owner/repo`. Used for the repository link on the page
 	Sync      *core.SyncStatus `json:"sync"`                 // Auto sync status. A pointer: `nil` if it can't be read, so it becomes `null` in JSON
-	SyncError string           `json:"sync_error,omitempty"` // Why the auto sync status couldn't be read (GitHub's error text). Empty if it was read, so it's left out of the JSON
+	SyncError string           `json:"sync_error,omitempty"` // Why the auto sync status couldn't be read (`formatSyncReadError`). Empty if it was read, so it's left out of the JSON
+}
+
+// Turns the error `err` from reading the auto sync status into the text of `sync_error`.
+// A failure that GitHub answered (`core.GitHubAPIError`) and our own message (`core.HTTPError`) are shown as they are.
+// Any other error becomes a general sentence, because it is an internal detail (like in `core.Respond`).
+// The details stay in the server log.
+//
+// NOTE: `core.ReadSyncStatus` joins up to three errors with `errors.Join`, so each one is judged on its own.
+// `Unwrap() []error` is the method that such a joined error has.
+func formatSyncReadError(err error) string {
+	parts := []error{err}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok { // `err.(T)`: checks whether the value has those methods (like `dynamic_cast`)
+		parts = joined.Unwrap()
+	}
+	lines := []string{}
+	for _, part := range parts {
+		var githubErr *core.GitHubAPIError
+		var httpErr *core.HTTPError
+		line := "Internal server error"
+		switch {
+		case errors.As(part, &githubErr): // `errors.As`: if the error is that type, takes it out into the variable
+			line = githubErr.Error()
+		case errors.As(part, &httpErr):
+			line = httpErr.Message
+		}
+		if !slices.Contains(lines, line) {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Reads the sign-in GitHub App settings from the DB repository.

@@ -209,6 +209,7 @@ func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 // Tests the sign-in status response when the auto sync status can't be read.
 // The dashboard still opens, `sync` is empty, and the reason is sent along (`sync_error`, GitHub's message and the needed permission).
 // If the status was read, there is no `sync_error`. (The page uses this value to warn that the status couldn't be read.)
+// An error that isn't GitHub's answer (a cut connection) becomes a general sentence, without internal details such as the request address
 func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
@@ -226,6 +227,13 @@ func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh.mu.Unlock()
 	if code, body := read(); code != http.StatusOK || string(body["sync"]) != "null" || !strings.Contains(string(body["sync_error"]), "actions=read") {
 		t.Errorf("unreadable: %d %v", code, body)
+	}
+	gh.mu.Lock()
+	gh.contentsHangup = true
+	gh.mu.Unlock()
+	if code, body := read(); code != http.StatusOK || !strings.Contains(string(body["sync_error"]), "actions=read") ||
+		!strings.Contains(string(body["sync_error"]), "Internal server error") || strings.Contains(string(body["sync_error"]), "/repos/") {
+		t.Errorf("internal error: %d %v", code, body)
 	}
 }
 
