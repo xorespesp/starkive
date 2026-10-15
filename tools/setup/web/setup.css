@@ -399,6 +399,13 @@ button {
   font-size: 15px;
 }
 
+/* Note under the waiting sentence when the wait takes longer than usual */
+.waiting-slow {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 /* Waiting prompt while an open button isn't clicked yet: only the link shows, without the box */
 .waiting.quiet {
   padding: 0;

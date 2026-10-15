@@ -9,12 +9,14 @@
 // Links are made only for `https://` addresses and addresses of this server.
 
 const POLL_MS = 700; // Interval between progress requests (milliseconds)
+const SLOW_WAIT_MS = 5 * 60 * 1000; // How long a waiting prompt can wait before the page says it is taking longer than usual (milliseconds)
 
 let shown = 0; // Number of lines already drawn. Sent as `since` in the next request
 let promptId = 0; // Number of the prompt shown now (input box or waiting prompt). 0 if none
 let answeredId = 0; // Number of the last prompt that was finished (answer sent, or switched to typing). Even if a request sent before returns the old prompt, it isn't shown again
 let finished = false; // Whether the setup ended
 let waitingShown = false; // Whether the current prompt is a waiting prompt
+let waitingSince = 0; // When the waiting sentence of the current prompt started to show (`Date.now()`). 0 if it isn't shown
 let openNotClicked = false; // Whether the last open button (`open`) drawn in the current step is not clicked yet. The person still has work to do, so the progress indicator is hidden
 const steps = []; // Page elements for each step: { item, header, marker, toggle, body, lines }. The order is the step number (from 1)
 const expandedByUser = new Map(); // Step number -> expanded or not, as set by the person clicking the header. If missing, it follows the state
@@ -269,6 +271,7 @@ function updatePrompt(prompt) {
   }
   if (prompt.id === promptId) return;
   promptId = prompt.id;
+  waitingSince = 0;
   if (prompt.waiting) {
     $('waiting-text').replaceChildren(...richText(prompt.waiting));
     $('switch-to-typing').textContent = prompt.manual_entry;
@@ -294,11 +297,18 @@ function updatePrompt(prompt) {
  * NOTE: While an open button isn't clicked, a waiting prompt shows only its link to enter the value by hand.
  * A moving indicator would make the person hesitate to click the button, so the indicator and the waiting sentence are hidden.
  * The link stays, because the person may not need that button at all.
+ * If the waiting sentence shows for longer than `SLOW_WAIT_MS`, a small note says so.
+ * The wait has no time limit, and some failures don't go away by waiting (for example, the value was pasted wrong).
+ * The page can't tell why, so the note only points to the steps above. The link below it is the way out.
  */
 function updateIndicators() {
+  const lineShown = waitingShown && !openNotClicked;
+  if (!lineShown) waitingSince = 0;
+  else if (!waitingSince) waitingSince = Date.now();
   $('waiting').hidden = !waitingShown;
   $('waiting').classList.toggle('quiet', openNotClicked);
   $('waiting-line').hidden = openNotClicked;
+  $('waiting-slow').hidden = !lineShown || Date.now() - waitingSince < SLOW_WAIT_MS;
   $('busy').hidden = finished || !$('prompt').hidden || waitingShown || openNotClicked;
 }
 
