@@ -116,6 +116,23 @@ textarea {
   resize: vertical;
 }
 
+/* An input whose value can't be used (a wrong shape, or a value that is already taken) */
+input.input-invalid,
+input.input-invalid:focus {
+  border-color: var(--danger);
+  outline-color: var(--danger);
+}
+
+/* Message right under such an input, in the same color */
+.input-hint {
+  margin: -4px 0 0;
+  font-size: 13px;
+}
+
+.input-hint.invalid {
+  color: var(--danger);
+}
+
 button {
   padding: 5px 16px;
   background: var(--button-primary);
@@ -818,6 +835,78 @@ dialog.settings-dialog {
 
 .settings-dialog .note a {
   color: var(--accent);
+}
+
+/* A section of the Settings dialog: a title, a short explanation, then rows and actions */
+.settings-section {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-muted);
+}
+
+.settings-section h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-section > .muted {
+  font-size: 13px;
+}
+
+/* Buttons placed directly in a section take only the width they need */
+.settings-section > button {
+  justify-self: start;
+}
+
+/* One line in a section: the name on the left, the control or value on the right */
+.settings-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 32px;
+}
+
+.settings-name {
+  color: var(--muted);
+}
+
+.settings-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+}
+
+.settings-value a {
+  color: var(--accent);
+}
+
+.settings-value select {
+  width: auto;
+}
+
+/* Row for the action buttons of a section */
+.settings-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+/* In Settings, the bookmarklet looks like a button, so it reads as something to drag */
+.settings-action .bookmarklet {
+  padding: 5px 16px;
+  font-weight: 500;
+}
+
+@media (max-width: 480px) {
+  .settings-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 
 /* Dot on the Settings button when auto sync has a problem to report (`syncProblem`) */

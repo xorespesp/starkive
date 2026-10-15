@@ -644,12 +644,14 @@ function closeAllModals() {
  * @param {boolean} [options.danger] `true` for work that can't be undone.
  *   The confirm button turns red, and the first focus goes to cancel, so a stray Enter doesn't run it
  * @param {() => Promise<void>|void} [options.onConfirm] What to do on confirm. If it throws, the message is shown and the dialog stays open
+ * @param {() => boolean} [options.canConfirm] Whether the confirm button can be pressed with what is in the form now.
+ *   Checked when the dialog opens and on every input. If missing, it can always be pressed
  * @returns {Promise<boolean>} `true` if closed by confirming, `false` if closed any other way
  *
  * NOTE: The browser's own `confirm()` and `prompt()` are blocked in some in-app browsers, and look different everywhere.
  * So we make our own.
  */
-function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm }) {
+function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm, canConfirm = () => true }) {
   return new Promise((resolve) => {
     const cancel = el('button', { type: 'button', className: 'ghost', textContent: 'Cancel' });
     const confirm = el('button', { type: 'submit', className: danger ? 'danger-solid' : '', textContent: confirmLabel });
@@ -659,9 +661,16 @@ function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm 
     const modal = openModal({ panel: form, onClose: () => resolve(confirmed) });
 
     cancel.onclick = modal.close;
+    let saving = false;
+    const updateConfirm = () => {
+      confirm.disabled = saving || !canConfirm();
+    };
+    form.oninput = updateConfirm;
+    updateConfirm();
     form.onsubmit = async (ev) => {
       ev.preventDefault();
-      confirm.disabled = true;
+      saving = true;
+      updateConfirm();
       const indicator = spinner();
       confirm.prepend(indicator); // Saving can take a second or two (a commit on GitHub), so show that it is working
       try {
@@ -672,7 +681,8 @@ function showDialog({ title, body = [], confirmLabel, danger = false, onConfirm 
         if (isCancelled(err)) return; // The session closed, so the dialog is already closed too
         error.textContent = err.message;
         error.hidden = false;
-        confirm.disabled = false;
+        saving = false;
+        updateConfirm();
         indicator.remove();
       }
     };
@@ -726,17 +736,62 @@ function fillStarListOptions(select, noneLabel, selectedId) {
  *   Nothing is saved until the user presses Add
  */
 function openAddRepo(prefill = '') {
-  const input = el('input', { value: prefill, placeholder: 'owner/repo or GitHub URL', spellcheck: false, required: true });
+  const input = el('input', { value: prefill, placeholder: 'owner/repo or GitHub URL', spellcheck: false });
+  const inputHint = el('p', { className: 'input-hint invalid', hidden: true }); // Says right away why Add is locked, under the input
   const select = starListSelect('No list');
+  // Names shown for the archive items now (`view`: live name, then snapshot, then the stored name). GitHub names ignore case
+  const archivedNames = new Set(state.starItems.map((item) => view(item).name.toLowerCase()));
+  // State of what is typed now: `empty`, `invalid` (not a repository), `archived` (already in the archive) or `ok`
+  const inputState = () => {
+    if (!input.value.trim()) return 'empty';
+    const fullName = parseRepoInput(input.value);
+    if (!fullName) return 'invalid';
+    return archivedNames.has(fullName.toLowerCase()) ? 'archived' : 'ok';
+  };
+  // Colors the input red and sets the message under it when the value can't be added (`inputState`)
+  const updateHint = () => {
+    const now = inputState();
+    const unusable = now === 'invalid' || now === 'archived';
+    input.classList.toggle('input-invalid', unusable);
+    input.setAttribute('aria-invalid', String(unusable)); // Screen readers announce the same state as the red color
+    inputHint.textContent = { invalid: 'Enter owner/repo or a GitHub repository URL.', archived: 'Already in your archive.' }[now] ?? '';
+    inputHint.hidden = !inputHint.textContent;
+  };
+  input.addEventListener('input', updateHint);
+  updateHint();
   showDialog({
     title: 'Add repository',
-    body: [el('label', {}, 'Repository', input), el('label', {}, 'List', select)],
+    body: [el('label', {}, 'Repository', input), inputHint, el('label', {}, 'List', select)],
     confirmLabel: 'Add',
+    canConfirm: () => inputState() === 'ok',
     onConfirm: async () => {
       const item = await addRepo(input.value, Number(select.value));
       setStatus(`Added ${item.name}`);
     },
   });
+}
+
+/**
+ * Turns what the user typed (owner/repo or a GitHub address) into `owner/repo`.
+ * It follows the rules of the server (`parseRepoFullNameOrURL` in `api/archive-star-items.go`): the address prefix,
+ * a query or `#` part, and a path after the repository (like `/tree/main`) are dropped, and a trailing `.git` is removed.
+ * It also rejects an owner with `.` in it. GitHub user and organization names can't have one,
+ * so such input is an address of another site (like `gitlab.com/owner/repo`) and would only end in a 404 from GitHub.
+ *
+ * @param {string} value What the user typed
+ * @returns {string} `owner/repo`, or an empty string if it doesn't look like a repository
+ *
+ * NOTE: It only decides what the page shows before saving (for example, "already in your archive").
+ * The server parses the value again and makes the real decision, so a difference between the two can't save anything wrong.
+ */
+function parseRepoInput(value) {
+  let s = value.trim().replace(/^https?:\/\//, '').replace(/^www\./, '');
+  if (s.toLowerCase().startsWith('github.com/')) s = s.slice('github.com/'.length);
+  s = s.split(/[?#]/)[0];
+  const [owner = '', name = ''] = s.split('/');
+  const repo = name.replace(/\.git$/, '');
+  const isPart = (part) => /^[\w.-]+$/.test(part) && part.replace(/^\.+|\.+$/g, '') !== '';
+  return isPart(owner) && !owner.includes('.') && isPart(repo) ? `${owner}/${repo}` : '';
 }
 
 /**
@@ -829,17 +884,23 @@ function openMembership(item) {
 
   const newName = el('input', { placeholder: 'New list name', maxLength: TEXT_LIMITS.starListName });
   const createButton = el('button', { type: 'button', className: 'ghost', textContent: 'Create' });
+  const createError = el('p', { className: 'dialog-error', hidden: true }); // Error of Create. It shows under the create row, because the page status line is behind the dialog's backdrop
   createButton.onclick = async () => {
     const name = newName.value.trim();
     if (!name) return newName.focus();
+    createError.hidden = true;
     createButton.disabled = true;
+    const indicator = spinner();
+    createButton.prepend(indicator); // Creating is a commit on GitHub, so it can take a second or two
     try {
       addOption(await createStarList(name, ''), true);
       newName.value = '';
     } catch (err) {
       if (isCancelled(err)) return; // The session closed, so the dialog is already closed too
-      setStatus(err.message, { error: true });
+      createError.textContent = err.message;
+      createError.hidden = false;
     }
+    indicator.remove();
     createButton.disabled = false;
   };
   // Enter in the name input creates a star list. It doesn't save the dialog (submit the form)
@@ -856,6 +917,7 @@ function openMembership(item) {
       empty,
       options,
       el('div', { className: 'new-star-list' }, newName, createButton),
+      createError,
     ],
     confirmLabel: 'Save',
     onConfirm: async () => {
@@ -1399,7 +1461,12 @@ function archivedImportRow(starredRepo) {
 async function openImport() {
   let closed = false; // Whether the dialog closed (including when the session closed). After it closes, the page is not changed
   let busy = false; // `true` while loading the list or adding. All controls are locked then (`updateControls`)
-  const status = el('p', { className: 'muted', textContent: 'Loading your GitHub stars…' });
+  const status = el('p', { className: 'muted' });
+  // Shows work in progress in the status line, with the progress indicator in front. Setting `textContent` later removes the indicator
+  const showProgress = (text) => {
+    status.className = 'muted';
+    status.replaceChildren(spinner(), text);
+  };
   const content = el('div', { className: 'import-content' });
   const cancel = el('button', { type: 'button', className: 'ghost', textContent: 'Cancel' });
   const refresh = el('button', { type: 'button', className: 'ghost', textContent: 'Refresh', disabled: true, title: 'Load your GitHub stars again' });
@@ -1495,8 +1562,9 @@ async function openImport() {
   const loadStars = async () => {
     busy = true;
     updateControls();
+    showProgress('Loading your GitHub stars…');
     try {
-      ({ starredRepos, githubStarLists, githubStarListsFailed } = await fetchAllStarred((done, total) => (status.textContent = `Loading your GitHub stars… page ${done} / ${total}`)));
+      ({ starredRepos, githubStarLists, githubStarListsFailed } = await fetchAllStarred((done, total) => showProgress(`Loading your GitHub stars… page ${done} / ${total}`)));
       loadedOnce = true;
       return true;
     } catch (err) {
@@ -1532,8 +1600,7 @@ async function openImport() {
     const ids = toImport.map((s) => s.repo.id);
     busy = true;
     updateControls();
-    status.className = 'muted';
-    status.textContent = `Importing ${COUNT.format(toImport.length)}…`;
+    showProgress(`Importing ${COUNT.format(toImport.length)}…`);
 
     let importError = null;
     let added = 0;
@@ -1675,11 +1742,11 @@ function syncProblem(status, readError) {
  * Describes the last scheduled run in one line.
  *
  * @param {{ run_started_at: string, conclusion: string }|null} last The last finished scheduled run. `null` if there is none
- * @returns {string} The start time and success or failure. "Never" if there is none
+ * @returns {string} Success or failure, then the start time. "Never" if there is none
  */
 function describeLastRun(last) {
   if (!last) return 'Never';
-  return `${new Date(last.run_started_at).toLocaleString()}, ${last.conclusion === 'success' ? 'succeeded' : 'failed'}`;
+  return `${last.conclusion === 'success' ? 'Succeeded' : 'Failed'} · ${new Date(last.run_started_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`;
 }
 
 /**
@@ -1704,7 +1771,7 @@ function bookmarkletLink() {
     textContent: 'Add to starkive',
     className: 'bookmarklet',
     title: 'Drag this to your bookmarks bar',
-    onclick: (ev) => ev.preventDefault(), // It doesn't run here. The text next to it and its `title` explain how to use it
+    onclick: (ev) => ev.preventDefault(), // It doesn't run here. Its `title` says how to use it
   });
 }
 
@@ -1717,8 +1784,9 @@ function updateSettingsButton() {
 }
 
 /**
- * Opens the Settings dialog: auto sync on or off, the interval, the last scheduled run,
- * a message and fix button when the setting and the real state differ, the bookmarklet link (`bookmarkletLink`), and Sync now.
+ * Opens the Settings dialog. It has two sections.
+ * Auto sync: on or off, the interval, the last scheduled run, a message and fix button when the setting and the real state differ, and Sync now.
+ * Quick add: the bookmarklet link (`bookmarkletLink`).
  *
  * NOTE: The checkbox shows the state the user set (`enabled_since`).
  * Changing it makes the server turn both that setting and the workflow in the DB repository on or off.
@@ -1733,36 +1801,39 @@ function openSettings() {
   let busy = false;
   const enabled = el('input', { type: 'checkbox' });
   const select = el('select', {}, ...SYNC_INTERVALS.map(([days, label]) => el('option', { value: String(days), textContent: label })));
-  const lastText = el('span');
-  const lastLink = el('a', { textContent: 'View on GitHub', target: '_blank', rel: 'noopener noreferrer' });
-  const lastLine = el('p', { className: 'muted' }, lastText, ' ', lastLink);
+  const lastRun = el('span'); // The last scheduled run. It links to the run on GitHub when there is one, so it stays on one line
   const problemNote = el('p', { className: 'note' });
-  const fixButton = el('button', { type: 'button' }); // Button that matches the workflow to the setting when they differ. `fix` of `syncProblem` sets its text and action
+  const fixButton = el('button', { type: 'button', className: 'ghost' }); // Button that matches the workflow to the setting when they differ. `fix` of `syncProblem` sets its text and action
   const error = el('p', { className: 'dialog-error', hidden: true });
-  const syncNow = el('button', { type: 'button', textContent: 'Sync now' });
+  const syncNow = el('button', { type: 'button', className: 'ghost', textContent: 'Sync now' });
   const close = el('button', { type: 'button', className: 'ghost', textContent: 'Close' });
+  // One line of a section: the name on the left, the control or value on the right
+  const row = (name, ...value) => el('div', { className: 'settings-row' }, el('span', { className: 'settings-name', textContent: name }), el('div', { className: 'settings-value' }, ...value));
   const panel = el(
     'div',
     { className: 'dialog-body' },
     el('h2', { textContent: 'Settings' }),
-    el('label', { className: 'check-option' }, enabled, 'Auto sync'),
-    el('label', { className: 'check-option' }, 'How often', select),
-    el('p', {
-      className: 'muted',
-      textContent: 'How often starkive archives new stars and refreshes repository details. A repository deleted before the next sync is not recorded.',
-    }),
-    lastLine,
-    problemNote,
-    fixButton,
-    error,
     el(
-      'p',
-      { className: 'muted' },
-      'To add repositories without starring them, drag ',
-      bookmarkletLink(),
-      ' to your bookmarks bar and click it on a GitHub repository page.',
+      'section',
+      { className: 'settings-section' },
+      el('h3', { textContent: 'Auto sync' }),
+      el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details on a schedule. A repository deleted before the next sync isn't recorded." }),
+      row('Enabled', el('label', { className: 'check-option' }, enabled, 'On')),
+      row('How often', select),
+      row('Last scheduled sync', lastRun),
+      problemNote,
+      fixButton,
+      el('div', { className: 'settings-action' }, syncNow),
+      error, // Every action that can fail in this dialog is an auto sync action, so its error shows in this section
     ),
-    el('div', { className: 'actions' }, close, syncNow),
+    el(
+      'section',
+      { className: 'settings-section' },
+      el('h3', { textContent: 'Quick add' }),
+      el('p', { className: 'muted', textContent: 'Drag this button to your bookmarks bar. On any GitHub repository page, click it to open that repository here in the Add dialog.' }),
+      el('div', { className: 'settings-action' }, bookmarkletLink()),
+    ),
+    el('div', { className: 'actions' }, close),
   );
   const modal = openModal({ panel, className: 'settings-dialog' });
   close.onclick = modal.close;
@@ -1777,9 +1848,10 @@ function openSettings() {
     select.disabled = busy || !enabled.checked;
     syncNow.disabled = busy;
     const runUrl = safeUrl(status?.last_scheduled_run?.html_url);
-    lastText.textContent = busy ? 'Working…' : `Last scheduled sync: ${status ? describeLastRun(status.last_scheduled_run) : 'unknown'}`;
-    lastLink.hidden = busy || !runUrl;
-    if (runUrl) lastLink.href = runUrl;
+    const lastRunText = status ? describeLastRun(status.last_scheduled_run) : 'Unknown';
+    if (busy) lastRun.replaceChildren(spinner(), 'Processing…');
+    else if (runUrl) lastRun.replaceChildren(el('a', { href: runUrl, target: '_blank', rel: 'noopener noreferrer', title: 'View this run on GitHub', textContent: lastRunText }));
+    else lastRun.textContent = lastRunText;
     const problem = syncProblem(status, state.syncError);
     problemNote.hidden = !problem;
     problemNote.textContent = problem ? `${problem.text}. ${problem.hint}` : '';
@@ -1818,6 +1890,8 @@ function openSettings() {
     busy = true;
     error.hidden = true;
     update();
+    const indicator = spinner();
+    syncNow.prepend(indicator); // A sync can take a while, so the button itself shows that it is working
     try {
       const result = await api('sync-archive', { method: 'POST' });
       // Show the new items. The dialog stays open.
@@ -1828,6 +1902,7 @@ function openSettings() {
       if (isCancelled(err)) return;
       showError(err);
     }
+    indicator.remove();
     busy = false;
     update();
   };
