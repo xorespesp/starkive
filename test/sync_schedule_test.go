@@ -51,20 +51,18 @@ func loadTestConfig(t *testing.T) *core.Config {
 	return cfg
 }
 
-// Takes the auto sync status out of the sign-in status response (`GET /api/login-session`).
-// Stops the test if the response isn't 200 or has no status.
+// Reads the auto sync status (`GET /api/sync-status`).
+// Stops the test if the response isn't 200.
 //
 // Args:
 //   - `cookie`: The session cookie (the value `login` returned)
 func readSyncStatus(t *testing.T, cookie string) core.SyncStatus {
-	rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie)
-	var body struct {
-		Sync *core.SyncStatus `json:"sync"`
+	rec := call(api.HandleSyncStatus, "GET", "/api/sync-status", "", cookie)
+	var status core.SyncStatus
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &status) != nil {
+		t.Fatalf("sync status: %d %s", rec.Code, rec.Body)
 	}
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body.Sync == nil {
-		t.Fatalf("login session: %d %s", rec.Code, rec.Body)
-	}
-	return *body.Sync
+	return status
 }
 
 // Base time for testing the scheduled sync's date math. It matches the workflow's scheduled time (18:17 UTC)
@@ -206,34 +204,36 @@ func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 	return file.Sync.EnabledSince
 }
 
-// Tests the sign-in status response when the auto sync status can't be read.
-// The dashboard still opens, `sync` is empty, and the reason is sent along (`sync_error`, GitHub's message and the needed permission).
-// If the status was read, there is no `sync_error`. (The page uses this value to warn that the status couldn't be read.)
-// An error that isn't GitHub's answer (a cut connection) becomes a general sentence, without internal details such as the request address
+// Tests the answer of the auto sync status (`GET /api/sync-status`) when it can't be read.
+//   - If GitHub refuses a read (no Actions permission), it is 502 with GitHub's message and the needed permission.
+//     (The page uses this message to warn that the status couldn't be read.)
+//   - An error that isn't GitHub's answer (a cut connection) is 500 "Internal server error", without internal details such as the request address
+//   - The sign-in status (`GET /api/login-session`) doesn't carry the auto sync status, so it still answers when only this can't be read
 func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
-	read := func() (int, map[string]json.RawMessage) {
-		rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie)
-		var body map[string]json.RawMessage
-		json.Unmarshal(rec.Body.Bytes(), &body)
-		return rec.Code, body
+	read := func() (int, string) {
+		rec := call(api.HandleSyncStatus, "GET", "/api/sync-status", "", cookie)
+		return rec.Code, rec.Body.String()
 	}
-	if code, body := read(); code != http.StatusOK || string(body["sync"]) == "null" || body["sync_error"] != nil {
-		t.Errorf("readable: %d %v", code, body)
+	if code, body := read(); code != http.StatusOK || !strings.Contains(body, `"workflow"`) {
+		t.Errorf("readable: %d %s", code, body)
 	}
 	gh.mu.Lock()
 	gh.actionsDenied = true
 	gh.mu.Unlock()
-	if code, body := read(); code != http.StatusOK || string(body["sync"]) != "null" || !strings.Contains(string(body["sync_error"]), "actions=read") {
-		t.Errorf("unreadable: %d %v", code, body)
+	if code, body := read(); code != http.StatusBadGateway || !strings.Contains(body, "actions=read") {
+		t.Errorf("no Actions permission: %d %s", code, body)
+	}
+	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"repo":"me/archive"}` {
+		t.Errorf("sign-in status: %d %s", rec.Code, rec.Body)
 	}
 	gh.mu.Lock()
+	gh.actionsDenied = false
 	gh.contentsHangup = true
 	gh.mu.Unlock()
-	if code, body := read(); code != http.StatusOK || !strings.Contains(string(body["sync_error"]), "actions=read") ||
-		!strings.Contains(string(body["sync_error"]), "Internal server error") || strings.Contains(string(body["sync_error"]), "/repos/") {
-		t.Errorf("internal error: %d %v", code, body)
+	if code, body := read(); code != http.StatusInternalServerError || !strings.Contains(body, "Internal server error") || strings.Contains(body, "/repos/") {
+		t.Errorf("internal error: %d %s", code, body)
 	}
 }
 

@@ -103,6 +103,7 @@ func main() {
 	mux.HandleFunc("/api/github-repo-meta", api.HandleGitHubRepoMeta)
 	mux.HandleFunc("/api/github-stars", api.HandleGitHubStars)
 	mux.HandleFunc("/api/sync-archive", api.HandleSyncArchive)
+	mux.HandleFunc("/api/sync-status", api.HandleSyncStatus)
 	mux.HandleFunc("/api/archive-repo-meta", api.HandleArchiveRepoMeta)
 	mux.HandleFunc("/api/check-deployment", api.HandleCheckDeployment)
 	mux.Handle("/", http.FileServer(http.Dir("public")))

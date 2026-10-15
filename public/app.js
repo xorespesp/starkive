@@ -43,8 +43,8 @@ const state = {
   sort: 'newest', // Sort order: `newest`, `oldest` (both by `starred_at`) or `name`
   shown: PAGE_SIZE, // Items to draw in the list. It grows when you scroll down or press "Load more"
   repo: '', // DB repository name (owner/repo). Comes with the sign-in response
-  sync: null, // Auto sync status (`core.SyncStatus`: interval, workflow state, last scheduled run). Comes with the sign-in response. `null` if not received yet, or if the server couldn't read it
-  syncError: '', // Why the server couldn't read the auto sync status (`sync_error` in the sign-in response). An empty string if it was read
+  sync: null, // Auto sync status (`core.SyncStatus`: interval, workflow state, last scheduled run) from `fetchSyncStatus`. `null` if not received yet, or if it couldn't be read
+  syncError: '', // Why the auto sync status couldn't be read (`fetchSyncStatus`). An empty string if it was read
   noteDrafts: new Map(), // Item ID -> note being edited `{ draft, saving }`. Several items can be edited at once. It lives here, not in the DOM, so a redraw keeps the text
 };
 
@@ -185,6 +185,23 @@ function clearLoadedData() {
  */
 function fetchArchiveFiles(beforeSignIn = false) {
   return Promise.all(['archive-star-items', 'archive-star-lists', 'archive-repo-meta'].map((path) => api(path, { beforeSignIn })));
+}
+
+/**
+ * Requests the auto sync status (`sync-status`).
+ *
+ * @param {boolean} [beforeSignIn] Whether the request is sent before we know the user is signed in (the option of the same name in `api`)
+ * @returns {Promise<{ sync: object|null, syncError: string }>} The status (`core.SyncStatus`), or why it couldn't be read.
+ *   A failed read doesn't throw: the dashboard works without the status, and `syncProblem` warns about it
+ * @throws {DOMException} `AbortError` if the session closed (`isCancelled`)
+ */
+async function fetchSyncStatus(beforeSignIn = false) {
+  try {
+    return { sync: await api('sync-status', { beforeSignIn }), syncError: '' };
+  } catch (err) {
+    if (isCancelled(err)) throw err;
+    return { sync: null, syncError: err.message };
+  }
 }
 
 /**
@@ -1594,7 +1611,7 @@ const SYNC_STALL_MS = 3 * DAY_MS;
  * @param {object|null} status Auto sync status from the server (the `state.sync` shape, `core.SyncStatus`):
  *   `enabled_since` (when the user turned it on, `null` if off), `workflow` (GitHub's workflow state, or `missing`),
  *   `last_scheduled_run` (`run_started_at`, `conclusion`, `html_url`), `interval_days`
- * @param {string} readError Why the server couldn't read the status (the `state.syncError` shape). An empty string if it was read
+ * @param {string} readError Why the status couldn't be read (the `state.syncError` shape). An empty string if it was read
  * @returns {{ text: string, hint: string, fix: 'on'|'off'|null }|null} The message, the fix to add in Settings,
  *   and whether the fix button in Settings turns the workflow on (`on`) or off (`off`).
  *   `fix` is `null` if a button can't fix it. `null` if there is no problem
@@ -1611,10 +1628,10 @@ const SYNC_STALL_MS = 3 * DAY_MS;
  */
 function syncProblem(status, readError) {
   if (readError) {
-    // Don't treat "couldn't read" as "no problem". Don't guess the cause, and show GitHub's message as is
+    // Don't treat "couldn't read" as "no problem". Don't guess the cause, and show the error message as is
     return {
-      text: "Couldn't read the auto sync status from GitHub",
-      hint: `If this keeps happening, check the access token's Actions permission. GitHub said: ${readError}`,
+      text: "Couldn't read the auto sync status",
+      hint: `If this keeps happening, check the access token's Actions permission. Details: ${readError}`,
       fix: null,
     };
   }
@@ -1709,11 +1726,10 @@ function updateSettingsButton() {
  * So the dialog shows a message and a button to match them (`fix` of `syncProblem`).
  * Scheduled runs and Actions tab changes happen outside the dashboard, so the latest status is fetched again on open.
  * Just opening it writes nothing.
- * One function, `update`, sets locking and display from the current values (`status`, `busy`).
+ * One function, `update`, sets locking and display from the current values (`state.sync`, `state.syncError`, `busy`).
+ * The dialog keeps no copy of the status, so a reload of the dashboard (`openDashboard`) and the dialog never disagree.
  */
 function openSettings() {
-  let status = state.sync;
-  let readError = state.syncError; // Why the server couldn't read the status. It changes each time the status is fetched again
   let busy = false;
   const enabled = el('input', { type: 'checkbox' });
   const select = el('select', {}, ...SYNC_INTERVALS.map(([days, label]) => el('option', { value: String(days), textContent: label })));
@@ -1751,8 +1767,9 @@ function openSettings() {
   const modal = openModal({ panel, className: 'settings-dialog' });
   close.onclick = modal.close;
 
-  // Sets locking, selected values and messages again from the current values (`status`, `busy`). Event handlers don't change them directly
+  // Sets locking, selected values and messages again from the current values (`state.sync`, `state.syncError`, `busy`). Event handlers don't change them directly
   const update = () => {
+    const status = state.sync;
     const installed = Boolean(status) && status.workflow !== 'missing';
     enabled.checked = Boolean(status?.enabled_since);
     enabled.disabled = busy || !installed;
@@ -1763,14 +1780,12 @@ function openSettings() {
     lastText.textContent = busy ? 'Working…' : `Last scheduled sync: ${status ? describeLastRun(status.last_scheduled_run) : 'unknown'}`;
     lastLink.hidden = busy || !runUrl;
     if (runUrl) lastLink.href = runUrl;
-    const problem = syncProblem(status, readError);
+    const problem = syncProblem(status, state.syncError);
     problemNote.hidden = !problem;
     problemNote.textContent = problem ? `${problem.text}. ${problem.hint}` : '';
     fixButton.hidden = !problem?.fix;
     fixButton.textContent = problem?.fix === 'off' ? 'Turn off the workflow' : 'Turn on again';
     fixButton.disabled = busy;
-    state.sync = status;
-    state.syncError = readError;
     updateSettingsButton();
   };
   const showError = (err) => {
@@ -1785,8 +1800,8 @@ function openSettings() {
     error.hidden = true;
     update();
     try {
-      status = await api('sync-archive', { method: 'PATCH', body });
-      readError = ''; // The server returned the status after the change
+      state.sync = await api('sync-archive', { method: 'PATCH', body });
+      state.syncError = ''; // The server returned the status after the change
     } catch (err) {
       if (isCancelled(err)) return;
       showError(err);
@@ -1795,7 +1810,7 @@ function openSettings() {
     update();
   };
   enabled.onchange = () => change({ enabled: enabled.checked });
-  fixButton.onclick = () => change({ enabled: syncProblem(status, readError)?.fix === 'on' });
+  fixButton.onclick = () => change({ enabled: syncProblem(state.sync, state.syncError)?.fix === 'on' });
   select.onchange = () => change({ sync_interval_days: Number(select.value) });
 
   // A manual sync by the signed-in user runs right away, whatever the interval. On success, the list is loaded again
@@ -1806,8 +1821,9 @@ function openSettings() {
     try {
       const result = await api('sync-archive', { method: 'POST' });
       // Show the new items. The dialog stays open.
-      // The result is passed on, so the reload's status message doesn't cover the sync result
-      openDashboard(state.repo, `Synced: ${result.added} new`);
+      // The result is passed on, so the reload's status message doesn't cover the sync result.
+      // The reload also fetches the auto sync status again, so the dialog is drawn again when it ends
+      openDashboard(state.repo, `Synced: ${result.added} new`).then(update);
     } catch (err) {
       if (isCancelled(err)) return;
       showError(err);
@@ -1817,14 +1833,14 @@ function openSettings() {
   };
 
   update();
-  // First draw with the status already held. Redraw when the latest status arrives (it may have changed outside the dashboard)
-  api('login-session')
-    .then((data) => {
-      status = data.sync;
-      readError = data.sync_error ?? '';
+  // First draw with the status already held. Redraw when the latest status arrives (it may have changed outside the dashboard).
+  // If the session closes meanwhile (sign-out, or Sync now opening a new session), the request is cancelled and nothing changes
+  fetchSyncStatus()
+    .then((result) => {
+      ({ sync: state.sync, syncError: state.syncError } = result);
       update();
     })
-    .catch((err) => !isCancelled(err) && showError(err));
+    .catch(() => {}); // Only a cancel error comes here
 }
 
 // ---------------------------------------------------------------------------
@@ -1999,8 +2015,8 @@ function moveToDashboardURL(dashboardURL) {
  *
  * @param {string} repo DB repository name (owner/repo). The icon link at the top opens this repository
  * @param {string} [done] Message to show after loading, instead of "Loaded N repositories" (like the result of Sync now)
- * @param {{ signal: AbortSignal, archive: Promise }} [preloaded] The session `start` already opened when the page opened,
- *   and the archive request sent in that session. If missing, a new session is opened and the request is sent now
+ * @param {{ signal: AbortSignal, archive: Promise, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
+ *   and the archive and auto sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
  *
  * NOTE: Opening a new session cancels the previous session's loading, so it doesn't overwrite this page.
  * After loading, the status line shows only the first of these:
@@ -2008,6 +2024,8 @@ function moveToDashboardURL(dashboardURL) {
  */
 async function openDashboard(repo, done = '', preloaded = null) {
   const signal = preloaded?.signal ?? beginSession();
+  const syncRequest = preloaded?.sync ?? fetchSyncStatus(); // Sent after the new session opens, so it carries that session's signal
+  syncRequest.catch(() => {}); // Rejects only when cancelled. If loading fails first, nobody awaits it, so this keeps it out of the console
   state.repo = repo;
   const link = $('repo-link');
   const url = safeUrl(`https://github.com/${repo}`);
@@ -2034,7 +2052,9 @@ async function openDashboard(repo, done = '', preloaded = null) {
     // Wait only for the live details of items drawn on the first screen. After that, workers report failed batches right away
     setStatus('Loading details from GitHub…', { busy: true });
     await waitForLiveMetaIdle(liveMetaLoader);
+    ({ sync: state.sync, syncError: state.syncError } = await syncRequest);
     signal.throwIfAborted();
+    updateSettingsButton();
     const metaError = liveMetaLoader.error;
     liveMetaLoader.reportErrors = true;
     const syncTrouble = syncProblem(state.sync, state.syncError);
@@ -2053,10 +2073,9 @@ async function openDashboard(repo, done = '', preloaded = null) {
  * If the address has a repository to add (`add`), it is remembered.
  * Before sign-in, a message says it will be added after signing in.
  *
- * NOTE: It requests the sign-in state (`login-session`) and the three archive files at the same time.
- * The sign-in state also reads the auto sync status from GitHub, so it can be slow.
- * Requesting the archive only after that response would make the list appear that much later.
- * Before sign-in, the archive requests end with 401.
+ * NOTE: It requests the sign-in state (`login-session`), the three archive files and the auto sync status at the same time.
+ * Requesting the rest only after the sign-in state arrives would make the page appear that much later.
+ * Before sign-in, those other requests end with 401.
  * So they are sent with `beforeSignIn`, which keeps them from counting as session expiry, and their results are dropped.
  */
 async function start() {
@@ -2065,11 +2084,13 @@ async function start() {
   const signal = beginSession();
   const archive = fetchArchiveFiles(true);
   archive.catch(() => {}); // Fails before sign-in. This keeps it from showing in the console as an unhandled rejection (`loadAll` awaits it separately)
+  const sync = fetchSyncStatus(true);
+  sync.catch(() => {}); // Rejects only when cancelled below. `openDashboard` awaits it separately
   let repo;
   try {
-    ({ repo, sync: state.sync, sync_error: state.syncError = '' } = await api('login-session')); // `sync_error` comes only when the status couldn't be read
+    ({ repo } = await api('login-session'));
   } catch (err) {
-    sessionScope?.abort(); // Stop the archive requests sent early
+    sessionScope?.abort(); // Stop the requests sent early
     sessionScope = null;
     showLogin();
     const message = redirectError || (err.status === 401 ? '' : err.message);
@@ -2078,7 +2099,7 @@ async function start() {
     else if (pendingAdd) setStatus(`Sign in to add ${pendingAdd}`, { sticky: true });
     return;
   }
-  await openDashboard(repo, '', { signal, archive });
+  await openDashboard(repo, '', { signal, archive, sync });
 }
 
 /** Attaches handlers to the fixed page elements (top buttons, search and filters, "Load more"). Called once when the page opens. */

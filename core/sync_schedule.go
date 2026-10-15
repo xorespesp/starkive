@@ -327,7 +327,7 @@ func (c *syncConfig) markEnabledNow() {
 	c.EnabledSince = &now
 }
 
-// Auto sync status shown in the Settings dialog.
+// Auto sync status: the setting a person chose and the actual state on GitHub Actions.
 // The page judges mismatches between setting and reality, stalls and failures from this value alone
 type SyncStatus struct {
 	IntervalDays     int        `json:"interval_days"`      // Auto sync interval (days)
@@ -346,8 +346,8 @@ const syncWorkflowMissing = "missing"
 //     If there is no workflow, `Workflow` is `missing` and the last scheduled run is empty
 //   - An error if any of the three reads fails
 //
-// NOTE: The sign-in status answer carries this result, so if it is slow the dashboard opens slowly.
-// So the three questions to GitHub (config file, workflow state, run list) are sent at the same time, not one after another.
+// NOTE: The three questions to GitHub (config file, workflow state, run list) are sent at the same time, not one after another.
+// So the answer takes as long as the slowest question, not the sum of all three.
 // If there is no workflow, the run list request is wasted, but that is rare.
 func ReadSyncStatus(cfg *Config) (SyncStatus, error) {
 	var settings syncConfig

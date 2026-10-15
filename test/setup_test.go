@@ -30,6 +30,9 @@ func TestUnauthenticatedRequestsDoNotCallGitHub(t *testing.T) {
 	if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", ""); rec.Code != 401 {
 		t.Errorf("sync now without session: %d", rec.Code)
 	}
+	if rec := call(api.HandleSyncStatus, "GET", "/api/sync-status", "", ""); rec.Code != 401 {
+		t.Errorf("sync status without session: %d", rec.Code)
+	}
 	for name, key := range map[string]string{"no key": "", "wrong key": "not-the-key"} {
 		if rec := callScheduledSyncWithKey(key); rec.Code != 401 {
 			t.Errorf("scheduled sync with %s: %d %s", name, rec.Code, rec.Body)
