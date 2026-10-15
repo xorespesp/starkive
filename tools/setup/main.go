@@ -23,6 +23,7 @@
 //     If the repository is empty, it writes the marker (`core.MarkerDBPath`) as the first commit and makes it a starkive repository.
 //     If it is a starkive repository, it sets it up again.
 //     If it is a foreign repository or has another format version, it stops.
+//     Then it adds the initial files that are missing (`addInitialFiles`).
 //     Next it checks the Workflows and Actions permissions (this needs a branch, so it runs after initialization).
 //     Then it writes the scheduled sync key (`core.DeriveSyncKey`) to the DB repository's Actions secret (`core.SyncKeySecretName`)
 //  2. Deploy dashboard: Checks that the deployment at the dashboard address is set up with this repository and the current token (`checkDashboard`).
@@ -33,7 +34,7 @@
 //     While waiting for the deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
 //     If the person chooses to enter it by hand, it stops the check and takes the address
 //  3. Create sign-in app: If there is no App, or it can't be read, it creates the sign-in GitHub App
-//  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow and the README
+//  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow
 //
 // For testing, the same environment variables as the server (`STARKIVE_GH_API_URL`, `STARKIVE_GH_WEB_URL`) can point the GitHub addresses to a fake server.
 package main
@@ -271,6 +272,9 @@ func run(u ui, server *localServer, deployCommit sourceRepoCommit) error {
 		u.say("Initialized the empty repository.")
 	default:
 		u.say("`" + cfg.DBRepoFullName + "` is already a starkive archive. Setting it up again; your data stays as it is.")
+	}
+	if err := addInitialFiles(cfg); err != nil {
+		return err
 	}
 	if err := checkWorkflowsPermission(cfg); err != nil { // Check permissions before creating the App
 		return err

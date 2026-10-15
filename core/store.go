@@ -492,7 +492,8 @@ type CommitMessage struct {
 // Args:
 //   - `prefix`: Who made the change and which file changed, written like `user(star-items)`.
 //     Who is `user` (something a person did in the dashboard or the setup tool) or `sync` (auto sync).
-//     The file is `star-items`, `star-lists`, `repo-meta`, `config`, or `workflow` (the workflow and README)
+//     The file is `star-items`, `star-lists`, `repo-meta`, `config`, or `workflow`.
+//     The one exception is the commit that adds the initial files of the DB repository, whose prefix is `feat` (`feat: Add initial files`)
 //   - `summary`: What changed, starting with a verb (e.g. "add owner/repo")
 //   - `body`: Body blocks (use `formatCommitList` for a list of many items). Empty blocks are skipped
 //

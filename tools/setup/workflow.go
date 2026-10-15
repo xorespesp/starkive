@@ -1,6 +1,6 @@
-// Content of the auto sync workflow and the README put in the DB repository.
-// Also their installation and the check of the permissions it needs (Workflows, Actions).
-// Only this tool installs the workflow and the README.
+// Content of the auto sync workflow put in the DB repository.
+// Also its installation and the check of the permissions it needs (Workflows, Actions).
+// Only this tool installs the workflow.
 // The dashboard server only reads the workflow's state and run history through the Actions API, and turns the workflow on and off.
 package main
 
@@ -94,21 +94,6 @@ jobs:
           esac
 `
 
-// Guide file shown on the front page of the DB repository.
-// It is added only when the repository has no README. An existing README is left as it is (`installWorkflow`)
-const (
-	dbRepoReadmePath    = "README.md" // Path in the repository
-	dbRepoReadmeContent = `# Starkive Archive Repository
-
-This repository stores the archive of your [starkive](https://github.com/xorespesp/starkive) dashboard: the repositories you saved, your lists and your notes.
-
-- Keep this repository private unless you want your archive to be public.
-- Don't edit, move or delete the files here, or the STARKIVE_SYNC_KEY secret in Settings. The dashboard and the starkive setup tool manage them.
-- Turn auto sync on or off in the dashboard's Settings, not in the Actions tab.
-- Deleting this repository deletes your archive.
-`
-)
-
 // Checks, without a commit, that the token has the Workflows write permission (the permission to write files under `.github/workflows/`).
 // Without the permission, it returns GitHub's 403 error as is.
 // (`core.CheckGitHubAPI` adds the needed permission `workflows=write` to the message.)
@@ -158,12 +143,12 @@ func checkActionsPermission(cfg *core.Config) error {
 	return getGitHubJSON(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/workflows?per_page=1", &list)
 }
 
-// Makes the DB repository's workflow match this tool's content (`syncWorkflowContent`), and adds the README if there is none.
+// Makes the DB repository's workflow match this tool's content (`syncWorkflowContent`).
 // If the workflow is missing, it installs it. If it differs, it replaces it. If it's the same, it leaves it.
 // If there is nothing to change, it doesn't commit.
 // Without the permission, it returns GitHub's 403 error as is (the needed permission `workflows=write` is added to the message).
 func installWorkflow(cfg *core.Config) error {
-	paths := []string{core.SyncWorkflowPath, dbRepoReadmePath}
+	paths := []string{core.SyncWorkflowPath}
 	return core.UpdateFiles(cfg, paths, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
 		written := map[string][]byte{} // Files to write in this commit: path -> content
 		commitSummary := ""
@@ -174,12 +159,6 @@ func installWorkflow(cfg *core.Config) error {
 		case string(original[core.SyncWorkflowPath]) != syncWorkflowContent:
 			commitSummary = "update auto sync workflow"
 			written[core.SyncWorkflowPath] = []byte(syncWorkflowContent)
-		}
-		if original[dbRepoReadmePath] == nil { // Adds the README only when there is none. A README the user edited isn't overwritten
-			written[dbRepoReadmePath] = []byte(dbRepoReadmeContent)
-			if commitSummary == "" { // If the workflow changes in the same commit, the commit subject describes the workflow change
-				commitSummary = "add README"
-			}
 		}
 		return written, core.NewCommitMessage("user(workflow)", commitSummary), nil
 	})

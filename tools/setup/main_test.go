@@ -372,6 +372,86 @@ func TestCheckWorkflowsPermission(t *testing.T) {
 	}
 }
 
+// Guards the initial files of the DB repository (fake GitHub).
+//   - Missing files (the README and the empty file that keeps `db/`) are added in one commit, `feat: Add initial files`
+//   - A README that is already there isn't overwritten. Only the missing file is added
+//   - If nothing is missing, it sends no write request (no commit)
+func TestAddInitialFiles(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		existing []string          // Files already in the repository
+		want     map[string]string // Files the commit must write: path -> content. Empty means no commit
+	}{
+		{"new repository", nil, map[string]string{dbRepoReadmePath: dbRepoReadmeContent, dbFolderKeepPath: ""}},
+		{"README kept", []string{dbRepoReadmePath}, map[string]string{dbFolderKeepPath: ""}},
+		{"nothing missing", []string{dbRepoReadmePath, dbFolderKeepPath}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var written map[string]string // Files in the tree that was made: path -> content
+			var message string            // Message of the commit that was made
+			var writes int                // Number of write requests (POST, PATCH)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					writes++
+				}
+				switch {
+				case r.URL.Path == "/repos/me/archive/git/ref/heads/main":
+					w.Write([]byte(`{"object":{"sha":"c1"}}`))
+				case r.URL.Path == "/repos/me/archive/git/commits/c1":
+					w.Write([]byte(`{"tree":{"sha":"t1"}}`))
+				case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
+					for _, path := range c.existing {
+						if r.URL.Path == "/repos/me/archive/contents/"+path {
+							w.Write([]byte("existing"))
+							return
+						}
+					}
+					http.NotFound(w, r)
+				case r.URL.Path == "/repos/me/archive/git/trees":
+					var body struct {
+						Tree []struct {
+							Path    string `json:"path"`
+							Content string `json:"content"`
+						} `json:"tree"`
+					}
+					json.NewDecoder(r.Body).Decode(&body)
+					written = map[string]string{}
+					for _, entry := range body.Tree {
+						written[entry.Path] = entry.Content
+					}
+					w.Write([]byte(`{"sha":"t2"}`))
+				case r.URL.Path == "/repos/me/archive/git/commits":
+					var body struct {
+						Message string `json:"message"`
+					}
+					json.NewDecoder(r.Body).Decode(&body)
+					message = body.Message
+					w.Write([]byte(`{"sha":"c2"}`))
+				case r.URL.Path == "/repos/me/archive/git/refs/heads/main":
+					w.Write([]byte(`{}`))
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			cfg := &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}
+			if err := addInitialFiles(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if c.want == nil {
+				if writes != 0 {
+					t.Errorf("sent %d write requests with nothing missing", writes)
+				}
+				return
+			}
+			if fmt.Sprint(written) != fmt.Sprint(c.want) || message != "feat: Add initial files" {
+				t.Errorf("wrote %q with message %q, want %q", written, message, c.want)
+			}
+		})
+	}
+}
+
 // Guards the contract between the workflow and the server.
 // Only the server's scheduled response `status` (the return values of `core.RunScheduledSync`) counts as success.
 // It sends the key from the `core.SyncKeySecretName` secret in `Authorization: Bearer`, and reads `dashboard_url` from `config.json`.
