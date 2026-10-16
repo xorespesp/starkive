@@ -1517,7 +1517,7 @@ async function openImport() {
     const fresh = starredRepos.filter((s) => !archivedIds.has(s.repo.id));
     const inArchive = starredRepos.filter((s) => archivedIds.has(s.repo.id));
     status.className = 'muted';
-    status.textContent = `${starredRepos.length} starred on GitHub · ${fresh.length} new · ${inArchive.length} already archived`;
+    status.textContent = `${starredRepos.length} ${starredRepos.length === 1 ? 'star' : 'stars'} on GitHub`;
 
     // Import may have created star lists, or they may have been deleted elsewhere. So the options are refilled on every draw. The choice is kept
     fillStarListOptions(starListPicker, 'No extra list', Number(starListPicker.value));
@@ -1533,18 +1533,20 @@ async function openImport() {
 
     // `replaceChildren` inserts `false` as text, so entries left out by a condition are filtered out
     const parts = [
-      inArchive.length > 0 &&
-        el('p', {
-          className: 'note',
-          textContent: `${inArchive.length === 1 ? '1 repository is' : `${inArchive.length} repositories are`} already archived but still starred on GitHub.`,
-        }),
       starredRepos.length
         ? el(
             'div',
             { className: 'import-list' },
-            fresh.length > 0 && el('label', { className: 'import-row import-head' }, selectAll, `New stars (${fresh.length})`),
+            fresh.length > 0 && el('label', { className: 'import-row import-head' }, selectAll, `Not archived yet (${fresh.length})`),
             ...rows.map((r) => r.row),
-            inArchive.length > 0 && el('div', { className: 'import-row import-head' }, `Already in archive (${inArchive.length})`),
+            inArchive.length > 0 &&
+              el(
+                'div',
+                { className: 'import-row import-head' },
+                `Already in archive (${inArchive.length})`,
+                // Everything in this list is still starred on GitHub
+                el('span', { className: 'muted-inline', textContent: 'Unstar on GitHub to keep them private.' }),
+              ),
             ...inArchive.map(archivedImportRow),
           )
         : el('p', { className: 'muted', textContent: 'You have no stars on GitHub.' }),
@@ -1604,10 +1606,11 @@ async function openImport() {
 
     let importError = null;
     let added = 0;
+    let skipped = 0; // Chosen ones the server didn't add (already archived, or no longer starred)
     try {
       // Send only the IDs of the chosen repositories in one request.
       // The server reads repository details and star lists from GitHub itself, and skips ones already there
-      ({ added } = await api('archive-star-items', { method: 'POST', body: { starred_repo_ids: ids, star_list_id: Number(starListPicker.value) } }));
+      ({ added, skipped } = await api('archive-star-items', { method: 'POST', body: { starred_repo_ids: ids, star_list_id: Number(starListPicker.value) } }));
     } catch (err) {
       if (isCancelled(err)) return; // The session closed, so the dialog is already closed too. Don't send the next requests
       importError = err;
@@ -1643,8 +1646,17 @@ async function openImport() {
       status.textContent = `${importError.message}. ${ids.filter((id) => archivedIds.has(id)).length} of ${ids.length} are in the archive.`;
       return;
     }
-    status.textContent = `Imported ${added}. ${status.textContent}`;
-    setStatus(`Imported ${added}.`);
+    const stars = (n) => `${n} ${n === 1 ? 'star' : 'stars'}`;
+    if (added === 0) {
+      status.textContent = 'Nothing imported. The chosen stars were already archived or are no longer starred.';
+      return;
+    }
+    const details = [
+      skipped > 0 && `${skipped} skipped (already archived or no longer starred)`,
+      rows.length > 0 && `${rows.length} not archived yet`,
+    ].filter(Boolean);
+    status.replaceChildren(el('span', { className: 'status-success', textContent: `✓ Imported ${stars(added)}` }), ...details.map((text) => ` · ${text}`));
+    setStatus(`Imported ${stars(added)}.`);
   };
 
   // Fetch the list for the first time after all handlers are attached. If it fails, Refresh can fetch it again

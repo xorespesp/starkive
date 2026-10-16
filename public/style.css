@@ -16,6 +16,7 @@
   --danger: #f85149;
   --danger-solid: #da3633;
   --note: #d29922;
+  --success: #3fb950;
   --radius: 6px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'Noto Sans KR', Helvetica, Arial, sans-serif;
   font-size: 14px;
@@ -675,6 +676,12 @@ dialog.dialog .actions {
   color: var(--danger);
 }
 
+/* Text that reports a finished action, in a status line */
+.status-success {
+  color: var(--success);
+  font-weight: 500;
+}
+
 /* Hidden when there are no star lists, so an empty border isn't left behind */
 .star-list-options:empty {
   display: none;
@@ -769,6 +776,11 @@ dialog.dialog .import-head {
   z-index: 1; /* Rows drawn faded (`opacity`) are drawn on their own layer, so the header row is raised above them */
   background: var(--surface);
   font-weight: 600;
+}
+
+/* Hint next to a header title, in normal weight */
+dialog.dialog .import-head .muted-inline {
+  font-weight: 400;
 }
 
 .import-row input,
