@@ -5,11 +5,11 @@
 //
 // Usage.
 // The commit to deploy to Vercel is picked by `resolveVercelDeployCommit`.
-// A release executable has the source repository address stamped at build time (`stampedVercelDeployRepoURL`, with `-ldflags -X`),
+// A release executable has the Vercel deploy repository address stamped at build time (`stampedVercelDeployRepoURL`, with `-ldflags -X`),
 // and Go stamps the commit it was built from into the executable.
 // So a release executable doesn't need git, and runs in any folder.
 // Otherwise, run it in a folder where starkive was cloned with git.
-// The Deploy link copies the commit the tool was built from (with `go run`, the current commit) from this clone's `origin`.
+// The Vercel Deploy link copies the commit the tool was built from (with `go run`, the current commit) from this clone's `origin`.
 // So the dashboard runs the same code as the tool.
 // For this, `origin` must be a public GitHub repository, and that commit must be pushed:
 //
@@ -36,7 +36,7 @@
 //     The address is the one registered in the App, or the default address of the dashboard name (`buildDashboardName`) if there is no App.
 //     If the check passes, it moves on.
 //     Otherwise, if there is an App, it has the person change the environment variable `STARKIVE_DB_REPO_ACCESS_KEY` of that Vercel project and redeploy it.
-//     If there is no App, it shows Vercel's Deploy link (`buildVercelDeployURL`) and the value.
+//     If there is no App, it shows the Vercel Deploy link (`buildVercelDeployURL`) and the value.
 //     While waiting for the Vercel deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
 //     If the person chooses to enter it by hand, it stops the check and takes the address
 //  3. Create sign-in app: If there is no App, or it can't be read, it creates the sign-in GitHub App
@@ -129,6 +129,7 @@ func buildTokenURL(repoName string) string {
 
 // Reads the command-line arguments and runs the setup.
 // By default it runs on the browser setup page (`webUI`), and with `-headless` in the terminal (`terminalUI`).
+// With `-version`, it only prints the version (`printVersion`) and exits.
 // It shows the commit to deploy to Vercel as a GitHub address.
 // If that commit can't be used (not a git clone, not a public repository, a commit that isn't pushed),
 // it shows the reason in the terminal and exits, before the person creates anything.
@@ -138,12 +139,18 @@ func buildTokenURL(repoName string) string {
 // This is because it can't tell for sure which error is that case
 func main() {
 	headless := flag.Bool("headless", false, "run the setup headless, in the terminal")
+	version := flag.Bool("version", false, "print the version information")
 	flag.Parse()
+	if *version {
+		if err := printVersion(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 
 	vercelDeployCommit, hasUncommittedChanges, err := resolveVercelDeployCommit()
 	if err == nil {
-		// Shown before the GitHub check, so the person sees what will be deployed to Vercel even if the check fails.
-		// NOTE: The release workflow runs the executable and looks for this address in the output (`buildTreeURL`), so keep printing it
+		// Printed before the GitHub check, so the user knows what goes to Vercel even if the check fails
 		fmt.Println("Vercel deploy source: " + vercelDeployCommit.buildTreeURL())
 		err = checkVercelDeployCommit(readGitHubAPIURL(), vercelDeployCommit)
 	}
@@ -317,7 +324,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	accessKey := core.FormatDBRepoAccessKey(cfg.DBRepoID, token)
 	dashboardName := buildDashboardName(owner.Login, archiveName)
 	site := app.SiteURL // The canonical address registered in the App. Even an unreadable config keeps its public values (`SiteURL`, `Slug`)
-	if site == "" {     // If there is no App, or the saved config has no address, check the default address of the dashboard that the Deploy link creates
+	if site == "" {     // If there is no App, or the saved config has no address, check the default address of the dashboard that the Vercel Deploy link creates
 		site = "https://" + dashboardName + ".vercel.app"
 	}
 	checkErr := checkDashboard(cfg, site)

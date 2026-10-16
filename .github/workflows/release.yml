@@ -2,7 +2,8 @@
 # A tag with `-` in it (like `v0.1.0-rc.1`) makes a pre-release, so the `releases/latest` link skips it.
 #
 # The setup tool deploys the commit it was built from to Vercel.
-# This workflow stamps this repository's address (`GITHUB_REPOSITORY`) into each executable (`stampedVercelDeployRepoURL` in `tools/setup`).
+# This workflow stamps this repository's address (`GITHUB_REPOSITORY`) and the tag (`GITHUB_REF_NAME`) into each executable
+# (`stampedVercelDeployRepoURL`, `stampedReleaseTag` in `tools/setup`).
 # Go stamps the commit it builds from into each executable (`vcs.revision`), which is the tagged commit (`GITHUB_SHA`, also for an annotated tag, measured).
 # So a fork that pushes a tag gets executables that deploy the fork to Vercel.
 #
@@ -34,17 +35,15 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           set -euo pipefail
-          ldflags="-s -w -X main.stampedVercelDeployRepoURL=https://github.com/${GITHUB_REPOSITORY}"
-          expected="https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}" # The address the tool prints before it starts (`buildTreeURL`)
+          ldflags="-s -w -X main.stampedVercelDeployRepoURL=https://github.com/${GITHUB_REPOSITORY} -X main.stampedReleaseTag=${GITHUB_REF_NAME}"
 
-          # Runs a Linux build with the same flags in an empty folder without git, and checks the address of the code it would deploy to Vercel.
-          # `-X` does nothing, without an error, if the variable name is wrong, and this catches it.
-          # The GitHub address points nowhere, so the tool stops right after it prints that address
+          # Runs a Linux build with the same flags with `-version` in an empty folder without git, and checks what it prints.
+          # `-X` does nothing, without an error, if a variable name is wrong, and this catches it
           go build -trimpath -ldflags "$ldflags" -o "$RUNNER_TEMP/setup-check" ./tools/setup
-          check_dir="$(mktemp -d)"
-          (cd "$check_dir" && STARKIVE_GH_API_URL=http://127.0.0.1:9 "$RUNNER_TEMP/setup-check" -headless < /dev/null > out.txt 2>&1 || true)
-          cat "$check_dir/out.txt"
-          grep -qF "$expected" "$check_dir/out.txt"
+          version_output="$(cd "$(mktemp -d)" && "$RUNNER_TEMP/setup-check" -version)"
+          echo "$version_output"
+          grep -qF "https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}" <<< "$version_output" # The code it deploys to Vercel (`buildTreeURL`)
+          grep -qwF "$GITHUB_REF_NAME" <<< "$version_output" # The release tag (`stampedReleaseTag`)
 
           mkdir dist
           for target in $TARGETS; do

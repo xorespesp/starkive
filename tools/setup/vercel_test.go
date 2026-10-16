@@ -1,5 +1,5 @@
 // Tests for the Vercel deployment step: the commit to deploy to Vercel (remote address parsing, the GitHub check),
-// the values in the Deploy link, the dashboard name, and checking in the background for the deployment to finish.
+// the values in the Vercel Deploy link, the dashboard name, and checking in the background for the deployment to finish.
 package main
 
 import (
@@ -41,7 +41,7 @@ func TestParseGitRemoteURL(t *testing.T) {
 }
 
 // Guards the GitHub check of the commit to deploy to Vercel (fake GitHub).
-// It passes if the public source repository has the commit.
+// It passes if the public Vercel deploy repository has the commit.
 // If the repository can't be seen (private or missing), the error says a public repository is needed.
 // If the commit is missing (404, 422), the error says to push.
 // Other failures give GitHub's error
@@ -117,7 +117,7 @@ func TestBuildDashboardName(t *testing.T) {
 	}
 }
 
-// Guards the Deploy link.
+// Guards the Vercel Deploy link.
 // It fills in the code to copy (that commit of the repository), the copy repository name (which becomes the project name and address),
 // and the environment variable name and description.
 // It doesn't include `project-name`, which Vercel doesn't use, or the environment variable value

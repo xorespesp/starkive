@@ -2,7 +2,7 @@
 // It takes the address of the deployed dashboard and checks that it is this setup's dashboard (`askDashboardURL`, `checkDashboard`).
 // It runs the GitHub App manifest flow through this tool's localhost server (`localServer`, `createGitHubApp`).
 // The manifest shape and the code exchange (the parts that talk with GitHub) are in `github_app.go`.
-// The Deploy link and the repeated deployment check are in `vercel.go`.
+// The Vercel Deploy link and the repeated deployment check are in `vercel.go`.
 package main
 
 import (

@@ -1,6 +1,6 @@
 // The step that deploys the dashboard to Vercel.
-// It picks and checks the commit to deploy to Vercel (`resolveVercelDeployCommit`: the commit this setup tool was built from, in the source repository).
-// It builds the Deploy link (`vercel.com/new/clone`) with the dashboard name (`buildDashboardName`) and opens it.
+// It picks and checks the commit to deploy to Vercel (`resolveVercelDeployCommit`: the commit this setup tool was built from, in the Vercel deploy repository).
+// It builds the Vercel Deploy link (`vercel.com/new/clone`) with the dashboard name (`buildDashboardName`) and opens it.
 // Then it checks the default address of that name (`https://<dashboard name>.vercel.app`) every few seconds, and moves to the next step when the Vercel deployment is done.
 // If the check doesn't pass (for example, the account already has a repository with the same name, so Vercel gave another name), the person enters the address by hand.
 package main
@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -27,26 +26,23 @@ type commitRef struct {
 }
 
 // Builds the address of this commit's code on GitHub, `<url>/tree/<sha>`.
-// The Deploy link copies the code at this address, and the setup tool shows it before it starts.
+// The Vercel Deploy link copies the code at this address, and the setup tool shows it before it starts.
 //
-// NOTE: The release workflow runs the setup tool and looks for this address in the output (`.github/workflows/release.yml`).
+// NOTE: The release workflow runs the setup tool with `-version` and looks for this address in the output (`.github/workflows/release.yml`).
 // So if the form changes, change the workflow too.
 // The method has a value receiver `(c commitRef)`: it gets a copy of the struct, like a `const` member function in C++.
 func (c commitRef) buildTreeURL() string {
 	return c.url + "/tree/" + c.sha
 }
 
-// Address of the source repository, stamped into a release executable at build time (`https://github.com/<owner>/<repo>`).
-// Empty in a build without it (`go run`, a plain `go build`).
-//
-// NOTE: The release workflow (`.github/workflows/release.yml`) stamps it with `go build -ldflags "-X main.stampedVercelDeployRepoURL=..."`,
-// so the variable name must match that file.
-// `-X` sets the starting value of a package-level `string` variable at link time.
-// If the name is wrong, Go doesn't report an error and the value stays empty.
-var stampedVercelDeployRepoURL string
+// Reports whether `sha` is a full commit sha (40 hex characters)
+func isValidCommitSHA(sha string) bool {
+	_, err := hex.DecodeString(sha)
+	return err == nil && len(sha) == 40
+}
 
 // Picks the commit to deploy to Vercel: the commit this setup tool was built from, so the setup tool and the dashboard run the same code.
-//   - Release executable: the repository is `stampedVercelDeployRepoURL`, and the commit is the one Go stamped.
+//   - Release executable: the repository is `stampedVercelDeployRepoURL`, and the commit is the one Go stamped (`readStampedVCS`).
 //     It doesn't run git, so it works in any folder
 //   - Executable from a plain `go build`: the commit is the one Go stamped, and the repository is the `origin` of the folder it runs in
 //   - No stamped commit (`go run`): it reads `origin` and `HEAD` of the folder it runs in.
@@ -55,38 +51,14 @@ var stampedVercelDeployRepoURL string
 // Returns:
 //   - `hasUncommittedChanges`: The changes are in the running code, but not in the deployed commit
 //   - `err`: An error if the release build is broken (a wrong repository address, or no stamped commit), or the reason git can't read the folder
-//
-// NOTE: When `go build` runs in a git folder, Go stamps the commit it builds from (`vcs.revision`),
-// and whether there were uncommitted changes (`vcs.modified`).
-// `go run` doesn't stamp them (measured).
-// `go version -m <file>` shows them, and `go help build` describes this under `-buildvcs`.
-// The source repository is the repository that the Deploy link copies into the user's account and deploys (`buildVercelDeployURL`).
-// It is the original starkive or a fork of it.
-// It is not the same as `source` in the GitHub API (the top original of a fork).
 func resolveVercelDeployCommit() (vercelDeployCommit commitRef, hasUncommittedChanges bool, err error) {
-	isValidSHA := func(sha string) bool { // A full commit sha: 40 hex characters
-		_, decodeErr := hex.DecodeString(sha)
-		return decodeErr == nil && len(sha) == 40
-	}
-
-	// The commit Go stamped into this executable. Empty if there is none
-	buildSettings := map[string]string{}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			buildSettings[setting.Key] = setting.Value
-		}
-	}
-	stampedSHA := buildSettings["vcs.revision"]
-	if buildSettings["vcs"] != "git" || !isValidSHA(stampedSHA) {
-		stampedSHA = ""
-	}
-	stampedHasChanges := stampedSHA != "" && buildSettings["vcs.modified"] == "true"
+	stampedSHA, stampedHasChanges, _ := readStampedVCS()
 
 	// Release executable: the stamped repository and commit. A broken build stops here instead of reading git
 	if stampedVercelDeployRepoURL != "" {
 		fullName, found := strings.CutPrefix(stampedVercelDeployRepoURL, "https://github.com/")
 		if !found || !core.IsValidRepoFullName(fullName) || stampedSHA == "" {
-			return commitRef{}, false, fmt.Errorf("this setup tool was built wrongly (source repository %q, stamped commit %q). Download it again from the releases page", stampedVercelDeployRepoURL, stampedSHA)
+			return commitRef{}, false, fmt.Errorf("this setup tool was built wrongly (Vercel deploy repository %q, stamped commit %q). Download it again from the releases page", stampedVercelDeployRepoURL, stampedSHA)
 		}
 		return commitRef{url: stampedVercelDeployRepoURL, sha: stampedSHA}, stampedHasChanges, nil
 	}
@@ -115,7 +87,7 @@ func resolveVercelDeployCommit() (vercelDeployCommit commitRef, hasUncommittedCh
 	if err != nil {
 		return commitRef{}, false, fmt.Errorf("couldn't read the current commit: %w", err)
 	}
-	if !isValidSHA(headSHA) {
+	if !isValidCommitSHA(headSHA) {
 		return commitRef{}, false, fmt.Errorf("git returned an unexpected commit %q", headSHA)
 	}
 	changedFiles, err := runGit("status", "--porcelain") // One line per changed file. Empty string if none
@@ -149,7 +121,7 @@ func parseGitRemoteURL(remote string) (string, error) {
 		host = strings.ToLower(u.Hostname())
 	}
 	if host != "github.com" && host != "www.github.com" && host != "ssh.github.com" {
-		return "", fmt.Errorf("the origin of this clone (%s) isn't a GitHub repository. The Deploy link can only copy a public GitHub repository", remote)
+		return "", fmt.Errorf("the origin of this clone (%s) isn't a GitHub repository. The Vercel Deploy link can only copy a public GitHub repository", remote)
 	}
 	name := strings.TrimSuffix(strings.Trim(u.Path, "/"), ".git")
 	if !core.IsValidRepoFullName(name) {
@@ -158,15 +130,15 @@ func parseGitRemoteURL(remote string) (string, error) {
 	return name, nil
 }
 
-// Asks GitHub whether the Deploy link can copy the commit to deploy to Vercel, `vercelDeployCommit`.
-// The source repository must be public, and the commit must be on GitHub.
+// Asks GitHub whether the Vercel Deploy link can copy the commit to deploy to Vercel, `vercelDeployCommit`.
+// The Vercel deploy repository must be public, and the commit must be on GitHub.
 // It asks without authentication (it deals only with public repositories, and it runs before the setup token is entered).
 //
 // Args:
 //   - `apiBase`: Address of the GitHub API (a fake server in tests)
 //   - `vercelDeployCommit`: The commit picked by `resolveVercelDeployCommit`
 //
-// NOTE: The Deploy link can't copy a private repository (measured).
+// NOTE: The Vercel Deploy link can't copy a private repository (measured).
 // It can't fetch a commit that isn't on GitHub (not pushed).
 // If the copy fails, only an empty repository with the dashboard name is left (measured).
 // So the setup stops here, before the person creates a repository and a token.
@@ -178,7 +150,7 @@ func checkVercelDeployCommit(apiBase string, vercelDeployCommit commitRef) error
 		return err
 	}
 	if status == http.StatusNotFound {
-		return fmt.Errorf("couldn't find %s as a public repository on GitHub. The Deploy link can only copy a public repository: "+
+		return fmt.Errorf("couldn't find %s as a public repository on GitHub. The Vercel Deploy link can only copy a public repository: "+
 			"run the setup tool in a clone of the original starkive or of your fork", vercelDeployCommit.url)
 	}
 	status, err = readPublicGitHubStatus(apiBase + "/repos/" + fullName + "/commits/" + vercelDeployCommit.sha)
@@ -222,7 +194,7 @@ const dashboardSuffix = "-starkive"
 const maxDashboardNameLength = 63
 
 // Builds the dashboard name.
-// It is the name of the copy repository that the Deploy link creates in the user's account.
+// It is the name of the copy repository that the Vercel Deploy link creates in the user's account.
 // Vercel uses this name as is for the project name and the default address `https://<name>.vercel.app`.
 // (Measured: the copy page has no project name field, and the link's `project-name` is not used.)
 //   - If the archive name is the same as the GitHub username: `<archive name>-starkive`
@@ -248,7 +220,7 @@ func buildDashboardName(owner string, archiveName string) string {
 // Interval between checks of whether the Vercel deployment is done
 const vercelDeploymentPollInterval = 5 * time.Second
 
-// Builds the address of Vercel's Deploy link (the page that creates a project).
+// Builds the address of the Vercel Deploy link (the page that creates a project).
 //
 // Args:
 //   - `vercelDeployCommit`: The commit to copy and deploy (`resolveVercelDeployCommit`). The link points to that commit (`/tree/<commit sha>`), so Vercel copies exactly that commit (measured)
