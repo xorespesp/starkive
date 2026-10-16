@@ -1,4 +1,4 @@
-// Tests for the Vercel deployment step: the commit to deploy (remote address parsing, the GitHub check),
+// Tests for the Vercel deployment step: the commit to deploy to Vercel (remote address parsing, the GitHub check),
 // the values in the Deploy link, the dashboard name, and checking in the background for the deployment to finish.
 package main
 
@@ -40,12 +40,12 @@ func TestParseGitRemoteURL(t *testing.T) {
 	}
 }
 
-// Guards the GitHub check of the commit to deploy (fake GitHub).
+// Guards the GitHub check of the commit to deploy to Vercel (fake GitHub).
 // It passes if the public source repository has the commit.
 // If the repository can't be seen (private or missing), the error says a public repository is needed.
 // If the commit is missing (404, 422), the error says to push.
 // Other failures give GitHub's error
-func TestCheckSourceRepoCommit(t *testing.T) {
+func TestCheckVercelDeployCommit(t *testing.T) {
 	sha := strings.Repeat("ab", 20)
 	cases := []struct {
 		name    string
@@ -76,7 +76,7 @@ func TestCheckSourceRepoCommit(t *testing.T) {
 				w.Write([]byte(`{"message":"x"}`))
 			}))
 			defer github.Close()
-			err := checkSourceRepoCommit(github.URL, sourceRepoCommit{url: "https://github.com/me/starkive", sha: sha})
+			err := checkVercelDeployCommit(github.URL, commitRef{url: "https://github.com/me/starkive", sha: sha})
 			switch {
 			case c.wantErr == "" && err != nil:
 				t.Errorf("got %v", err)
@@ -121,9 +121,9 @@ func TestBuildDashboardName(t *testing.T) {
 // It fills in the code to copy (that commit of the repository), the copy repository name (which becomes the project name and address),
 // and the environment variable name and description.
 // It doesn't include `project-name`, which Vercel doesn't use, or the environment variable value
-func TestBuildDeployURL(t *testing.T) {
+func TestBuildVercelDeployURL(t *testing.T) {
 	sha := strings.Repeat("ab", 20)
-	u, err := url.Parse(buildDeployURL(sourceRepoCommit{url: "https://github.com/me/starkive", sha: sha}, "me-starkive"))
+	u, err := url.Parse(buildVercelDeployURL(commitRef{url: "https://github.com/me/starkive", sha: sha}, "me-starkive"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,13 +145,13 @@ func TestBuildDeployURL(t *testing.T) {
 //   - While the dashboard is deployed with another value, it passes on nothing.
 //     Once it is redeployed with this setup's value, it passes on that address
 //   - After it is told to stop, it checks no more and passes on nothing
-func TestWatchDeployment(t *testing.T) {
+func TestWatchVercelDeployment(t *testing.T) {
 	cfg := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_4242"}
 	dashboard := httptest.NewServer(http.HandlerFunc(api.HandleCheckDeployment))
 	defer dashboard.Close()
 
 	t.Setenv(core.DBRepoAccessKeyEnv, core.FormatDBRepoAccessKey(5150, "token_9999")) // Deployed with another token
-	confirmed, stop := watchDeployment(cfg, dashboard.URL)
+	confirmed, stop := watchVercelDeployment(cfg, dashboard.URL)
 	defer stop()
 	select {
 	case site := <-confirmed:
@@ -164,11 +164,11 @@ func TestWatchDeployment(t *testing.T) {
 		if site != dashboard.URL {
 			t.Errorf("site: %q, want %q", site, dashboard.URL)
 		}
-	case <-time.After(deploymentPollInterval + 5*time.Second):
+	case <-time.After(vercelDeploymentPollInterval + 5*time.Second):
 		t.Fatal("nothing passed on")
 	}
 
-	stopped, stopNow := watchDeployment(cfg, "http://127.0.0.1:1") // An address nobody listens on
+	stopped, stopNow := watchVercelDeployment(cfg, "http://127.0.0.1:1") // An address nobody listens on
 	stopNow()
 	stopNow() // Calling it more than once is fine
 	select {

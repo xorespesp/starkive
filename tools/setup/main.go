@@ -1,17 +1,23 @@
 // The starkive setup tool.
 // It puts the installation work a person would otherwise do by hand into one flow:
-// preparing the DB repository, deploying the dashboard and its environment variable value, the sign-in GitHub App, and the auto sync workflow.
+// preparing the DB repository, deploying the dashboard to Vercel with its environment variable value, the sign-in GitHub App, and the auto sync workflow.
 // All of this runs on the user's computer, so the dashboard server has no setup path that is open before sign-in.
 //
-// Usage (run it in a folder where starkive was cloned with git).
-// The Deploy link copies the current commit from this clone's `origin` and deploys it, so the dashboard runs the same code as the tool.
-// So `origin` must be a public GitHub repository, and the current commit must be pushed:
+// Usage.
+// The commit to deploy to Vercel is picked by `resolveVercelDeployCommit`.
+// A release executable has the source repository address stamped at build time (`stampedVercelDeployRepoURL`, with `-ldflags -X`),
+// and Go stamps the commit it was built from into the executable.
+// So a release executable doesn't need git, and runs in any folder.
+// Otherwise, run it in a folder where starkive was cloned with git.
+// The Deploy link copies the commit the tool was built from (with `go run`, the current commit) from this clone's `origin`.
+// So the dashboard runs the same code as the tool.
+// For this, `origin` must be a public GitHub repository, and that commit must be pushed:
 //
 //	go run ./tools/setup              Runs on the setup page (browser)
 //	go run ./tools/setup -headless    Runs in the terminal
 //
 // Steps (`run`, numbers and names are in `setupSteps`).
-// Before it starts, it checks the commit to deploy (`readSourceRepoCommit`, `checkSourceRepoCommit`).
+// Before it starts, it checks the commit to deploy to Vercel (`resolveVercelDeployCommit`, `checkVercelDeployCommit`).
 // Each step skips work that is already done, so running it again continues from wherever it stopped:
 //  1. Create archive repository: Takes the archive name (`normalizeArchiveName`).
 //     It opens the page that creates the empty DB repository `<name>-starkive-db` (`buildNewDBRepoURL`),
@@ -29,9 +35,9 @@
 //  2. Deploy dashboard: Checks that the deployment at the dashboard address is set up with this repository and the current token (`checkDashboard`).
 //     The address is the one registered in the App, or the default address of the dashboard name (`buildDashboardName`) if there is no App.
 //     If the check passes, it moves on.
-//     Otherwise, if there is an App, it has the person change the environment variable `STARKIVE_DB_REPO_ACCESS_KEY` of that project and redeploy.
-//     If there is no App, it shows Vercel's Deploy link (`buildDeployURL`) and the value.
-//     While waiting for the deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
+//     Otherwise, if there is an App, it has the person change the environment variable `STARKIVE_DB_REPO_ACCESS_KEY` of that Vercel project and redeploy it.
+//     If there is no App, it shows Vercel's Deploy link (`buildVercelDeployURL`) and the value.
+//     While waiting for the Vercel deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
 //     If the person chooses to enter it by hand, it stops the check and takes the address
 //  3. Create sign-in app: If there is no App, or it can't be read, it creates the sign-in GitHub App
 //  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow
@@ -123,7 +129,8 @@ func buildTokenURL(repoName string) string {
 
 // Reads the command-line arguments and runs the setup.
 // By default it runs on the browser setup page (`webUI`), and with `-headless` in the terminal (`terminalUI`).
-// If the commit to deploy can't be used (not a git clone, not a public repository, a commit that isn't pushed),
+// It shows the commit to deploy to Vercel as a GitHub address.
+// If that commit can't be used (not a git clone, not a public repository, a commit that isn't pushed),
 // it shows the reason in the terminal and exits, before the person creates anything.
 // On failure, it shows the reason in the terminal (and on the setup page in setup page mode),
 // with a note that running it again skips the steps that are done, and exits with code 1.
@@ -133,16 +140,19 @@ func main() {
 	headless := flag.Bool("headless", false, "run the setup headless, in the terminal")
 	flag.Parse()
 
-	deployCommit, uncommitted, err := readSourceRepoCommit()
+	vercelDeployCommit, hasUncommittedChanges, err := resolveVercelDeployCommit()
 	if err == nil {
-		err = checkSourceRepoCommit(readGitHubAPIURL(), deployCommit)
+		// Shown before the GitHub check, so the person sees what will be deployed to Vercel even if the check fails.
+		// NOTE: The release workflow runs the executable and looks for this address in the output (`buildTreeURL`), so keep printing it
+		fmt.Println("Vercel deploy source: " + vercelDeployCommit.buildTreeURL())
+		err = checkVercelDeployCommit(readGitHubAPIURL(), vercelDeployCommit)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())
 		os.Exit(1)
 	}
-	if uncommitted {
-		fmt.Println("Note: this clone has uncommitted changes. The dashboard is deployed from commit " + deployCommit.sha[:7] + " on GitHub, without them.")
+	if hasUncommittedChanges {
+		fmt.Println("Note: this setup tool runs with uncommitted changes. The dashboard is deployed from commit " + vercelDeployCommit.sha[:7] + " on GitHub, without them.")
 	}
 
 	server, err := startLocalServer()
@@ -163,7 +173,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = run(u, server, deployCommit)
+	err = run(u, server, vercelDeployCommit)
 	if err != nil {
 		lines := []string{
 			"Setup stopped: " + err.Error(),
@@ -197,13 +207,13 @@ func main() {
 // Args:
 //   - `u`: How to show things to the person and ask them (setup page or terminal)
 //   - `server`: The server opened only on this computer. The GitHub App step receives the request coming back from GitHub
-//   - `deployCommit`: The commit to deploy as the dashboard (checked with `checkSourceRepoCommit`)
+//   - `vercelDeployCommit`: The commit to deploy to Vercel as the dashboard (checked with `checkVercelDeployCommit`)
 //
 // NOTE: The permission checks (Workflows, Actions) run before the GitHub App is created.
 // If the App were created while permissions are missing, an unusable App would be left on GitHub.
 // The workflow itself is installed last, after the dashboard address is recorded in `config.json`.
 // That way, the address to call already exists when the workflow runs for the first time.
-func run(u ui, server *localServer, deployCommit sourceRepoCommit) error {
+func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	// 1. Archive name, DB repository and its token, repository preparation and sync key.
 	// The owner (username) isn't known before the token is entered, so only the repository name is decided first
 	u.step(1)
@@ -293,9 +303,9 @@ func run(u ui, server *localServer, deployCommit sourceRepoCommit) error {
 	// 2. Dashboard.
 	// It checks with the dashboard's proof (`checkDashboard`) that the deployment at that address uses this repository and the current token.
 	// If it passes, there is nothing to do.
-	// Otherwise, if there is an App, a registered project exists, so the person only changes its value and redeploys.
-	// If there is no App, the person deploys a new one.
-	// If there is no App but the default address answers with another value, it may be a deployment from an earlier run,
+	// Otherwise, if there is an App, a registered project exists, so the person only changes its value and redeploys on Vercel.
+	// If there is no App, the person deploys a new one on Vercel.
+	// If there is no App but the default address answers with another value, it may be a Vercel deployment from an earlier run,
 	// or someone else's dashboard may have taken that name.
 	// The tool can't tell them apart, so it explains both ways.
 	// (If it is from an earlier run, creating another one with the same name doesn't get the default address.)
@@ -321,7 +331,7 @@ func run(u ui, server *localServer, deployCommit sourceRepoCommit) error {
 		}
 		u.say("Create a Vercel project for the dashboard. On Vercel's page, pick the Git account for the dashboard's code.")
 		u.note("Keep the repository name `" + dashboardName + "` and leave the other settings as they are. The setup finds the dashboard by this name.")
-		u.open("Create the Vercel project", buildDeployURL(deployCommit, dashboardName))
+		u.open("Create the Vercel project", buildVercelDeployURL(vercelDeployCommit, dashboardName))
 		u.say("On that page, under Environment Variables, paste this value as the value of `" + core.DBRepoAccessKeyEnv + "`, then click Vercel's Deploy button. " +
 			"It holds your token, so keep it private.")
 		u.value(core.DBRepoAccessKeyEnv, accessKey)

@@ -26,12 +26,12 @@ import (
 const appCreationTimeout = 30 * time.Minute
 
 // Error for a starkive dashboard that answered, but is deployed with values other than the repository and token being set up.
-// Changing the environment variable of that project and redeploying fixes it
+// Changing the environment variable of that Vercel project and redeploying fixes it
 var errDashboardOtherValue = errors.New("the dashboard is deployed with a different " + core.DBRepoAccessKeyEnv +
 	". Set it to the value above in Vercel, redeploy, and try again")
 
 // Gets the address of the deployed dashboard.
-// If there is a `defaultSite`, it checks that address in the background while waiting (`watchDeployment`).
+// If there is a `defaultSite`, it checks that address in the background while waiting (`watchVercelDeployment`).
 // When it is confirmed as this setup's dashboard, it moves on without asking.
 // If the person chooses to enter it by hand, it stops the check and asks for the address.
 // It checks an entered address before using it.
@@ -56,26 +56,26 @@ func askDashboardURL(u ui, cfg *core.Config, defaultSite string, registered bool
 	const prompt = "Dashboard address:"
 	const hint = "the production domain under the Vercel project's Domains"
 	const manualEntryLabel = "Or enter the deployed dashboard's Vercel domain manually"
-	var deployed <-chan string // Channel that receives the address confirmed in the background. `nil` if it doesn't check
+	var confirmedVercelDeploySite <-chan string // Channel that receives the address confirmed in the background. `nil` if it doesn't check
 	stopWatching := func() {}
 	if defaultSite != "" {
-		deployed, stopWatching = watchDeployment(cfg, defaultSite)
+		confirmedVercelDeploySite, stopWatching = watchVercelDeployment(cfg, defaultSite)
 	}
 	defer stopWatching() // `defer`: stops the check when this function ends (it is fine to call it again after it stopped)
 	for {
 		var input string
-		if deployed != nil {
+		if confirmedVercelDeploySite != nil {
 			waiting := "Waiting for your dashboard at `" + defaultSite + "`. The setup continues on its own once it's deployed with the value above."
-			value, result, err := u.waitForValue(waiting, prompt, manualEntryLabel, deployed)
+			value, result, err := u.waitForValue(waiting, prompt, manualEntryLabel, confirmedVercelDeploySite)
 			if err != nil {
 				return "", err
 			}
 			switch result {
-			case receivedValue: // `watchDeployment` already confirmed it
+			case receivedValue: // `watchVercelDeployment` already confirmed it
 				return value, nil
 			case switchedToTyping: // The person chose to enter it by hand. Stop the check, and only ask from here on
 				stopWatching()
-				deployed = nil
+				confirmedVercelDeploySite = nil
 				continue
 			}
 			input = value // An address typed in the terminal while waiting
