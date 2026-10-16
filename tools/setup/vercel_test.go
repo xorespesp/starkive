@@ -44,23 +44,31 @@ func TestParseGitRemoteURL(t *testing.T) {
 // It passes if the public Vercel deploy repository has the commit.
 // If the repository can't be seen (private or missing), the error says a public repository is needed.
 // If the commit is missing (404, 422), the error says to push.
+// For a release executable (a stamped repository address), both errors say to download the latest setup tool instead.
 // Other failures give GitHub's error
 func TestCheckVercelDeployCommit(t *testing.T) {
 	sha := strings.Repeat("ab", 20)
 	cases := []struct {
 		name    string
+		release bool   // Whether it runs as a release executable (`stampedVercelDeployRepoURL` is set)
 		repo    int    // Status code of the repository lookup
 		commit  int    // Status code of the commit lookup
 		wantErr string // Empty means it passes
 	}{
-		{"public repository with the commit", http.StatusOK, http.StatusOK, ""},
-		{"private or missing repository", http.StatusNotFound, http.StatusOK, "public repository"},
-		{"unpushed commit", http.StatusOK, http.StatusNotFound, "git push"},
-		{"commit GitHub doesn't know", http.StatusOK, http.StatusUnprocessableEntity, "git push"},
-		{"GitHub failing", http.StatusServiceUnavailable, http.StatusOK, "503"},
+		{"public repository with the commit", false, http.StatusOK, http.StatusOK, ""},
+		{"private or missing repository", false, http.StatusNotFound, http.StatusOK, "run the setup tool in a clone"},
+		{"unpushed commit", false, http.StatusOK, http.StatusNotFound, "git push"},
+		{"commit GitHub doesn't know", false, http.StatusOK, http.StatusUnprocessableEntity, "git push"},
+		{"GitHub failing", false, http.StatusServiceUnavailable, http.StatusOK, "503"},
+		{"release: private or missing repository", true, http.StatusNotFound, http.StatusOK, "download the latest setup tool"},
+		{"release: commit gone", true, http.StatusOK, http.StatusUnprocessableEntity, "Download the latest setup tool"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if c.release {
+				stampedVercelDeployRepoURL = "https://github.com/me/starkive"
+				t.Cleanup(func() { stampedVercelDeployRepoURL = "" }) // `t.Cleanup`: runs when this test case ends, so other cases see the default
+			}
 			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "" {
 					t.Errorf("sent credentials to %s", r.URL.Path)

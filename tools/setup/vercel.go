@@ -58,7 +58,7 @@ func resolveVercelDeployCommit() (vercelDeployCommit commitRef, hasUncommittedCh
 	if stampedVercelDeployRepoURL != "" {
 		fullName, found := strings.CutPrefix(stampedVercelDeployRepoURL, "https://github.com/")
 		if !found || !core.IsValidRepoFullName(fullName) || stampedSHA == "" {
-			return commitRef{}, false, fmt.Errorf("this setup tool was built wrongly (Vercel deploy repository %q, stamped commit %q). Download it again from the releases page", stampedVercelDeployRepoURL, stampedSHA)
+			return commitRef{}, false, fmt.Errorf("this setup tool was built wrongly (Vercel deploy repository %q, stamped commit %q). Download the latest setup tool", stampedVercelDeployRepoURL, stampedSHA)
 		}
 		return commitRef{url: stampedVercelDeployRepoURL, sha: stampedSHA}, stampedHasChanges, nil
 	}
@@ -144,21 +144,28 @@ func parseGitRemoteURL(remote string) (string, error) {
 // So the setup stops here, before the person creates a repository and a token.
 // Without authentication, a private repository gives the same 404 as a repository that doesn't exist.
 func checkVercelDeployCommit(apiBase string, vercelDeployCommit commitRef) error {
+	isStampedBuild := stampedVercelDeployRepoURL != "" // Release executables are stamped, so the user can't fix this with git
 	fullName := strings.TrimPrefix(vercelDeployCommit.url, "https://github.com/")
 	status, err := readPublicGitHubStatus(apiBase + "/repos/" + fullName)
 	if err != nil {
 		return err
 	}
 	if status == http.StatusNotFound {
-		return fmt.Errorf("couldn't find %s as a public repository on GitHub. The Vercel Deploy link can only copy a public repository: "+
-			"run the setup tool in a clone of the original starkive or of your fork", vercelDeployCommit.url)
+		advice := "run the setup tool in a clone of a public starkive repository"
+		if isStampedBuild {
+			advice = "download the latest setup tool"
+		}
+		return fmt.Errorf("couldn't find %s as a public repository on GitHub. The Vercel Deploy link can only copy a public repository: %s", vercelDeployCommit.url, advice)
 	}
 	status, err = readPublicGitHubStatus(apiBase + "/repos/" + fullName + "/commits/" + vercelDeployCommit.sha)
 	if err != nil {
 		return err
 	}
 	if status == http.StatusNotFound || status == http.StatusUnprocessableEntity { // A commit that isn't in the repository (not pushed) gives 422 (measured)
-		return fmt.Errorf("commit %s isn't on GitHub in %s yet. Push it (git push) and run the setup tool again", vercelDeployCommit.sha[:7], vercelDeployCommit.url)
+		if isStampedBuild {
+			return fmt.Errorf("commit %s is no longer on GitHub in %s. Download the latest setup tool", vercelDeployCommit.sha[:7], vercelDeployCommit.url)
+		}
+		return fmt.Errorf("commit %s isn't on GitHub in %s yet. Push it (git push) and run the setup tool again from that clone", vercelDeployCommit.sha[:7], vercelDeployCommit.url)
 	}
 	return nil
 }
