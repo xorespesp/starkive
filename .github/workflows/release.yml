@@ -62,7 +62,13 @@ jobs:
               exit 1
             fi
           done
-          cd dist && sha256sum * > SHA256SUMS.txt
+          # The release text lists the SHA-256 of each file
+          {
+            echo 'SHA-256'
+            echo '```'
+            (cd dist && sha256sum *)
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,4 +76,4 @@ jobs:
           set -euo pipefail
           prerelease=""
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; fi
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes $prerelease
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" $prerelease
