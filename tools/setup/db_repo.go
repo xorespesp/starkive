@@ -56,20 +56,19 @@ func initializeDBRepo(cfg *core.Config) error {
 	return errors.New("GitHub hasn't shown the first commit yet. Wait a moment and run the setup tool again")
 }
 
-// Guide file shown on the front page of the DB repository.
-// It is added only when the repository has no README. An existing README is left as it is (`addInitialFiles`)
-const (
-	dbRepoReadmePath    = "README.md" // Path in the repository
-	dbRepoReadmeContent = `# Starkive Archive Repository
+// Path of the guide file shown on the front page of the DB repository.
+const dbRepoReadmePath = "README.md"
 
-This repository stores the archive of your [starkive](https://github.com/xorespesp/starkive) dashboard: the repositories you saved, your lists and your notes.
+// Content of the guide file shown on the front page of the DB repository.
+const dbRepoReadmeContent = `# Starkive Archive Repository
+
+This is your personal archive repository for the [starkive](https://github.com/xorespesp/starkive) project.
 
 - Keep this repository private unless you want your archive to be public.
-- Don't edit, move or delete the files here, or the STARKIVE_SYNC_KEY secret in Settings. The dashboard and the starkive setup tool manage them.
+- Don't edit, move or delete the files here, or the ` + "`" + core.SyncKeySecretName + "`" + ` secret in Settings. The dashboard and the starkive setup tool manage them.
 - Turn auto sync on or off in the dashboard's Settings, not in the Actions tab.
 - Deleting this repository deletes your archive.
 `
-)
 
 // Path of the empty file that keeps the data folder (`db/`) in the DB repository before the first data file is written.
 // Git doesn't store empty folders, so without it the folder doesn't show on GitHub
