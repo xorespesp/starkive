@@ -441,6 +441,16 @@ button {
 }
 
 .status {
-  margin-top: 16px;
-  color: var(--muted);
+  position: sticky;
+  top: 8px;
+  z-index: 1;
+  margin: 0 0 16px;
+  padding: 8px 16px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.status:empty {
+  display: none;
 }

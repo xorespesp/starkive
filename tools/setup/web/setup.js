@@ -9,6 +9,7 @@
 // Links are made only for `https://` addresses and addresses of this server.
 
 const POLL_MS = 700; // Interval between progress requests (milliseconds)
+const LOST_CONTACT = 'Lost contact with the setup tool. If you closed it, run it again.';
 const SLOW_WAIT_MS = 5 * 60 * 1000; // How long a waiting prompt can wait before the page says it is taking longer than usual (milliseconds)
 
 let shown = 0; // Number of lines already drawn. Sent as `since` in the next request
@@ -367,7 +368,7 @@ async function poll() {
     updateIndicators();
   } catch {
     $('busy').hidden = true;
-    $('status').textContent = 'Lost the connection to the setup tool. Is it still running?';
+    $('status').textContent = LOST_CONTACT;
   }
   setTimeout(poll, POLL_MS);
 }
@@ -419,7 +420,8 @@ async function submitAnswer(event) {
     dismissPrompt(id);
   } catch (err) {
     if (promptId !== id) return; // A later prompt is already shown, so the error isn't about it
-    error.textContent = `Couldn't send the answer: ${err.message}`;
+    // `fetch` throws a `TypeError` when the request doesn't reach the tool
+    error.textContent = err instanceof TypeError ? "Couldn't send your answer to the setup tool. If you closed it, run it again." : `Couldn't send the answer: ${err.message}`;
     error.hidden = false;
   }
 }
@@ -434,7 +436,7 @@ async function switchToTyping() {
     await sendToTool('/switch-to-typing', { id });
     dismissPrompt(id);
   } catch (err) {
-    $('status').textContent = `Couldn't reach the setup tool: ${err.message}`;
+    $('status').textContent = err instanceof TypeError ? LOST_CONTACT : `Couldn't switch to typing: ${err.message}`;
   }
 }
 
