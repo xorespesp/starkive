@@ -32,51 +32,36 @@ starkive is developed with a focus on keeping a private, lasting record of the r
 
 - A GitHub account
 - A [Vercel](https://vercel.com) account connected to your GitHub account (the free plan is enough)
-- [Git](https://git-scm.com/)
-- [Go](https://go.dev/dl/) 1.22 or later
+- Windows (on macOS or Linux, see [Running from source](#running-from-source))
 
 ### Steps
 
-1. **Clone this repository.**
-
-   ```
-   git clone https://github.com/xorespesp/starkive
-   ```
+1. **Download the setup tool.** Get `starkive-setup_windows_amd64.exe` from the [latest release](../../releases/latest).
 
 > [!NOTE]
-> Use `git clone`, not **Download ZIP**. The setup tool depends on your local Git clone.
+> The setup tool isn't code-signed, so your browser or Windows may warn you about it. Keep the file and run it anyway. To check the download, compare its SHA-256 with the one on the release page.
 
-2. **Run the setup tool** in your clone:
-
-   ```
-   go run ./tools/setup
-   ```
-
-   It opens a setup page in your browser and walks you through the steps that need you:
+2. **Run the setup tool.** It opens a setup page in your browser and walks you through the steps that need you:
    - **Create archive repository.** Enter a name for your archive (your GitHub username works well), then click **Create the repository**. The name and **Private** are filled in: keep the name and create it empty, with no README, `.gitignore` or license. Then click **Create the token**. That page is filled in for your archive repository: under **Repository access**, choose **Only select repositories**, pick that repository, generate the token, and paste it back.
    - **Deploy dashboard.** Click **Create the Vercel project** and pick your Git account (Vercel puts a copy of the dashboard's code there). Keep the repository name, paste the value the setup page shows under **Environment Variables**, and click **Deploy**. The setup page notices when the deployment is ready and continues on its own. If Vercel gives the dashboard a different address, enter it there (the production domain under the Vercel project's **Domains**).
    - **Create sign-in app.** Click **Create the GitHub App**, then **Create GitHub App** on GitHub's page. This app is how you sign in, and it gets no access to your repositories.
 
 > [!NOTE]
-> To run the setup headless, use `go run ./tools/setup -headless`.
+> To run the setup in the terminal instead of the browser, add `-headless`.
 
 3. **Open the dashboard and sign in with GitHub.** Your archive picks up new stars automatically (every day by default). Change how often, turn it off, or sync right away in **Settings**.
 
 If you ever replace the token, run the setup tool again, put the new value in Vercel, and redeploy. The tool tells you if anything else needs to change.
 
-## Updating
+## Running from source
 
-Updating the dashboard isn't automated yet; an easy way to bring new versions into your dashboard's code repository is planned. Updates never touch your archive, and if a new version can't use your existing archive, the dashboard says so instead of changing anything.
-
-## Development
+The setup tool also runs from a clone, which is the way on macOS and Linux, and for a fork you have changed. You need [Git](https://git-scm.com/) and [Go](https://go.dev/dl/) 1.22 or later:
 
 ```
-go test ./...
-go run ./tools/dev-server    # http://localhost:3000, reads .env.local
+git clone https://github.com/xorespesp/starkive
+cd starkive
+go run ./tools/setup
 ```
 
-The dev server writes to the repository in `.env.local`, so use a separate empty repository for it:
-
-1. Run the setup tool with that repository. In **Deploy dashboard**, skip the Vercel project and put the value it shows in `.env.local` as `STARKIVE_DB_REPO_ACCESS_KEY=<value>`.
-2. Start the dev server, then click **Or enter the deployed dashboard's Vercel domain manually** on the setup page (with `-headless`, type it at the prompt) and enter `http://localhost:3000`.
-3. After the setup, turn off auto sync in that dashboard's **Settings**.
+> [!NOTE]
+> The setup tool deploys the commit you run it from, so that commit must be pushed to a public GitHub repository.

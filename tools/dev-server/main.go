@@ -10,6 +10,12 @@
 // Environment variables come from the real environment or from `.env.local` (KEY=VALUE lines, not committed to git).
 // A variable that is already set wins over the file.
 // Without a fake GitHub (`STARKIVE_GH_API_URL`), it really commits to the DB repository the environment variable points to.
+// So use a separate empty DB repository, prepared with the setup tool:
+//  1. Run the setup tool with that repository.
+//     In "Deploy dashboard", skip the Vercel project, and put the value it shows in `.env.local` as `STARKIVE_DB_REPO_ACCESS_KEY=<value>`
+//  2. Start this server, then choose "Or enter the deployed dashboard's Vercel domain manually" on the setup page,
+//     and enter `http://localhost:3000` (with `-headless`, type it at the prompt)
+//  3. After the setup, turn off auto sync in that dashboard's Settings
 package main
 
 import (
