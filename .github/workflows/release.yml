@@ -19,7 +19,9 @@ permissions:
   contents: write # To create the release
 
 env:
-  TARGETS: windows/amd64 linux/amd64 darwin/arm64 # Targets to build, as GOOS/GOARCH separated by spaces
+  # Targets to build, as GOOS/GOARCH separated by spaces.
+  # Each one needs an entry in the `check` job.
+  TARGETS: windows/amd64 linux/amd64 darwin/arm64
 
 jobs:
   build:
@@ -45,7 +47,7 @@ jobs:
           grep -qF "https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}" <<< "$version_output" # The code it deploys to Vercel (`buildTreeURL`)
           grep -qwF "$GITHUB_REF_NAME" <<< "$version_output" # The release tag (`stampedReleaseTag`)
 
-          # Outside the checkout, because Go stamps `vcs.modified=true` when the working tree has untracked files (measured)
+          # Builds into a folder outside the checkout, because Go stamps `vcs.modified=true` when the working tree has untracked files (measured)
           mkdir "$RUNNER_TEMP/dist"
           for target in $TARGETS; do
             os="${target%/*}"
@@ -68,28 +70,38 @@ jobs:
           name: dist
           path: ${{ runner.temp }}/dist
 
-  # Temporary check of the macOS executable on an Apple Silicon Mac, in place of a hand test.
+  # Runs each executable on its own system before the release.
   # In an empty folder without git, it enters an archive name and ends the input at the token prompt.
   # Reaching that prompt means the executable started, passed the start check against GitHub and opened the local server.
-  check-macos:
+  check:
     needs: build
-    runs-on: macos-latest # Apple Silicon (docs)
+    strategy:
+      matrix:
+        include:
+          - runner: windows-latest
+            file: starkive-setup_windows_amd64.exe
+          - runner: ubuntu-latest
+            file: starkive-setup_linux_amd64
+          - runner: macos-latest # Apple Silicon (docs)
+            file: starkive-setup_darwin_arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-      - name: Run the macOS executable
+      - name: Run ${{ matrix.file }}
+        shell: bash # Git Bash on Windows
         run: |
           set -euo pipefail
-          setup="$PWD/dist/starkive-setup_darwin_arm64"
+          setup="$PWD/dist/${{ matrix.file }}"
           chmod +x "$setup" # Artifacts don't keep the executable bit (docs)
           output="$(cd "$(mktemp -d)" && printf 'ci-check\n' | "$setup" -headless 2>&1)" || true # It exits with 1 when the input ends
           echo "$output"
           grep -qF "Paste the token:" <<< "$output"
 
   release:
-    needs: [build, check-macos]
+    needs: [build, check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
