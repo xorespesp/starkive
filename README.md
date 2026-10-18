@@ -32,16 +32,27 @@ starkive is developed with a focus on keeping a private, lasting record of the r
 
 - A GitHub account
 - A [Vercel](https://vercel.com) account connected to your GitHub account (the free plan is enough)
-- Windows (on macOS or Linux, see [Running from source](#running-from-source))
 
 ### Steps
 
-1. **Download the setup tool.** Get `starkive-setup_windows_amd64.exe` from the [latest release](../../releases/latest).
+1. **Download and run the setup tool:**
+   - Windows: Download and run `starkive-setup_windows_amd64.exe` from the [latest release](../../releases/latest).
+   - Linux: Run the following command in a terminal:
+
+     ```
+     curl -LO https://github.com/xorespesp/starkive/releases/latest/download/starkive-setup_linux_amd64 && chmod +x starkive-setup_linux_amd64 && ./starkive-setup_linux_amd64
+     ```
+
+   - macOS: Run the following command in a terminal:
+
+     ```
+     curl -LO https://github.com/xorespesp/starkive/releases/latest/download/starkive-setup_darwin_arm64 && chmod +x starkive-setup_darwin_arm64 && ./starkive-setup_darwin_arm64
+     ```
 
 > [!NOTE]
-> The setup tool isn't code-signed, so your browser or Windows may warn you about it. Keep the file and run it anyway. To check the download, compare its SHA-256 with the one on the release page.
+> The setup tool isn't code-signed, so your browser or system may warn you about it. Keep the file and run it anyway. To check the download, compare its SHA-256 with the one on the release page.
 
-2. **Run the setup tool.** It opens a setup page in your browser and walks you through the steps that need you:
+2. **Follow the setup page.** The setup tool opens it in your browser and walks you through the steps that need you:
    - **Create archive repository.** Enter a name for your archive (your GitHub username works well), then click **Create the repository**. The name and **Private** are filled in: keep the name and create it empty, with no README, `.gitignore` or license. Then click **Create the token**. That page is filled in for your archive repository: under **Repository access**, choose **Only select repositories**, pick that repository, generate the token, and paste it back.
    - **Deploy dashboard.** Click **Create the Vercel project** and pick your Git account (Vercel puts a copy of the dashboard's code there). Keep the repository name, paste the value the setup page shows under **Environment Variables**, and click **Deploy**. The setup page notices when the deployment is ready and continues on its own. If Vercel gives the dashboard a different address, enter it there (the production domain under the Vercel project's **Domains**).
    - **Create sign-in app.** Click **Create the GitHub App**, then **Create GitHub App** on GitHub's page. This app is how you sign in, and it gets no access to your repositories.
@@ -55,7 +66,7 @@ If you ever replace the token, run the setup tool again, put the new value in Ve
 
 ## Running from source
 
-The setup tool also runs from a clone, which is the way on macOS and Linux, and for a fork you have changed. You need [Git](https://git-scm.com/) and [Go](https://go.dev/dl/) 1.22 or later:
+To build and run the setup tool from source, run it from a clone. You need [Git](https://git-scm.com/) and [Go](https://go.dev/dl/) 1.22 or later:
 
 ```
 git clone https://github.com/xorespesp/starkive
