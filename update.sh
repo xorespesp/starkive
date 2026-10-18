@@ -106,7 +106,7 @@ git diff --stat HEAD "$tree"
 confirm "Commit this and push it to origin/$branch?"
 
 # The copy shares no history with starkive, so the commit has `HEAD` as its only parent
-commit=$(printf 'chore: Update to starkive %s\n\n%s: %s (%s)\n' "$tag" "$TRAILER" "$tag" "$release" | git commit-tree "$tree" -p HEAD)
+commit=$(printf 'chore: Update to starkive %s (%s)\n\n%s: %s (%s)\n' "$(git rev-parse --short=7 "$release")" "$tag" "$TRAILER" "$tag" "$release" | git commit-tree "$tree" -p HEAD)
 git merge -q --ff-only "$commit"
 git push -q origin "$branch" || fail "the push failed. The update commit is only in this clone. Push it again with 'git push', or undo it with 'git reset --hard origin/$branch'."
 echo "Updated to starkive $tag. Vercel redeploys the dashboard in a few minutes."
