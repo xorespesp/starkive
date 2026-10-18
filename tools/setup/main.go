@@ -142,7 +142,9 @@ func main() {
 	version := flag.Bool("version", false, "print the version information")
 	flag.Parse()
 	if *version {
-		if err := printVersion(); err != nil {
+		err := printVersion()
+		waitForEnterIfConsoleCloses()
+		if err != nil {
 			os.Exit(1)
 		}
 		return
@@ -156,6 +158,7 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())
+		waitForEnterIfConsoleCloses()
 		os.Exit(1)
 	}
 	if hasUncommittedChanges {
@@ -165,6 +168,7 @@ func main() {
 	server, err := startLocalServer()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())
+		waitForEnterIfConsoleCloses()
 		os.Exit(1)
 	}
 	var u ui
@@ -177,6 +181,7 @@ func main() {
 		launchBrowser(web.startURL)
 	} else {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())
+		waitForEnterIfConsoleCloses()
 		os.Exit(1)
 	}
 
@@ -205,6 +210,7 @@ func main() {
 	}
 	server.close()
 	if err != nil {
+		waitForEnterIfConsoleCloses()
 		os.Exit(1)
 	}
 }

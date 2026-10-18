@@ -18,7 +18,7 @@ let finished = false; // Whether the setup ended
 let waitingShown = false; // Whether the current prompt is a waiting prompt
 let waitingSince = 0; // When the waiting sentence of the current prompt started to show (`Date.now()`). 0 if it isn't shown
 let openNotClicked = false; // Whether the last open button (`open`) drawn in the current step is not clicked yet. The person still has work to do, so the progress indicator is hidden
-const steps = []; // Page elements for each step: { item, header, marker, toggle, body, lines }. The order is the step number (from 1)
+const steps = []; // Page elements for each step: { item, header, marker, toggle, body, content, lines }. The order is the step number (from 1)
 const expandedByUser = new Map(); // Step number -> expanded or not, as set by the person clicking the header. If missing, it follows the state
 let lineTarget = null; // The line list of the step where the next line goes. Changes when the tool starts a step (`step` line)
 let lastState = null; // The last progress received
@@ -117,13 +117,14 @@ function buildSteps(titles) {
     const toggle = el('span', { className: 'step-toggle' });
     const header = el('button', { type: 'button', className: 'step-header' }, marker, el('span', { textContent: title }), toggle);
     const lines = el('div');
-    const body = el('div', { className: 'step-body' }, lines);
+    const content = el('div', { className: 'step-content' }, lines);
+    const body = el('div', { className: 'step-body' }, el('div', { className: 'step-clip' }, content));
     const item = el('li', {}, header, body);
     header.onclick = () => {
-      expandedByUser.set(n, body.hidden);
+      expandedByUser.set(n, body.classList.contains('collapsed'));
       renderSteps(lastState);
     };
-    steps.push({ item, header, marker, toggle, body, lines });
+    steps.push({ item, header, marker, toggle, body, content, lines });
     $('steps').append(item);
   });
   lineTarget = steps[0].lines;
@@ -209,15 +210,17 @@ function renderSteps(state) {
     step.header.disabled = status === 'pending' || status === 'current'; // The step in progress holds the prompt, so it can't be collapsed
     step.header.setAttribute('aria-expanded', String(expanded));
     step.toggle.textContent = status === 'done' ? (expanded ? 'Hide' : 'Show') : '';
-    step.body.hidden = !expanded;
+    step.body.classList.toggle('collapsed', !expanded);
   });
   const controls = $('controls');
   controls.hidden = state.finished;
   if (!state.finished && state.current > 0 && state.current !== controlsStep) {
     controlsStep = state.current;
     const step = steps[state.current - 1];
-    step.body.append(controls);
-    step.item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    step.content.append(controls);
+    // After the expand animation, so it scrolls to the final position
+    const animationMs = parseFloat(getComputedStyle(step.body).transitionDuration) * 1000;
+    setTimeout(() => step.item.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), animationMs);
   }
 }
 
