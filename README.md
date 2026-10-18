@@ -65,3 +65,13 @@ go run ./tools/setup
 
 > [!NOTE]
 > The setup tool deploys the commit you run it from, so that commit must be pushed to a public GitHub repository.
+
+## Updating
+
+To update the dashboard to the latest release, clone the GitHub repository that Vercel deploys your dashboard from, and run the update script in it. You need [Git](https://git-scm.com/). On Windows, run the commands in Git Bash.
+
+```
+git clone https://github.com/<your-username>/<vercel-deployed-repository>
+cd <vercel-deployed-repository>
+sh update.sh
+```
