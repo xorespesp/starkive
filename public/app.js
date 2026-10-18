@@ -1627,13 +1627,21 @@ async function openImport() {
     busy = false;
     if (closed) return; // Closed (a closed session also ends here)
     cancel.textContent = 'Close';
+    const stars = (n) => `${n} ${n === 1 ? 'star' : 'stars'}`;
+    const nothingImported = 'Nothing imported. The chosen stars were already archived or are no longer starred.';
 
     if (!reloaded) {
       // If the archive couldn't be fetched, keep the list as is (with the same choices), so the user can press again
       updateControls();
       status.className = importError ? 'dialog-error' : 'muted';
-      status.textContent = importError ? `${importError.message}. Couldn't confirm the import. Press Import again.` : `Imported ${added}. Reload to see them.`;
-      if (!importError) setStatus(`Imported ${added}.`);
+      if (importError) {
+        status.textContent = `${importError.message}. Couldn't confirm the import. Press Import again.`;
+      } else if (added === 0) {
+        status.textContent = nothingImported;
+      } else {
+        status.textContent = `Imported ${stars(added)}. Reload to see them.`;
+        setStatus(`Imported ${stars(added)}.`);
+      }
       return;
     }
     // On success, the remaining new Stars were left out on purpose, so they stay unchecked.
@@ -1646,9 +1654,8 @@ async function openImport() {
       status.textContent = `${importError.message}. ${ids.filter((id) => archivedIds.has(id)).length} of ${ids.length} are in the archive.`;
       return;
     }
-    const stars = (n) => `${n} ${n === 1 ? 'star' : 'stars'}`;
     if (added === 0) {
-      status.textContent = 'Nothing imported. The chosen stars were already archived or are no longer starred.';
+      status.textContent = nothingImported;
       return;
     }
     const details = [
