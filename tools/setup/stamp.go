@@ -53,7 +53,7 @@ func readStampedVCS() (revision string, modified bool, commitTime string) {
 }
 
 // Prints the version of this setup tool: the release tag, the code it deploys to Vercel (`resolveVercelDeployCommit`), the commit time, and the Go build.
-// If the code to deploy is unknown, it prints the reason in its place and returns the error.
+// If the code to deploy to Vercel is unknown, it prints the reason in its place and returns the error.
 //
 // NOTE: The release workflow runs the setup tool with `-version` and looks for the address and the tag in this output (`.github/workflows/release.yml`).
 // So keep printing both.
