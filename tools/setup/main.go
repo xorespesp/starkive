@@ -342,7 +342,8 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 			u.say("A dashboard at `" + site + "` is deployed with another value. If you deployed it in an earlier run, set `" + core.DBRepoAccessKeyEnv +
 				"` in its Vercel project's Environment Variables to the value below and redeploy. Otherwise, create a new project.")
 		}
-		u.say("Create a Vercel project for the dashboard. On Vercel's page, pick the Git account for the dashboard's code.")
+		u.say("Create a Vercel project for the dashboard. On Vercel's page, pick the Git account for the dashboard's code. " +
+			"If your Vercel account isn't connected to GitHub yet, connect it there first.")
 		u.note("Keep the repository name `" + dashboardName + "` and leave the other settings as they are. The setup finds the dashboard by this name.")
 		u.open("Create the Vercel project", buildVercelDeployURL(vercelDeployCommit, dashboardName))
 		u.say("On that page, under Environment Variables, paste this value as the value of `" + core.DBRepoAccessKeyEnv + "`, then click Vercel's Deploy button. " +
