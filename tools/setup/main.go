@@ -175,7 +175,7 @@ func main() {
 	var web *webUI // Set only in setup page mode. Used to wait until the page fetches the last lines after the setup ends
 	if *headless {
 		u = newTerminalUI()
-		fmt.Println("Starkive Setup Wizard")
+		fmt.Println("Starkive Setup Wizard (" + readVersionLabel() + ")")
 	} else if web, err = newWebUI(server); err == nil {
 		u = web
 		launchBrowser(web.startURL)

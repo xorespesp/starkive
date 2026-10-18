@@ -80,6 +80,7 @@ type webState struct {
 	Finished bool       `json:"finished"` // Whether the setup ended
 	Failed   bool       `json:"failed"`   // If it ended, whether it failed. If it failed, the step in progress is the failed step
 	Result   *webResult `json:"result"`   // The result card content on success. `null` if not set yet
+	Version  string     `json:"version"`  // Version of this setup tool (`readVersionLabel`)
 }
 
 // The `ui` that runs on the setup page
@@ -308,7 +309,7 @@ func (u *webUI) handleState(w http.ResponseWriter, r *http.Request) {
 	since = min(max(since, 0), len(u.lines)) // Even if the page sends a wrong number, it is kept in range
 	state := webState{
 		Steps: setupSteps, Current: u.current, Lines: append([]webLine{}, u.lines[since:]...), Total: len(u.lines),
-		Prompt: u.prompt, Finished: u.finished, Failed: u.failed, Result: u.result,
+		Prompt: u.prompt, Finished: u.finished, Failed: u.failed, Result: u.result, Version: readVersionLabel(),
 	}
 	u.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

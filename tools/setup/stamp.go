@@ -52,6 +52,14 @@ func readStampedVCS() (revision string, modified bool, commitTime string) {
 	return settings["vcs.revision"], settings["vcs.modified"] == "true", settings["vcs.time"]
 }
 
+// Returns the version shown to the user: the release tag, or "development build" if none is stamped.
+func readVersionLabel() string {
+	if stampedReleaseTag == "" {
+		return "development build"
+	}
+	return stampedReleaseTag
+}
+
 // Prints the version of this setup tool: the release tag, the code it deploys to Vercel (`resolveVercelDeployCommit`), the commit time, and the Go build.
 // If the code to deploy to Vercel is unknown, it prints the reason in its place and returns the error.
 //
@@ -59,11 +67,7 @@ func readStampedVCS() (revision string, modified bool, commitTime string) {
 // So keep printing both.
 // The build time isn't stamped, so two builds of the same commit with the same Go version and flags give the same file and the same checksum.
 func printVersion() error {
-	tag := stampedReleaseTag
-	if tag == "" {
-		tag = "development build"
-	}
-	fmt.Println("starkive setup tool " + tag)
+	fmt.Println("starkive setup tool " + readVersionLabel())
 	vercelDeployCommit, hasUncommittedChanges, err := resolveVercelDeployCommit()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Vercel deploy source: unknown ("+err.Error()+")")

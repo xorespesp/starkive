@@ -121,6 +121,13 @@ button {
   margin: 0 0 16px;
 }
 
+.version {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+}
+
 /* Vertical step list.
    Each step has a header (marker and name) and a body (the lines of that step).
    A line on the left connects the steps. */
@@ -216,24 +223,16 @@ button {
   color: var(--bg);
 }
 
-/* A grid row animates the height, because `height: auto` can't be animated */
+/* `setup.js` sets the height (`updateStepHeight`) */
 .step-body {
-  display: grid;
-  grid-template-rows: 1fr;
-  margin-left: 36px;
-  transition: grid-template-rows 0.2s ease, visibility 0s;
+  margin: 0 -4px 0 32px;
+  overflow: clip; /* Unlike `hidden`, focusing an input inside can't scroll it */
+  transition: height 0.2s ease, visibility 0s;
 }
 
 .step-body.collapsed {
-  grid-template-rows: 0fr;
   visibility: hidden;
-  transition: grid-template-rows 0.2s ease, visibility 0s 0.2s;
-}
-
-.step-clip {
-  min-height: 0;
-  margin: 0 -4px;
-  overflow: hidden;
+  transition: height 0.2s ease, visibility 0s 0.2s;
 }
 
 .step-content {

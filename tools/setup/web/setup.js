@@ -118,16 +118,26 @@ function buildSteps(titles) {
     const header = el('button', { type: 'button', className: 'step-header' }, marker, el('span', { textContent: title }), toggle);
     const lines = el('div');
     const content = el('div', { className: 'step-content' }, lines);
-    const body = el('div', { className: 'step-body' }, el('div', { className: 'step-clip' }, content));
+    const body = el('div', { className: 'step-body' }, content);
     const item = el('li', {}, header, body);
     header.onclick = () => {
       expandedByUser.set(n, body.classList.contains('collapsed'));
       renderSteps(lastState);
     };
-    steps.push({ item, header, marker, toggle, body, content, lines });
+    const step = { item, header, marker, toggle, body, content, lines };
+    steps.push(step);
+    new ResizeObserver(() => updateStepHeight(step)).observe(content);
     $('steps').append(item);
   });
   lineTarget = steps[0].lines;
+}
+
+/**
+ * Sets the body height of `step`: 0 if collapsed, otherwise the height of its content.
+ * A fixed height can be animated, but `height: auto` can't.
+ */
+function updateStepHeight(step) {
+  step.body.style.height = `${step.body.classList.contains('collapsed') ? 0 : step.content.offsetHeight}px`;
 }
 
 /**
@@ -211,6 +221,7 @@ function renderSteps(state) {
     step.header.setAttribute('aria-expanded', String(expanded));
     step.toggle.textContent = status === 'done' ? (expanded ? 'Hide' : 'Show') : '';
     step.body.classList.toggle('collapsed', !expanded);
+    updateStepHeight(step);
   });
   const controls = $('controls');
   controls.hidden = state.finished;
@@ -336,6 +347,7 @@ async function poll() {
     if (!res.ok) throw new Error(`${res.status}`);
     const state = await res.json();
     if (steps.length === 0) buildSteps(state.steps);
+    $('version').textContent = state.version;
     for (const line of state.lines) {
       const node = renderLine(line);
       if (node) lineTarget.append(node);
