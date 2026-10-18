@@ -45,13 +45,14 @@ jobs:
           grep -qF "https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}" <<< "$version_output" # The code it deploys to Vercel (`buildTreeURL`)
           grep -qwF "$GITHUB_REF_NAME" <<< "$version_output" # The release tag (`stampedReleaseTag`)
 
-          mkdir dist
+          # Outside the checkout, because Go stamps `vcs.modified=true` when the working tree has untracked files (measured)
+          mkdir "$RUNNER_TEMP/dist"
           for target in $TARGETS; do
             os="${target%/*}"
             arch="${target#*/}"
             ext=""
             if [ "$os" = windows ]; then ext=".exe"; fi
-            out="dist/starkive-setup_${os}_${arch}${ext}"
+            out="$RUNNER_TEMP/dist/starkive-setup_${os}_${arch}${ext}"
             GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "$out" ./tools/setup
             # Check the commit Go stamped into this executable: the tagged commit, built without changes
             info="$(go version -m "$out")"
@@ -65,7 +66,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist
+          path: ${{ runner.temp }}/dist
 
   # Temporary check of the macOS executable on an Apple Silicon Mac, in place of a hand test.
   # In an empty folder without git, it enters an archive name and ends the input at the token prompt.
