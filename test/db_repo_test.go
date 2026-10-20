@@ -106,18 +106,43 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 		"spaces after the prefix": core.NewCommitMessage("user(star-lists)", " "),
 		"no prefix":               core.NewCommitMessage("", "delete Graphics"),
 	} {
-		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
-			return map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, message, nil
+		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+			return core.FileChangesCommit{FilesToWrite: map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("files with %s: %v, commits %d -> %d", name, err, before, len(gh.commits))
 		}
 	}
-	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
-		return nil, core.CommitMessage{}, nil
+	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+		return core.FileChangesCommit{}, nil
 	})
 	if err != nil || len(gh.commits) != before {
 		t.Errorf("nothing to write: %v, commits %d -> %d", err, before, len(gh.commits))
+	}
+}
+
+// Tests that `core.UpdateFiles` stops with an error and doesn't commit, when a path to read or write isn't valid.
+// A path to read that isn't valid stops it before `buildFileChangesCommit` is called.
+func TestInvalidPathIsRefused(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	before := len(gh.commits)
+	message := core.NewCommitMessage("user(star-lists)", "delete Graphics")
+	for _, p := range []string{"/" + core.StarListsDBPath, "./" + core.StarListsDBPath} {
+		called := false
+		err := core.UpdateFiles(cfg, []string{p}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+			called = true
+			return core.FileChangesCommit{}, nil
+		})
+		if err == nil || called {
+			t.Errorf("read %q: %v, change called %v", p, err, called)
+		}
+		err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+			return core.FileChangesCommit{FilesToWrite: map[string][]byte{p: []byte("[]\n")}, Message: message}, nil
+		})
+		if err == nil || len(gh.commits) != before {
+			t.Errorf("write %q: %v, commits %d -> %d", p, err, before, len(gh.commits))
+		}
 	}
 }
 

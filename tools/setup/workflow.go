@@ -156,12 +156,12 @@ func checkActionsPermission(cfg *core.Config) error {
 // The workflow must match that dashboard, so this tool leaves it as it is too.
 func installWorkflowIfAbsent(cfg *core.Config) error {
 	paths := []string{core.SyncWorkflowPath}
-	return core.UpdateFiles(cfg, paths, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
-		if original[core.SyncWorkflowPath] != nil {
-			return nil, core.CommitMessage{}, nil // Nothing to write, so no commit
+	return core.UpdateFiles(cfg, paths, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+		if filesRead[core.SyncWorkflowPath] != nil {
+			return core.FileChangesCommit{}, nil // Nothing to write, so no commit
 		}
-		written := map[string][]byte{core.SyncWorkflowPath: []byte(syncWorkflowContent)} // Files to write in this commit: path -> content
+		filesToWrite := map[string][]byte{core.SyncWorkflowPath: []byte(syncWorkflowContent)} // Path -> content
 		message := core.NewCommitMessage("user(workflow)", "install auto sync workflow")
-		return written, message, nil
+		return core.FileChangesCommit{FilesToWrite: filesToWrite, Message: message}, nil
 	})
 }

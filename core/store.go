@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -111,22 +112,38 @@ type Archive struct {
 // Commits that don't say what they changed are never made
 var errInvalidCommitMessage = errors.New("refusing to commit changes without a valid commit message")
 
-// Reads several files in the DB repository from one commit, and writes the files that `change` returns in one commit.
+// Reports whether `p` is a clean path relative to the repository root (e.g. `db/star-items.json`).
+// One file then has only one spelling, so two different paths never name the same file.
+func isValidRepoPath(p string) bool {
+	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") || strings.Contains(p, `\`) {
+		return false
+	}
+	return path.Clean(p) == p // `path.Clean` removes `//`, `./`, `x/..` and a trailing `/`
+}
+
+// Contents of one commit to make: the files to write and the commit message
+type FileChangesCommit struct {
+	FilesToWrite map[string][]byte // Path -> new content. A path doesn't have to be one of the files read
+	Message      CommitMessage     // Commit message. Required if anything is written
+}
+
+// Reads several files in the DB repository from one commit, and writes what `buildFileChangesCommit` returns as one commit.
 // Every write to the DB repository goes through this function.
 // The only exception is the first commit in an empty repository.
 // The Git Data API doesn't work in an empty repository, so the setup tool writes that commit with the Contents API.
 //
 // Args:
-//   - `paths`: Paths of the files to read
-//   - `change`: Takes what was read (path -> content, `nil` if the file doesn't exist).
-//     It returns the files to write (path -> new content) and a commit message.
+//   - `paths`: Paths of the files to read. Every path here and in the returned commit must pass `isValidRepoPath`
+//   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist).
+//     It returns the commit to make (`FileChangesCommit`).
 //     If there are no files to write, nothing is committed.
 //     If there are files to write, a valid commit message (`isValid`) is required.
 //     If it returns an error, nothing is written
 //
 // Returns:
-//   - An error from `change` or from GitHub.
+//   - An error from `buildFileChangesCommit` or from GitHub.
 //     `errInvalidCommitMessage` if there are files to write but the message isn't valid (`isValid`).
+//     An error if a path isn't valid (`isValidRepoPath`). Then nothing is written.
 //     409 `errBranchMoved` if other commits keep getting in until all retries are used up
 //
 // NOTE:
@@ -136,33 +153,43 @@ var errInvalidCommitMessage = errors.New("refusing to commit changes without a v
 //     Then it starts over from the new commit.
 //     This is the only case that is retried.
 //     Errors while making the tree or the commit are not conflicts, so they are returned right away.
-//   - `change` can be called more than once.
+//   - `buildFileChangesCommit` can be called more than once.
 //     If it leaves results in outer variables, it must set them from scratch on every call.
 //   - One write costs "5 + number of files" GitHub requests (branch, its commit, one per file, tree, commit, branch move).
 //     For the archive (three files) that is 8.
 //     This is the price of putting several files in one commit with no in-between state.
-func UpdateFiles(cfg *Config, paths []string, change func(original map[string][]byte) (map[string][]byte, CommitMessage, error)) error {
+func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte) (FileChangesCommit, error)) error {
+	for _, p := range paths {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to read a file path that isn't valid: %q", p)
+		}
+	}
 	for attempt := 1; ; attempt++ {
 		head, err := readBranchHead(cfg)
 		if err != nil {
 			return err
 		}
-		original, err := readFilesAt(cfg, paths, head.commit)
+		filesRead, err := readFilesAt(cfg, paths, head.commit)
 		if err != nil {
 			return err
 		}
-		written, message, err := change(original) // If another commit gets in, it is called again on the next loop with the new content
+		changes, err := buildFileChangesCommit(filesRead) // If another commit gets in, it is called again on the next loop with the new content
 		if err != nil {
 			return err
 		}
-		if len(written) == 0 {
+		if len(changes.FilesToWrite) == 0 {
 			return nil
 		}
-		if !message.isValid() {
+		if !changes.Message.isValid() {
 			return errInvalidCommitMessage
 		}
+		for p := range changes.FilesToWrite {
+			if !isValidRepoPath(p) {
+				return fmt.Errorf("refusing to write a file path that isn't valid: %q", p)
+			}
+		}
 
-		err = commitFiles(cfg, head, written, message)
+		err = commitFiles(cfg, head, changes)
 		if err == nil {
 			return nil
 		}
@@ -242,40 +269,40 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 	}
 	var updated *Archive
 	// Reads the three files together from the same commit
-	err := UpdateFiles(cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(original map[string][]byte) (map[string][]byte, CommitMessage, error) {
+	err := UpdateFiles(cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(filesRead map[string][]byte) (FileChangesCommit, error) {
 		a := &Archive{}
 		var err error
-		if a.StarItems, err = decodeItems[StarItem](original[StarItemsDBPath]); err != nil {
-			return nil, CommitMessage{}, err
+		if a.StarItems, err = decodeItems[StarItem](filesRead[StarItemsDBPath]); err != nil {
+			return FileChangesCommit{}, err
 		}
-		if a.StarLists, err = decodeItems[StarList](original[StarListsDBPath]); err != nil {
-			return nil, CommitMessage{}, err
+		if a.StarLists, err = decodeItems[StarList](filesRead[StarListsDBPath]); err != nil {
+			return FileChangesCommit{}, err
 		}
-		if a.RepoMeta, err = decodeItems[RepoMeta](original[RepoMetaDBPath]); err != nil {
-			return nil, CommitMessage{}, err
+		if a.RepoMeta, err = decodeItems[RepoMeta](filesRead[RepoMetaDBPath]); err != nil {
+			return FileChangesCommit{}, err
 		}
 		before, err := encode(a) // `change` edits `a` in place, so encode it first
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 
 		message, err := change(a)
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 
 		after, err := encode(a)
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
-		written := map[string][]byte{}
+		changes := FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: message}
 		for path, content := range after {
 			if !bytes.Equal(before[path], content) {
-				written[path] = content
+				changes.FilesToWrite[path] = content
 			}
 		}
 		updated = a // If called again, this becomes the new archive
-		return written, message, nil
+		return changes, nil
 	})
 	if err != nil {
 		return nil, err
@@ -337,8 +364,7 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //
 // Args:
 //   - `head`: The branch tip at the time the files were read. It becomes the parent of the new commit
-//   - `files`: Files to write (path -> new content)
-//   - `message`: The commit message
+//   - `changes`: Files to write and the commit message
 //
 // Returns:
 //   - `nil` on success. `errBranchMoved` if the branch moved in the meantime. Otherwise the GitHub error
@@ -360,9 +386,9 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //   - Limit: right after the move, GitHub may briefly return the old branch value.
 //     Then it looks like "didn't move" and the error is returned.
 //     The data is safe, and the request can simply be sent again.
-func commitFiles(cfg *Config, head branchHead, files map[string][]byte, message CommitMessage) error {
+func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error {
 	entries := []map[string]string{}
-	for path, content := range files {
+	for path, content := range changes.FilesToWrite {
 		entries = append(entries, map[string]string{"path": path, "mode": "100644", "type": "blob", "content": string(content)})
 	}
 	var tree struct {
@@ -374,7 +400,7 @@ func commitFiles(cfg *Config, head branchHead, files map[string][]byte, message 
 	var commit struct {
 		SHA string `json:"sha"`
 	}
-	if err := callRepoAPI(cfg, http.MethodPost, "/git/commits", map[string]any{"message": message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit); err != nil {
+	if err := callRepoAPI(cfg, http.MethodPost, "/git/commits", map[string]any{"message": changes.Message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit); err != nil {
 		return err
 	}
 	// Moves without force. If the branch moved in the meantime, GitHub refuses

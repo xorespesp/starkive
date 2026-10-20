@@ -393,27 +393,27 @@ func encodeConfig(file dbConfigFile) ([]byte, error) {
 // The check and the save happen on the file right before the commit.
 // So even when a settings write and an App write overlap, neither erases the other's values.
 func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, error)) error {
-	return UpdateFiles(cfg, []string{ConfigDBPath}, func(original map[string][]byte) (map[string][]byte, CommitMessage, error) {
-		file, err := decodeConfig(original[ConfigDBPath])
+	return UpdateFiles(cfg, []string{ConfigDBPath}, func(filesRead map[string][]byte) (FileChangesCommit, error) {
+		file, err := decodeConfig(filesRead[ConfigDBPath])
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 		before, err := encodeConfig(file)
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 		message, err := change(&file)
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 		content, err := encodeConfig(file)
 		if err != nil {
-			return nil, CommitMessage{}, err
+			return FileChangesCommit{}, err
 		}
 		if bytes.Equal(content, before) {
-			return nil, CommitMessage{}, nil
+			return FileChangesCommit{}, nil
 		}
-		return map[string][]byte{ConfigDBPath: content}, message, nil
+		return FileChangesCommit{FilesToWrite: map[string][]byte{ConfigDBPath: content}, Message: message}, nil
 	})
 }
 
