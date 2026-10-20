@@ -387,13 +387,18 @@ func encodeConfig(file dbConfigFile) ([]byte, error) {
 //   - The 409 error from `decodeConfig` if the file can't be read (nothing is written).
 //     Otherwise an error from `change` or `UpdateFiles`
 //
-// NOTE: If the result is byte-for-byte the same as the original file, nothing is committed.
+// NOTE: The file before and after `change` is written in the same shape (`encodeConfig`) and compared.
+// If they are the same, nothing is committed.
 // It doesn't write to a file it can't read, because writing a new one would erase the App settings inside it.
 // The check and the save happen on the file right before the commit.
 // So even when a settings write and an App write overlap, neither erases the other's values.
 func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, error)) error {
 	return UpdateFiles(cfg, []string{ConfigDBPath}, func(original map[string][]byte) (map[string][]byte, CommitMessage, error) {
 		file, err := decodeConfig(original[ConfigDBPath])
+		if err != nil {
+			return nil, CommitMessage{}, err
+		}
+		before, err := encodeConfig(file)
 		if err != nil {
 			return nil, CommitMessage{}, err
 		}
@@ -405,7 +410,7 @@ func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, e
 		if err != nil {
 			return nil, CommitMessage{}, err
 		}
-		if bytes.Equal(content, original[ConfigDBPath]) {
+		if bytes.Equal(content, before) {
 			return nil, CommitMessage{}, nil
 		}
 		return map[string][]byte{ConfigDBPath: content}, message, nil
@@ -434,7 +439,7 @@ func readSyncConfig(cfg *Config) (syncConfig, error) {
 }
 
 // Records the dashboard address for the workflow to call (`dashboard_url`).
-// Other values in the config file are not touched, and nothing is committed if the file stays the same.
+// Other values in the config file are not touched, and nothing is committed if the values stay the same.
 //
 // Args:
 //   - `siteURL`: The canonical address of the dashboard, registered in the GitHub App (`GitHubApp.SiteURL`)

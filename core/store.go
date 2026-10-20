@@ -107,9 +107,9 @@ type Archive struct {
 	RepoMeta  []RepoMeta // Snapshots of repository metadata (`RepoMetaDBPath`)
 }
 
-// Error for a write that has files to write but an empty commit message.
+// Error for a write that has files to write but a commit message that isn't valid (`isValid`).
 // Commits that don't say what they changed are never made
-var errEmptyCommitMessage = errors.New("refusing to commit changes without a commit message")
+var errInvalidCommitMessage = errors.New("refusing to commit changes without a valid commit message")
 
 // Reads several files in the DB repository from one commit, and writes the files that `change` returns in one commit.
 // Every write to the DB repository goes through this function.
@@ -121,12 +121,12 @@ var errEmptyCommitMessage = errors.New("refusing to commit changes without a com
 //   - `change`: Takes what was read (path -> content, `nil` if the file doesn't exist).
 //     It returns the files to write (path -> new content) and a commit message.
 //     If there are no files to write, nothing is committed.
-//     If there are files to write, the commit message is required.
+//     If there are files to write, a valid commit message (`isValid`) is required.
 //     If it returns an error, nothing is written
 //
 // Returns:
 //   - An error from `change` or from GitHub.
-//     `errEmptyCommitMessage` if there are files to write but the message is empty.
+//     `errInvalidCommitMessage` if there are files to write but the message isn't valid (`isValid`).
 //     409 `errBranchMoved` if other commits keep getting in until all retries are used up
 //
 // NOTE:
@@ -158,8 +158,8 @@ func UpdateFiles(cfg *Config, paths []string, change func(original map[string][]
 		if len(written) == 0 {
 			return nil
 		}
-		if message.subject == "" { // Commits that don't say what they changed are never made
-			return errEmptyCommitMessage
+		if !message.isValid() {
+			return errInvalidCommitMessage
 		}
 
 		err = commitFiles(cfg, head, written, message)
@@ -482,7 +482,7 @@ func formatCommitList(title string, items []string) string {
 
 // Message of a DB repository commit: one subject line and a body below it. Made with `NewCommitMessage`
 type CommitMessage struct {
-	subject string   // Subject in the form `<who>(<file>): <summary>`
+	subject string   // Subject in the form `<prefix>: <summary>` (`NewCommitMessage`)
 	body    []string // Body blocks, added below the subject with blank lines between them
 }
 
@@ -497,7 +497,7 @@ type CommitMessage struct {
 //   - `summary`: What changed, starting with a verb (e.g. "add owner/repo")
 //   - `body`: Body blocks (use `formatCommitList` for a list of many items). Empty blocks are skipped
 //
-// NOTE: The fields are private, so other packages can only make messages with this function.
+// NOTE: The fields are private, so other packages can make a message only with this function, or as the zero value (which isn't valid).
 // That way, every commit has the same subject and body format.
 func NewCommitMessage(prefix string, summary string, body ...string) CommitMessage {
 	m := CommitMessage{subject: prefix + ": " + summary}
@@ -507,6 +507,13 @@ func NewCommitMessage(prefix string, summary string, body ...string) CommitMessa
 		}
 	}
 	return m
+}
+
+// Reports whether the subject has the form `<prefix>: <summary>`, with neither part empty or only spaces.
+// The zero value (`CommitMessage{}`) doesn't.
+func (m CommitMessage) isValid() bool {
+	prefix, summary, found := strings.Cut(m.subject, ": ")
+	return found && strings.TrimSpace(prefix) != "" && strings.TrimSpace(summary) != ""
 }
 
 // Turns the message into the text for a commit (subject, blank line, body blocks separated by blank lines).

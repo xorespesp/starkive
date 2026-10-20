@@ -92,23 +92,68 @@ func TestOtherMinorFormatWorks(t *testing.T) {
 	}
 }
 
-// Tests that `core.UpdateFiles` doesn't commit and stops with an error when there are files to write but the commit message is empty.
+// Tests that `core.UpdateFiles` doesn't commit and stops with an error,
+// when there are files to write but the commit message isn't valid.
+// That is an empty message, a message with no summary or only spaces after the prefix, and a message with no prefix.
 // With no files to write, an empty message is fine and nothing happens (there is no commit, so the message isn't used).
-func TestEmptyCommitMessageIsRefused(t *testing.T) {
+func TestInvalidCommitMessageIsRefused(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	before := len(gh.commits)
-	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
-		return map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, core.CommitMessage{}, nil
-	})
-	if err == nil || len(gh.commits) != before {
-		t.Errorf("files without a message: %v, commits %d -> %d", err, before, len(gh.commits))
+	for name, message := range map[string]core.CommitMessage{
+		"empty message":           {},
+		"only a prefix":           core.NewCommitMessage("user(star-lists)", ""),
+		"spaces after the prefix": core.NewCommitMessage("user(star-lists)", " "),
+		"no prefix":               core.NewCommitMessage("", "delete Graphics"),
+	} {
+		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
+			return map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, message, nil
+		})
+		if err == nil || len(gh.commits) != before {
+			t.Errorf("files with %s: %v, commits %d -> %d", name, err, before, len(gh.commits))
+		}
 	}
-	err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
+	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
 		return nil, core.CommitMessage{}, nil
 	})
 	if err != nil || len(gh.commits) != before {
 		t.Errorf("nothing to write: %v, commits %d -> %d", err, before, len(gh.commits))
+	}
+}
+
+// Tests that a write to the config file doesn't treat it as changed when only its layout differs and the values are the same.
+// It checks the compact test config file, and the same values with the keys in another order.
+//   - Recording that auto sync is on when it is already on makes no commit and leaves the file as it is
+//   - A write that changes a value commits, in the layout the server writes
+func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
+	for _, layout := range []string{"compact", "keys in another order"} {
+		gh := setup(t, sampleStarItems, sampleStarLists)
+		if layout == "keys in another order" {
+			var values map[string]any
+			if err := json.Unmarshal([]byte(gh.readFile(core.ConfigDBPath)), &values); err != nil {
+				t.Fatal(err)
+			}
+			reordered, err := json.Marshal(values) // A map is written with its keys sorted, unlike the field order the server writes
+			if err != nil {
+				t.Fatal(err)
+			}
+			gh.files[core.ConfigDBPath] = string(reordered) + "\n"
+		}
+		cfg := loadTestConfig(t)
+		original := gh.readFile(core.ConfigDBPath)
+		before := len(gh.commits)
+		if err := core.RecordSyncEnabled(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(gh.commits) != before || gh.readFile(core.ConfigDBPath) != original {
+			t.Errorf("%s, same values: commits %q", layout, gh.commits[before:])
+		}
+		if err := core.SetDashboardURL(cfg, "https://other.example.com"); err != nil {
+			t.Fatal(err)
+		}
+		if len(gh.commits) != before+1 || !strings.Contains(gh.readFile(core.ConfigDBPath), "\n  \"dashboard_url\": \"https://other.example.com\"") {
+			t.Errorf("%s, changed value: commits %q, file %s", layout, gh.commits[before:], gh.readFile(core.ConfigDBPath))
+		}
 	}
 }
 
