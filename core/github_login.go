@@ -129,7 +129,8 @@ const tokenOwnerTTL = 24 * time.Hour
 //   - The token owner. A 502 `HTTPError` if GitHub returns a user with no ID or name
 //
 // NOTE: The owner of a token stays the same until the token changes.
-// So it is kept, and GitHub is not asked again on every sign-in.
+// So it is kept, and GitHub is not asked again on every call.
+// The owner's username can still change, so a kept owner can have an old username for up to `tokenOwnerTTL`.
 func FetchTokenOwner(cfg *Config) (GitHubUser, error) {
 	if owner, found := tokenOwnerCache.get(makeEnvCacheKey(cfg)); found {
 		return owner, nil

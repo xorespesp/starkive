@@ -13,14 +13,28 @@
 <body>
   <header class="topbar">
     <h1>Starkive</h1>
-    <!-- Icon link that opens the DB repository on GitHub. `app.js` fills in the address and tooltip after sign-in -->
-    <a id="repo-link" class="icon-link" target="_blank" rel="noopener noreferrer" hidden></a>
-    <!-- Shown only after sign-in (`app.js` removes `hidden`) -->
-    <button id="add-button" type="button" hidden>Add</button>
-    <button id="import-button" type="button" class="ghost" title="Import repositories you starred on GitHub" hidden>Import stars</button>
-    <!-- Auto sync settings and status, Sync now, the bookmarklet. If auto sync has a problem to report (`syncProblem`), a warning mark is added (`attention`) -->
-    <button id="settings-button" type="button" class="ghost" hidden>Settings</button>
-    <button id="logout" type="button" class="ghost" hidden>Sign out</button>
+    <!-- Menus shown only after sign-in (`app.js` removes `hidden`). `app.js` adds the icons (`data-icon`) and the open and close handling (`bindMenu`) -->
+    <div id="add-menu" class="menu" hidden>
+      <button type="button" class="ghost menu-button" aria-haspopup="menu" aria-expanded="false" aria-label="Add" title="Add"><span data-icon="plus"></span><span data-icon="triangleDown"></span></button>
+      <div class="menu-list" role="menu" hidden>
+        <button id="add-button" type="button" role="menuitem"><span data-icon="repo"></span>Add new repository</button>
+        <button id="import-button" type="button" role="menuitem"><span data-icon="star"></span>Import stars from GitHub</button>
+      </div>
+    </div>
+    <!-- If auto sync has a problem to report (`syncProblem`), the account button and Settings get a warning mark (`attention`) -->
+    <div id="account-menu" class="menu" hidden>
+      <button id="account-button" type="button" class="menu-button account-button" aria-haspopup="menu" aria-expanded="false" aria-label="Account" title="Account"><span data-icon="person"></span></button>
+      <div class="menu-list" role="menu" hidden>
+        <p id="account-username" class="menu-header" role="none"></p>
+        <a id="profile-link" role="menuitem" target="_blank" rel="noopener noreferrer"><span data-icon="person"></span>Your GitHub profile</a>
+        <!-- Opens the DB repository on GitHub. `app.js` fills in the address and the repository name after sign-in -->
+        <a id="repo-link" role="menuitem" target="_blank" rel="noopener noreferrer"><span data-icon="repo"></span><span class="menu-item-text">Archive repository<span id="repo-name" class="menu-item-detail"></span></span></a>
+        <!-- Auto sync settings and status, Sync now, the bookmarklet -->
+        <button id="settings-button" type="button" role="menuitem"><span data-icon="gear"></span>Settings</button>
+        <hr>
+        <button id="logout" type="button" role="menuitem"><span data-icon="signOut"></span>Sign out</button>
+      </div>
+    </div>
   </header>
 
   <main>
@@ -52,7 +66,7 @@
 
         <div class="summary">
           <span id="summary"></span>
-          <button id="reload" type="button" class="ghost">Reload</button>
+          <button id="reload" type="button" class="icon-button" aria-label="Reload" title="Reload"><span data-icon="sync"></span></button>
         </div>
 
         <div id="list" class="list"></div>

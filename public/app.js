@@ -534,9 +534,18 @@ const ICONS = {
   repo: 'M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.249.249 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z',
   linkExternal:
     'M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z',
+  sync:
+    'M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z',
   plus: 'M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.75.75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z',
   star:
     'M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Zm0 2.445L6.615 5.5a.75.75 0 0 1-.564.41l-3.097.45 2.24 2.184a.75.75 0 0 1 .216.664l-.528 3.084 2.769-1.456a.75.75 0 0 1 .698 0l2.77 1.456-.53-3.084a.75.75 0 0 1 .216-.664l2.24-2.183-3.096-.45a.75.75 0 0 1-.564-.41L8 2.694Z',
+  triangleDown: 'm4.427 7.427 3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z',
+  person:
+    'M10.561 8.073a6.005 6.005 0 0 1 3.432 5.142.75.75 0 1 1-1.498.07 4.5 4.5 0 0 0-8.99 0 .75.75 0 0 1-1.498-.07 6.004 6.004 0 0 1 3.431-5.142 3.999 3.999 0 1 1 5.123 0ZM10.5 5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z',
+  gear:
+    'M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a7.977 7.977 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.909 5.909 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.738 5.738 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8.12 8.12 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.214 6.214 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a7.92 7.92 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.709 4.709 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.709 4.709 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.464 6.464 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.44 4.44 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z',
+  signOut:
+    'M2 2.75C2 1.784 2.784 1 3.75 1h2.5a.75.75 0 0 1 0 1.5h-2.5a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h2.5a.75.75 0 0 1 0 1.5h-2.5A1.75 1.75 0 0 1 2 13.25Zm10.44 4.5-1.97-1.97a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l1.97-1.97H6.75a.75.75 0 0 1 0-1.5Z',
   fork:
     'M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z',
 };
@@ -568,13 +577,76 @@ function icon(name) {
  * @param {string} name A name in `ICONS`
  * @param {string} label Button name. The button has no text, so this goes to screen readers (`aria-label`) and the hover tooltip (`title`)
  * @param {() => void} onclick What to do when pressed
- * @param {string} [className] Extra class (`danger`, `on` and so on)
+ * @param {string} [className] Extra class (`danger` and so on)
  * @returns {HTMLButtonElement}
  */
 function iconButton(name, label, onclick, className = '') {
   const button = el('button', { type: 'button', className: `icon-button ${className}`, title: label, onclick }, icon(name));
   button.setAttribute('aria-label', label);
   return button;
+}
+
+// Top bar menu open now (a `.menu` element). `null` if none. Only one menu is open at a time
+let openMenu = null;
+
+/** Closes the open top bar menu, if any. */
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.querySelector('.menu-list').hidden = true;
+  openMenu.querySelector('.menu-button').setAttribute('aria-expanded', 'false');
+  openMenu = null;
+}
+
+/**
+ * Attaches the open and close handling to a top bar menu.
+ * The menu is a `.menu` element with a button (`.menu-button`) and a list (`.menu-list`) of items (`role="menuitem"`).
+ *
+ * @param {HTMLElement} menu The `.menu` element
+ *
+ * NOTE: The menu closes on a choice of an item, or when the focus moves out of it.
+ * A choice gives the focus back to the button first.
+ * So a dialog opened from the item gives the focus back to the button when it closes.
+ * A menu opened from the keyboard focuses its first item, and the arrow keys, Home and End move between items.
+ */
+function bindMenu(menu) {
+  const button = menu.querySelector('.menu-button');
+  const list = menu.querySelector('.menu-list');
+  const items = () => [...list.querySelectorAll('[role="menuitem"]')].filter((item) => !item.hidden);
+  const open = () => {
+    closeMenu();
+    list.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    openMenu = menu;
+  };
+  button.onclick = (ev) => {
+    if (openMenu === menu) return closeMenu();
+    open();
+    if (ev.detail === 0) items()[0]?.focus(); // `detail` is 0 when Enter or Space pressed the button
+  };
+  for (const item of items()) {
+    item.addEventListener('click', () => {
+      closeMenu();
+      button.focus();
+    });
+  }
+  menu.addEventListener('focusout', (ev) => {
+    if (openMenu === menu && ev.relatedTarget && !menu.contains(ev.relatedTarget)) closeMenu();
+  });
+  menu.addEventListener('keydown', (ev) => {
+    if (openMenu !== menu) {
+      if (ev.key !== 'ArrowDown' || ev.target !== button) return;
+      ev.preventDefault();
+      open();
+      items()[0]?.focus();
+      return;
+    }
+    const all = items();
+    const index = all.indexOf(document.activeElement); // -1 while the focus is on the button
+    const next = { ArrowDown: index + 1, ArrowUp: index < 0 ? -1 : index - 1, Home: 0, End: -1 }[ev.key];
+    if (next === undefined) return;
+    ev.preventDefault();
+    all.at(next % all.length)?.focus(); // `at` counts a negative index from the end
+  });
 }
 
 // Dialogs open now (values returned by `openModal`). When the session closes, `closeAllModals` closes them all
@@ -599,6 +671,7 @@ const openModals = new Set();
  * Only the element is removed a moment later, so the fade-out in `style.css` can play.
  */
 function openModal({ panel, className = '', onClose }) {
+  closeMenu(); // A menu left open under the dialog would take the first Esc
   panel.classList.add('dialog-panel'); // Padding goes here, not on `dialog` (so a click on the padding isn't a backdrop click)
   const dialog = el('dialog', { className: `dialog ${className}`.trim() }, panel);
   const modal = {
@@ -1208,7 +1281,7 @@ function renderItem(item) {
       el(
         'div',
         { className: 'item-actions' },
-        withFocusKey(iconButton('list', 'Lists', () => openMembership(item), memberOf.length ? 'on' : ''), `item:${item.id}:lists`),
+        withFocusKey(iconButton('list', 'Lists', () => openMembership(item)), `item:${item.id}:lists`),
         withFocusKey(iconButton('pencil', item.note ? 'Edit note' : 'Add note', () => toggleNoteEditor(item)), `item:${item.id}:note`),
         withFocusKey(iconButton('trash', 'Remove from archive', remove, 'danger'), `item:${item.id}:remove`),
       ),
@@ -1794,12 +1867,17 @@ function bookmarkletLink() {
   });
 }
 
-/** Sets the warning mark (dot, `attention` class) and tooltip of the Settings button at the top from `state.sync`. */
-function updateSettingsButton() {
+/**
+ * Sets the warning mark (dot, `attention` class) and the account button tooltip from `state.sync` and `state.syncError`.
+ * The mark goes on Settings in the account menu, and on the account button, so it shows while the menu is closed.
+ */
+function updateSettingsAttention() {
   const problem = syncProblem(state.sync, state.syncError);
-  const button = $('settings-button');
+  const button = $('account-button');
   button.classList.toggle('attention', Boolean(problem));
-  button.title = problem ? `${problem.text}. Open Settings` : 'Settings';
+  button.title = problem ? `Account: ${problem.text}. Open Settings in this menu` : 'Account';
+  button.setAttribute('aria-label', button.title); // Screen readers hear the problem too
+  $('settings-button').classList.toggle('attention', Boolean(problem));
 }
 
 /**
@@ -1877,7 +1955,7 @@ function openSettings() {
     fixButton.hidden = !problem?.fix;
     fixButton.textContent = problem?.fix === 'off' ? 'Turn off the workflow' : 'Turn on again';
     fixButton.disabled = busy;
-    updateSettingsButton();
+    updateSettingsAttention();
   };
   const showError = (err) => {
     error.textContent = err.message;
@@ -1982,11 +2060,12 @@ async function run(task, pending, done) {
   }
 }
 
-/** Shows the sign-in screen. It hides the dashboard and its top buttons, and focuses the sign-in button. */
+/** Shows the sign-in screen. It hides the dashboard and its top bar menus, and focuses the sign-in button. */
 function showLogin() {
+  closeMenu();
   $('login').hidden = false;
   $('dashboard').hidden = true;
-  for (const id of ['logout', 'repo-link', 'add-button', 'import-button', 'settings-button']) $(id).hidden = true;
+  for (const id of ['add-menu', 'account-menu']) $(id).hidden = true;
   $('login-button').disabled = false;
   $('login-button').focus();
 }
@@ -2107,7 +2186,7 @@ function moveToDashboardURL(dashboardURL) {
 /**
  * Opens a new session, loads the data and opens the dashboard.
  *
- * @param {string} repo DB repository name (owner/repo). The icon link at the top opens this repository
+ * @param {string} repo DB repository name (`owner/repo`)
  * @param {string} [done] Message to show after loading, instead of "Loaded N repositories" (like the result of Sync now)
  * @param {{ signal: AbortSignal, archive: Promise, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
  *   and the archive and auto sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
@@ -2124,16 +2203,12 @@ async function openDashboard(repo, done = '', preloaded = null) {
   const link = $('repo-link');
   const url = safeUrl(`https://github.com/${repo}`);
   link.hidden = !url;
-  if (url) {
-    link.href = url;
-    link.title = `Open ${repo} on GitHub`;
-    link.setAttribute('aria-label', link.title);
-    link.replaceChildren(icon('repo'));
-  }
+  if (url) link.href = url;
+  $('repo-name').textContent = repo;
   $('login').hidden = true;
   $('dashboard').hidden = false;
-  for (const id of ['logout', 'add-button', 'import-button', 'settings-button']) $(id).hidden = false;
-  updateSettingsButton();
+  for (const id of ['add-menu', 'account-menu']) $(id).hidden = false;
+  updateSettingsAttention();
 
   setStatus('Loading…', { busy: true });
   try {
@@ -2148,7 +2223,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
     await waitForLiveMetaIdle(liveMetaLoader);
     ({ sync: state.sync, syncError: state.syncError } = await syncRequest);
     signal.throwIfAborted();
-    updateSettingsButton();
+    updateSettingsAttention();
     const metaError = liveMetaLoader.error;
     liveMetaLoader.reportErrors = true;
     const syncTrouble = syncProblem(state.sync, state.syncError);
@@ -2181,8 +2256,9 @@ async function start() {
   const sync = fetchSyncStatus(true);
   sync.catch(() => {}); // Rejects only when cancelled below. `openDashboard` awaits it separately
   let repo;
+  let username;
   try {
-    ({ repo } = await api('login-session'));
+    ({ repo, username } = await api('login-session'));
   } catch (err) {
     sessionScope?.abort(); // Stop the requests sent early
     sessionScope = null;
@@ -2193,11 +2269,44 @@ async function start() {
     else if (pendingAdd) setStatus(`Sign in to add ${pendingAdd}`, { sticky: true });
     return;
   }
+  showAccount(username);
   await openDashboard(repo, '', { signal, archive, sync });
 }
 
-/** Attaches handlers to the fixed page elements (top buttons, search and filters, "Load more"). Called once when the page opens. */
+/**
+ * Fills the account menu with the `username` of the account that signed in.
+ * The username and the profile link are hidden if the username is empty (it couldn't be read),
+ * and the profile link also if it doesn't make a GitHub address (`safeUrl`).
+ */
+function showAccount(username) {
+  const name = $('account-username');
+  name.textContent = username;
+  name.hidden = !username;
+  const link = $('profile-link');
+  const url = username ? safeUrl(`https://github.com/${encodeURIComponent(username)}`) : null;
+  link.hidden = !url;
+  if (url) link.href = url;
+}
+
+/** Fills in the icons (`data-icon`) and attaches handlers to the fixed page elements (top bar menus, search and filters, "Load more"). Called once when the page opens. */
 function bindEvents() {
+  for (const slot of document.querySelectorAll('[data-icon]')) slot.replaceWith(icon(slot.dataset.icon));
+  for (const menu of document.querySelectorAll('.menu')) bindMenu(menu);
+  // A press outside the open menu closes it
+  document.addEventListener('pointerdown', (ev) => {
+    if (openMenu && !openMenu.contains(ev.target)) closeMenu();
+  });
+  // Esc closes the open menu, even when the focus isn't in it.
+  // If the focus was in the menu, it goes back to the menu's button, so keyboard users don't lose their place
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || !openMenu) return;
+    const button = openMenu.querySelector('.menu-button');
+    const focusWasInMenu = openMenu.contains(document.activeElement);
+    ev.preventDefault();
+    closeMenu();
+    if (focusWasInMenu) button.focus();
+  });
+
   // Sign-in start: go to the GitHub authorization address the server gives.
   // After approval, GitHub sends the browser back to this page through the server callback.
   // The address is followed only if it starts with `https://github.com/` (`safeUrl`)

@@ -27,6 +27,13 @@
   box-sizing: border-box;
 }
 
+/* The top bar and the filters stay on the screen while it scrolls.
+   An element scrolled into view (like a button reached with Tab) stops below them, so they don't cover it.
+   The value is the top bar (57 px) and the filters (61 px, or 101 px on two lines) with 12 px to spare */
+html {
+  scroll-padding-top: 130px;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -51,31 +58,125 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* The leftover space pushes the menus to the right end */
 .topbar h1 {
-  margin: 0;
+  margin: 0 auto 0 0;
   font-size: 16px;
 }
 
-/* Icon link that opens a GitHub page in a new tab */
-.icon-link {
+/* Top bar menu: a button that opens a list of items under it (`bindMenu` in `app.js`) */
+.menu {
+  position: relative;
+}
+
+.menu-button {
   display: inline-flex;
-  padding: 4px;
-  color: var(--muted);
-  border-radius: var(--radius);
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
 }
 
-.icon-link:hover {
-  color: var(--text);
-  background: var(--surface-hover);
-}
-
-.icon-link svg {
+.menu-button svg {
   fill: currentColor;
 }
 
-/* In the top bar, the leftover space pushes Sign out to the right end */
-.topbar .icon-link {
-  margin-right: auto;
+/* Round account button, like a profile picture */
+.account-button {
+  position: relative;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: var(--surface);
+  color: var(--muted);
+  border-color: var(--border);
+  border-radius: 50%;
+}
+
+.account-button:hover,
+.account-button[aria-expanded='true'] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 32px)); /* So a long name can't push the menu off the screen */
+  padding: 8px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px #01040966;
+  transform-origin: top right;
+  animation: menu-in 0.12s ease-out;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+}
+
+.menu-list [role='menuitem'] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-radius: var(--radius);
+  font-weight: 400;
+  text-align: left;
+  text-decoration: none;
+}
+
+.menu-list [role='menuitem']:hover,
+.menu-list [role='menuitem']:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+
+/* Text of an item that has a second line under its name (`.menu-item-detail`) */
+.menu-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.menu-item-detail {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-list [role='menuitem'] svg {
+  flex-shrink: 0;
+  fill: var(--muted);
+}
+
+/* Text at the top of a menu, above its items. Its bottom line separates it, so hiding it hides the line too */
+.menu-header {
+  margin: 0 0 8px;
+  padding: 4px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.menu-list hr {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
 }
 
 main {
@@ -321,7 +422,7 @@ button.danger-solid:hover {
 }
 
 .list-header {
-  margin-bottom: 16px;
+  margin-bottom: 4px;
 }
 
 .list-title {
@@ -344,11 +445,17 @@ button.danger-solid:hover {
 
 /* Filters */
 
+/* It sticks under the top bar while the list scrolls, so search and filters stay at hand.
+   `top` is the height of the top bar (its padding, a 32 px button and the border) */
 .filters {
+  position: sticky;
+  top: 57px;
+  z-index: 5;
   display: grid;
   grid-template-columns: 1fr repeat(2, minmax(0, 150px));
   gap: 8px;
-  padding-bottom: 16px;
+  padding: 12px 0 16px;
+  background: var(--bg);
   border-bottom: 1px solid var(--border-muted);
 }
 
@@ -359,11 +466,6 @@ button.danger-solid:hover {
   padding: 12px 0;
   border-bottom: 1px solid var(--border-muted);
   color: var(--muted);
-}
-
-.summary button {
-  padding: 2px 12px;
-  font-size: 12px;
 }
 
 /* Repository list (shaped like GitHub's Stars tab) */
@@ -407,6 +509,23 @@ button.danger-solid:hover {
   gap: 4px;
 }
 
+/* Icon link that opens a GitHub page in a new tab */
+.icon-link {
+  display: inline-flex;
+  padding: 4px;
+  color: var(--muted);
+  border-radius: var(--radius);
+}
+
+.icon-link:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.icon-link svg {
+  fill: currentColor;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
@@ -431,10 +550,6 @@ button.danger-solid:hover {
 
 .icon-button.danger:hover {
   color: var(--danger);
-}
-
-.icon-button.on {
-  color: var(--accent);
 }
 
 .desc {
@@ -921,16 +1036,27 @@ dialog.settings-dialog {
   }
 }
 
-/* Dot on the Settings button when auto sync has a problem to report (`syncProblem`) */
+/* Dot on the account button and on Settings in its menu when auto sync has a problem to report (`syncProblem`) */
+#account-button.attention::after,
 #settings-button.attention::after {
   content: '';
-  display: inline-block;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
-  vertical-align: middle;
   border-radius: 50%;
   background: var(--note);
+}
+
+#account-button.attention::after {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface);
+}
+
+#settings-button.attention::after {
+  margin-left: auto;
 }
 
 /* Refresh goes at the left end, Cancel and Import on the right */
@@ -1065,10 +1191,9 @@ button .spinner i {
 }
 
 @media (max-width: 640px) {
-  /* On narrow screens, buttons wrap to the next line, so there is no horizontal scroll */
-  .topbar {
-    flex-wrap: wrap;
-    row-gap: 8px;
+  /* The filters take two lines here */
+  html {
+    scroll-padding-top: 170px;
   }
 
   .filters {

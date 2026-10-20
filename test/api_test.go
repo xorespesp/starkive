@@ -1004,8 +1004,24 @@ func TestGitHubRejectingTheTokenIsNotSignOut(t *testing.T) {
 	}
 }
 
+// Tests that the sign-in status still answers when the token owner can't be read, with an empty username.
+// The username is shown only in the account menu, so it must not keep the dashboard from opening.
+func TestSignInStatusWithoutUsername(t *testing.T) {
+	setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	// A new fake GitHub has another address, which is part of the cache key.
+	// So the token owner kept for the previous one isn't used, and it is read again
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.mu.Lock()
+	gh.ownerDown = true
+	gh.mu.Unlock()
+	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"repo":"me/archive","username":""}` {
+		t.Errorf("owner can't be read: %d %s", rec.Code, rec.Body)
+	}
+}
+
 // Tests the session and same-site checks.
-// A request without a session cookie gets 401. After sign-in, the sign-in status has the DB repository name.
+// A request without a session cookie gets 401. After sign-in, the sign-in status has the DB repository name and the username.
 // A write request from another site (`Origin`) gets 403
 func TestRequiresSessionAndSameOrigin(t *testing.T) {
 	setup(t, sampleStarItems, sampleStarLists)
@@ -1013,7 +1029,7 @@ func TestRequiresSessionAndSameOrigin(t *testing.T) {
 		t.Errorf("no cookie: got %d", rec.Code)
 	}
 	cookie := login(t)
-	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); !strings.Contains(rec.Body.String(), `"repo":"me/archive"`) {
+	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); !strings.Contains(rec.Body.String(), `"repo":"me/archive","username":"user4242"`) {
 		t.Errorf("session: %d %s", rec.Code, rec.Body)
 	}
 	req := httptest.NewRequest("DELETE", "http://example.test/api/archive-star-items?id=1", nil)

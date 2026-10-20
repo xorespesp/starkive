@@ -1,6 +1,8 @@
 // `/api/login-session`: API to sign in to the dashboard with a GitHub account, check the sign-in state, and sign out.
 //
-//	GET              -> { repo }: `repo` is the DB repository `owner/repo`. 401 if not signed in. 409 if the DB repository can't be used.
+//	GET              -> { repo, username }: `repo` is the DB repository `owner/repo`, `username` is the username of the account that signed in
+//	                 (an empty string if it can't be read).
+//	                 401 if not signed in. 409 if the DB repository can't be used.
 //	                 The auto sync status is in `/api/sync-status`
 //	POST             -> { url }: The GitHub authorization address the browser goes to. Also sets the state cookie.
 //	                 409 { error } if the sign-in GitHub App is missing, can't be decrypted, or `config.json` is broken (tells you to run the setup tool).
@@ -41,13 +43,22 @@ func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, loginSessionStatus{Repo: cfg.DBRepoFullName})
+	// Only the token owner can sign in, so this is the account that signed in.
+	// The username is only shown, so failing to read it doesn't keep the dashboard from opening
+	username := ""
+	if owner, err := core.FetchTokenOwner(cfg); err == nil {
+		username = owner.Login
+	} else {
+		log.Printf("token owner: %v", err)
+	}
+	core.WriteJSON(w, http.StatusOK, loginSessionStatus{Repo: cfg.DBRepoFullName, Username: username})
 	return nil
 }
 
 // Body of the sign-in state response (`GET /api/login-session`)
 type loginSessionStatus struct {
-	Repo string `json:"repo"` // DB repository `owner/repo`. Used for the repository link on the page
+	Repo     string `json:"repo"`     // DB repository `owner/repo`
+	Username string `json:"username"` // Username of the account that signed in. Empty if it can't be read
 }
 
 // Reads the sign-in GitHub App settings from the DB repository.

@@ -225,7 +225,7 @@ func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	if code, body := read(); code != http.StatusBadGateway || !strings.Contains(body, "actions=read") {
 		t.Errorf("no Actions permission: %d %s", code, body)
 	}
-	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"repo":"me/archive"}` {
+	if rec := call(api.HandleLoginSession, "GET", "/api/login-session", "", cookie); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"repo":"me/archive","username":"user4242"}` {
 		t.Errorf("sign-in status: %d %s", rec.Code, rec.Body)
 	}
 	gh.mu.Lock()

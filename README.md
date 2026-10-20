@@ -53,6 +53,9 @@ starkive is developed with a focus on keeping a private, lasting record of the r
 > The setup tool isn't code-signed, so your browser or system may warn you about it. Keep the file and run it anyway. To check the download, compare its SHA-256 with the one on the release page.
 
 2. **Follow the setup page.** The setup tool opens it in your browser and walks you through the steps that need you:
+
+   ![Setup page](docs/setup-page.png)
+
    - **Create archive repository.** Enter a name for your archive (your GitHub username works well), then click **Create the repository**. The name and **Private** are filled in: keep the name and create it empty, with no README, `.gitignore` or license. Then click **Create the token**. That page is filled in for your archive repository: under **Repository access**, choose **Only select repositories**, pick that repository, generate the token, and paste it back.
    - **Deploy dashboard.** Click **Create the Vercel project** and pick your Git account (Vercel puts a copy of the dashboard's code there). Keep the repository name, paste the value the setup page shows under **Environment Variables**, and click **Deploy**. The setup page notices when the deployment is ready and continues on its own. If Vercel gives the dashboard a different address, enter it there (the production domain under the Vercel project's **Domains**).
    - **Create sign-in app.** Click **Create the GitHub App**, then **Create GitHub App** on GitHub's page. This app is how you sign in, and it gets no access to your repositories.
@@ -60,7 +63,7 @@ starkive is developed with a focus on keeping a private, lasting record of the r
 > [!NOTE]
 > To run the setup in the terminal instead of the browser, add `-headless`.
 
-3. **Open the dashboard and sign in with GitHub.** Your archive picks up new stars automatically (every day by default). Change how often, turn it off, or sync right away in **Settings**.
+3. **Open the dashboard and sign in with GitHub.** Your archive picks up new stars automatically (every day by default). Change how often, turn it off, or sync right away in **Settings**, in the account menu.
 
 If you ever replace the token, run the setup tool again, put the new value in Vercel, and redeploy. The tool tells you if anything else needs to change.
 
