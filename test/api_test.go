@@ -293,7 +293,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
 
 	case r.URL.Path == "/repos/me/archive/git/trees" && r.Method == http.MethodPost:
-		// Create a tree: the received files overwrite the files of `base_tree`. An empty repository gives 409, and writing a workflow without the Workflows permission gives 403 (measured)
+		// Create a tree: the received files overwrite the files of `base_tree`, and entries with a `null` sha delete theirs.
+		// An empty repository gives 409, and writing a workflow without the Workflows permission gives 403 (measured)
 		f.treeCalls++
 		if f.treeStatus != 0 {
 			http.Error(w, `{"message":"Invalid tree"}`, f.treeStatus)
@@ -306,8 +307,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			BaseTree string `json:"base_tree"`
 			Tree     []struct {
-				Path    string `json:"path"`
-				Content string `json:"content"`
+				Path    string          `json:"path"`
+				Content *string         `json:"content"` // A pointer: `nil` if the key is missing
+				SHA     json.RawMessage `json:"sha"`     // Raw JSON of the value, to tell `null` from a missing key
 			} `json:"tree"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
@@ -320,7 +322,19 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		files := copyFiles(f.readFilesAt(strings.TrimPrefix(body.BaseTree, "tree-of-")))
 		for _, e := range body.Tree {
-			files[e.Path] = e.Content
+			switch {
+			case e.Content != nil:
+				files[e.Path] = *e.Content
+			case string(e.SHA) != "null": // GitHub takes a blob sha in place of content (docs), but no test sends one, so the fake doesn't imitate it
+				http.Error(w, `{"message":"fake GitHub: a tree entry with a blob sha is not imitated"}`, http.StatusNotImplemented)
+				return
+			default:
+				if _, ok := files[e.Path]; !ok { // Deleting a path that isn't there fails the whole tree (measured)
+					http.Error(w, `{"message":"GitRPC::BadObjectState"}`, http.StatusUnprocessableEntity)
+					return
+				}
+				delete(files, e.Path)
+			}
 		}
 		sha := fmt.Sprintf("tree-%d", len(f.trees)+1)
 		f.trees[sha] = files

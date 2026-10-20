@@ -1,5 +1,5 @@
 // Storage engine for files in the DB repository, and the archive data.
-// It covers reading a file (`ReadFile`), writing several files in one commit (`UpdateFiles`, Git Data API),
+// It covers reading a file (`ReadFile`), writing and deleting several files in one commit (`UpdateFiles`, Git Data API),
 // handling the three archive files together (`UpdateArchive`), commit messages (`CommitMessage`),
 // and the data file format (`encodeLines`).
 // `db_repo.go` decides which repository to use, and whether it is safe to write to.
@@ -108,7 +108,7 @@ type Archive struct {
 	RepoMeta  []RepoMeta // Snapshots of repository metadata (`RepoMetaDBPath`)
 }
 
-// Error for a write that has files to write but a commit message that isn't valid (`isValid`).
+// Error for a write that has files to write or delete but a commit message that isn't valid (`isValid`).
 // Commits that don't say what they changed are never made
 var errInvalidCommitMessage = errors.New("refusing to commit changes without a valid commit message")
 
@@ -121,10 +121,44 @@ func isValidRepoPath(p string) bool {
 	return path.Clean(p) == p // `path.Clean` removes `//`, `./`, `x/..` and a trailing `/`
 }
 
-// Contents of one commit to make: the files to write and the commit message
+// Contents of one commit to make: the files to write and delete, and the commit message
 type FileChangesCommit struct {
-	FilesToWrite map[string][]byte // Path -> new content. A path doesn't have to be one of the files read
-	Message      CommitMessage     // Commit message. Required if anything is written
+	FilesToWrite  map[string][]byte // Path -> new content. A path doesn't have to be one of the files read
+	FilesToDelete []string          // Paths of files to delete. Each must exist at the commit the files were read from, or the whole commit fails (measured)
+	Message       CommitMessage     // Commit message. Required if anything is written or deleted
+}
+
+// Reports whether there is nothing to write or delete, so no commit is needed
+func (changes FileChangesCommit) isEmpty() bool {
+	return len(changes.FilesToWrite) == 0 && len(changes.FilesToDelete) == 0
+}
+
+// Checks that the commit can be made as it is; it changes something, its message is valid, and its paths are clean.
+// A path may appear only once, because writing and deleting the same file in one commit has no single meaning.
+func (changes FileChangesCommit) check() error {
+	if changes.isEmpty() {
+		return errors.New("refusing to make a commit that changes nothing")
+	}
+	if !changes.Message.isValid() {
+		return errInvalidCommitMessage
+	}
+	for p := range changes.FilesToWrite {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to write a file path that isn't valid: %q", p)
+		}
+	}
+	pathsSeen := map[string]bool{} // Paths to delete checked so far
+	for _, p := range changes.FilesToDelete {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to delete a file path that isn't valid: %q", p)
+		}
+		_, alsoWritten := changes.FilesToWrite[p] // `v, ok := m[k]`: `ok` is false if the key is missing
+		if alsoWritten || pathsSeen[p] {
+			return fmt.Errorf("refusing to change the file path %q twice in one commit", p)
+		}
+		pathsSeen[p] = true
+	}
+	return nil
 }
 
 // Reads several files in the DB repository from one commit, and writes what `buildFileChangesCommit` returns as one commit.
@@ -133,17 +167,16 @@ type FileChangesCommit struct {
 // The Git Data API doesn't work in an empty repository, so the setup tool writes that commit with the Contents API.
 //
 // Args:
-//   - `paths`: Paths of the files to read. Every path here and in the returned commit must pass `isValidRepoPath`
+//   - `paths`: Paths of the files to read. Each must pass `isValidRepoPath`
 //   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist).
 //     It returns the commit to make (`FileChangesCommit`).
-//     If there are no files to write, nothing is committed.
-//     If there are files to write, a valid commit message (`isValid`) is required.
+//     If nothing is written or deleted, nothing is committed.
+//     Otherwise the commit must pass `FileChangesCommit.check`.
 //     If it returns an error, nothing is written
 //
 // Returns:
 //   - An error from `buildFileChangesCommit` or from GitHub.
-//     `errInvalidCommitMessage` if there are files to write but the message isn't valid (`isValid`).
-//     An error if a path isn't valid (`isValidRepoPath`). Then nothing is written.
+//     An error from `FileChangesCommit.check` (`errInvalidCommitMessage` for a message that isn't valid). Then nothing is written.
 //     409 `errBranchMoved` if other commits keep getting in until all retries are used up
 //
 // NOTE:
@@ -155,8 +188,9 @@ type FileChangesCommit struct {
 //     Errors while making the tree or the commit are not conflicts, so they are returned right away.
 //   - `buildFileChangesCommit` can be called more than once.
 //     If it leaves results in outer variables, it must set them from scratch on every call.
-//   - One write costs "5 + number of files" GitHub requests (branch, its commit, one per file, tree, commit, branch move).
+//   - One write costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move).
 //     For the archive (three files) that is 8.
+//     Files that are only written or deleted cost no extra request.
 //     This is the price of putting several files in one commit with no in-between state.
 func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte) (FileChangesCommit, error)) error {
 	for _, p := range paths {
@@ -177,16 +211,11 @@ func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesR
 		if err != nil {
 			return err
 		}
-		if len(changes.FilesToWrite) == 0 {
+		if changes.isEmpty() { // Nothing to commit, so the message isn't needed either
 			return nil
 		}
-		if !changes.Message.isValid() {
-			return errInvalidCommitMessage
-		}
-		for p := range changes.FilesToWrite {
-			if !isValidRepoPath(p) {
-				return fmt.Errorf("refusing to write a file path that isn't valid: %q", p)
-			}
+		if err := changes.check(); err != nil {
+			return err
 		}
 
 		err = commitFiles(cfg, head, changes)
@@ -357,19 +386,22 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 	return branchHead{commit: sha, tree: commit.Tree.SHA}, nil
 }
 
-// Writes several files in one commit (GitHub Git Data API):
-//  1. Makes a new tree from the tree of `head`, with only the changed files replaced
+// Writes and deletes several files in one commit (GitHub Git Data API):
+//  1. Makes a new tree from the tree of `head`, with only the changed files replaced or removed
 //  2. Makes a new commit with `head` as its parent
 //  3. Moves the branch to the new commit (without force)
 //
 // Args:
 //   - `head`: The branch tip at the time the files were read. It becomes the parent of the new commit
-//   - `changes`: Files to write and the commit message
+//   - `changes`: Files to write and delete, and the commit message
 //
 // Returns:
 //   - `nil` on success. `errBranchMoved` if the branch moved in the meantime. Otherwise the GitHub error
 //
 // NOTE:
+//   - A tree entry with a `null` sha and no content deletes that path (measured).
+//     A folder left empty disappears with it (measured).
+//     Deleting a path that isn't there fails the whole tree with 422 (measured).
 //   - Step 3 doesn't use force.
 //     So if the branch moved to another commit in the meantime, GitHub refuses (the same idea as compare-and-swap in C++).
 //     The tree and commit made earlier are not linked to the branch, so they are simply dropped.
@@ -387,9 +419,12 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //     Then it looks like "didn't move" and the error is returned.
 //     The data is safe, and the request can simply be sent again.
 func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error {
-	entries := []map[string]string{}
+	entries := []map[string]any{} // Tree entries. `any` lets one entry hold a string and another a JSON `null`
 	for path, content := range changes.FilesToWrite {
-		entries = append(entries, map[string]string{"path": path, "mode": "100644", "type": "blob", "content": string(content)})
+		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "content": string(content)})
+	}
+	for _, path := range changes.FilesToDelete {
+		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "sha": nil}) // `nil` becomes JSON `null`
 	}
 	var tree struct {
 		SHA string `json:"sha"`

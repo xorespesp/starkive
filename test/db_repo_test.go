@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,9 +94,9 @@ func TestOtherMinorFormatWorks(t *testing.T) {
 }
 
 // Tests that `core.UpdateFiles` doesn't commit and stops with an error,
-// when there are files to write but the commit message isn't valid.
+// when there are files to write or delete but the commit message isn't valid.
 // That is an empty message, a message with no summary or only spaces after the prefix, and a message with no prefix.
-// With no files to write, an empty message is fine and nothing happens (there is no commit, so the message isn't used).
+// With nothing to write or delete, an empty message is fine and nothing happens (there is no commit, so the message isn't used).
 func TestInvalidCommitMessageIsRefused(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
@@ -114,6 +115,12 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 		}
 	}
 	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+		return core.FileChangesCommit{FilesToDelete: []string{core.StarListsDBPath}}, nil
+	})
+	if err == nil || len(gh.commits) != before {
+		t.Errorf("delete with empty message: %v, commits %d -> %d", err, before, len(gh.commits))
+	}
+	err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{}, nil
 	})
 	if err != nil || len(gh.commits) != before {
@@ -121,8 +128,9 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 	}
 }
 
-// Tests that `core.UpdateFiles` stops with an error and doesn't commit, when a path to read or write isn't valid.
+// Tests that `core.UpdateFiles` stops with an error and doesn't commit, when a path to read, write or delete isn't valid.
 // A path to read that isn't valid stops it before `buildFileChangesCommit` is called.
+// A path that is changed twice in one commit (written and deleted, or deleted twice) is refused before any tree is made.
 func TestInvalidPathIsRefused(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
@@ -135,7 +143,7 @@ func TestInvalidPathIsRefused(t *testing.T) {
 			return core.FileChangesCommit{}, nil
 		})
 		if err == nil || called {
-			t.Errorf("read %q: %v, change called %v", p, err, called)
+			t.Errorf("read %q: %v, buildFileChangesCommit called %v", p, err, called)
 		}
 		err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToWrite: map[string][]byte{p: []byte("[]\n")}, Message: message}, nil
@@ -143,6 +151,63 @@ func TestInvalidPathIsRefused(t *testing.T) {
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("write %q: %v, commits %d -> %d", p, err, before, len(gh.commits))
 		}
+		err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+			return core.FileChangesCommit{FilesToDelete: []string{p}, Message: message}, nil
+		})
+		if err == nil || len(gh.commits) != before {
+			t.Errorf("delete %q: %v, commits %d -> %d", p, err, before, len(gh.commits))
+		}
+	}
+
+	treeCallsBefore := gh.treeCalls
+	for name, changes := range map[string]core.FileChangesCommit{
+		"written and deleted": {
+			FilesToWrite:  map[string][]byte{core.StarListsDBPath: []byte("[]\n")},
+			FilesToDelete: []string{core.StarListsDBPath},
+		},
+		"deleted twice": {FilesToDelete: []string{core.StarListsDBPath, core.StarListsDBPath}},
+	} {
+		changes.Message = message
+		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+			return changes, nil
+		})
+		if err == nil || len(gh.commits) != before || gh.treeCalls != treeCallsBefore {
+			t.Errorf("%s: %v, commits %d -> %d, tree calls %d -> %d", name, err, before, len(gh.commits), treeCallsBefore, gh.treeCalls)
+		}
+	}
+}
+
+// Tests that `core.UpdateFiles` writes and deletes files in one commit.
+// Deleting a file that isn't there fails the whole commit, so nothing changes (measured on GitHub, imitated by the fake).
+func TestWriteAndDeleteInOneCommit(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	const notesPath = "db/notes.txt" // A file that only this test makes and deletes
+	gh.files[notesPath] = "old notes\n"
+	before := len(gh.commits)
+	message := core.NewCommitMessage("user(star-lists)", "delete Graphics")
+	writeListsAndDeleteNotes := func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+		return core.FileChangesCommit{
+			FilesToWrite:  map[string][]byte{core.StarListsDBPath: []byte("[]\n")},
+			FilesToDelete: []string{notesPath},
+			Message:       message,
+		}, nil
+	}
+
+	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
+	_, notesLeft := gh.files[notesPath]
+	if err != nil || len(gh.commits) != before+1 || notesLeft || gh.readFile(core.StarListsDBPath) != "[]\n" {
+		t.Fatalf("write and delete: %v, commits %d -> %d, notes left %v, star lists %q", err, before, len(gh.commits), notesLeft, gh.readFile(core.StarListsDBPath))
+	}
+
+	// The notes file is gone now, so GitHub refuses the tree with 422 and the write in the same commit doesn't happen either
+	gh.files[core.StarListsDBPath] = sampleStarLists
+	treeCallsBefore := gh.treeCalls
+	err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
+	var githubErr *core.GitHubAPIError
+	refusedByGitHub := errors.As(err, &githubErr) && githubErr.Status == http.StatusUnprocessableEntity
+	if !refusedByGitHub || gh.treeCalls != treeCallsBefore+1 || len(gh.commits) != before+1 || gh.readFile(core.StarListsDBPath) != sampleStarLists {
+		t.Errorf("delete a missing file: %v, tree calls %d -> %d, commits %d -> %d", err, treeCallsBefore, gh.treeCalls, before+1, len(gh.commits))
 	}
 }
 
