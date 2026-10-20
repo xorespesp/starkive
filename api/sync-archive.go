@@ -23,7 +23,7 @@ import (
 )
 
 // Time one sync may spend refreshing the metadata snapshot.
-// It is well below the time limit of a serverless function (60 to 300 seconds on the free plan, docs).
+// It is well below the time limit of this function (300 seconds, `maxDuration` in `vercel.json`).
 // A request for 100 repositories takes about 4.5 seconds (measured), and 6 are sent at once.
 // So this is enough to check thousands at a time. Repositories not checked yet get checked in the next run
 const metaRefreshBudget = 40 * time.Second

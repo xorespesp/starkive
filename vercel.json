@@ -1,5 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/sync-archive.go": { "maxDuration": 300 }
+  },
   "headers": [
     {
       "source": "/(.*)",
