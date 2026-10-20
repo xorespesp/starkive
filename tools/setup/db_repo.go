@@ -113,7 +113,7 @@ func finishDBRepo(cfg *core.Config, site string) error {
 	if err := core.SetDashboardURL(cfg, site); err != nil {
 		return err
 	}
-	// Checks whether this is the first install: an existing workflow means a new run
+	// Checks whether this is the first install: an existing workflow means the setup ran before
 	workflow, err := core.ReadFile(cfg, core.SyncWorkflowPath)
 	if err != nil {
 		return err

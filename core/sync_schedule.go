@@ -181,7 +181,7 @@ func isSyncDay(intervalDays int, now time.Time) bool {
 // The on/off setting in the config file isn't checked.
 // If the workflow runs, it syncs, and the page reports any mismatch with the setting.
 // So a running workflow doesn't run for nothing just because the setting alone is off.
-// If the return values change or new ones are added, also fix the workflow content of the setup tool (`syncWorkflowContent`) and raise `DBRepoFormat`.
+// If the return values change or new ones are added, also fix the workflow content of the setup tool (`syncWorkflowContent`) and raise the major version of `DBRepoFormat`.
 // Overlapping runs aren't prevented.
 // The workflow's `concurrency` runs scheduled runs one after another.
 // Overlapping with Sync now gives the same sync result.
@@ -309,8 +309,6 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 //
 // NOTE: GitHub registers a workflow written through the API as on (measured).
 // So the workflow isn't turned on separately, and only the setting is matched to that state.
-// It is written before the workflow is installed.
-// If the install fails and the tool runs again, the setting is already on, and the page reports "no workflow".
 func RecordSyncEnabled(cfg *Config) error {
 	return updateConfig(cfg, func(file *dbConfigFile) (CommitMessage, error) {
 		if file.Sync.EnabledSince == nil {

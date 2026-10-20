@@ -1,7 +1,7 @@
 // `/api/check-deployment`: API that the setup tool calls before it records the dashboard address.
 // It checks that the deployment at that address uses the DB repository and token from this setup.
 //
-//	GET ?nonce=<random value> -> { format: this server's DB repository format version, proof: `core.SignDeploymentNonce` }
+//	GET ?nonce=<random value> -> { format: { major, minor } (this server's DB repository format version), proof: `core.SignDeploymentNonce` }
 //
 // It is called without signing in.
 // It answers from the environment variables alone, so it causes no GitHub request.
@@ -19,8 +19,8 @@ import (
 
 // Response body of the deployment check
 type checkDeploymentResult struct {
-	Format int    `json:"format"` // This server's DB repository format version (`core.DBRepoFormat`). If it differs from the setup tool's, the dashboard runs a different version of the code
-	Proof  string `json:"proof"`  // The `nonce` signed with the repository ID and token from the environment variable
+	Format core.DBRepoFormatVersion `json:"format"` // This server's DB repository format version (`core.DBRepoFormat`). A different major version means the dashboard runs code that can't use the same repository
+	Proof  string                   `json:"proof"`  // The `nonce` signed with the repository ID and token from the environment variable
 }
 
 // Signs the given `nonce` with this deployment's environment variable and answers with it and the format version.

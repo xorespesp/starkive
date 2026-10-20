@@ -94,7 +94,7 @@ func updateStarItem(cfg *core.Config, id int64, change func(a *core.Archive, s *
 
 // Returns the raw item file to a signed-in user.
 // Answers 401 if not signed in.
-// Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different format version).
+// Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
 	cfg, err := core.Authorize(r)
 	if err != nil {

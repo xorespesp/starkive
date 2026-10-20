@@ -16,12 +16,15 @@ import (
 //
 // NOTE: These are the contract with the server: the config key `dashboard_url`, the secret name, the request shape,
 // and the response that counts as success (200 with `status` `not_due` or `synced`, the return values of `core.RunScheduledSync`).
-// Raise `core.DBRepoFormat` for a change that existing DB repositories need, such as a contract change or a script bug fix.
-// An installed workflow isn't replaced otherwise (`installWorkflowIfAbsent`).
-// Then a repository with a server and a workflow of different versions stops with a clear error.
+// Raise the major version of `core.DBRepoFormat` for a contract change.
+// Then a repository with a server and a workflow of different contracts stops with a clear error.
+// Raise the minor version for a change that keeps the contract but installed workflows need, such as a script bug fix.
+// This tool never replaces an installed workflow (`installWorkflowIfAbsent`).
+// So such a change reaches installed workflows only through a format conversion.
 // A change that only new installs need, such as a comment, doesn't raise it.
 // (`TestSyncWorkflowChangeIsReviewed` reports that the content changed.)
-// A run ends in success only when success is clearly confirmed. Everything else is a failure.
+// A run ends in success only when success is clearly confirmed.
+// Everything else is a failure.
 // With "only known failures fail", unexpected cases would end as success, and GitHub wouldn't send a failure notice.
 // Such cases are a redirect to a sign-in page, a page that isn't the dashboard, a failed config file read, and a rejected key.
 // It uses no external action, only the GitHub CLI, `jq` and `curl` in the runner.

@@ -14,7 +14,8 @@ import (
 // It writes out the DB repository layout (path constants), the marker,
 // and the JSON shape of the config file (`dbConfigFile`) and the data files (`StarItem`, `StarList`, `RepoMeta`), and pins their hash.
 // When they change, the test fails.
-// Then decide whether `DBRepoFormat` must go up, so an old dashboard or workflow doesn't read or write the new layout wrongly.
+// Then decide whether `DBRepoFormat` must go up (a layout or shape change is a major change),
+// so an old dashboard or workflow doesn't read or write the new layout wrongly.
 // If it doesn't need to go up, only update the hash.
 // The contract with the workflow is guarded separately by `TestSyncWorkflowChangeIsReviewed` in the setup tool.
 func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
@@ -26,7 +27,7 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 		describeJSONShape(reflect.TypeOf(StarList{})),
 		describeJSONShape(reflect.TypeOf(RepoMeta{})),
 	}, "\n")
-	const reviewed = "adef48b8a63a6a4872d4685fdfbf0a33e525db0d69cb561e2a012522f51dd0b4"
+	const reviewed = "8f51ffa736f054a05fbd8957de3e9167ba90937cab71bac39cdd8b09c46d85df"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(shape))); got != reviewed {
 		t.Errorf("the DB repository format changed (sha256 %s). Decide whether core.DBRepoFormat must go up, then update the hash in this test:\n%s", got, shape)
 	}

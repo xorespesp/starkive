@@ -1,6 +1,6 @@
 // Unit tests for the setup tool: archive name parsing, the repository creation and token links,
 // the dashboard address check, secret encryption, the App name and manifest, the owner check in the code exchange,
-// the permission checks, and the contract between the workflow and the server.
+// the permission checks, the initial files and the workflow installation, and the contract between the workflow and the server.
 // A fake server from `httptest` stands in for GitHub.
 package main
 
@@ -118,7 +118,7 @@ func TestBuildTokenURL(t *testing.T) {
 // So it also tests that the server's answer and the setup tool's check keep the same contract.
 //   - It passes if deployed with the repository ID and token being set up
 //   - It rejects a deployment with another token or another repository with `errDashboardOtherValue`.
-//     It rejects a missing environment variable (showing that text as is) and a different format version with other errors
+//     It rejects a missing environment variable (showing that text as is) and a different major format version with other errors
 //   - It rejects a redirect to the Vercel sign-in page, another page, and an old dashboard without this API
 func TestCheckDashboard(t *testing.T) {
 	cfg := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_4242"} // Repository and token being set up
@@ -134,8 +134,8 @@ func TestCheckDashboard(t *testing.T) {
 		{"another repository", core.FormatDBRepoAccessKey(6000, "token_4242"), api.HandleCheckDeployment, "deployed with a different", true},
 		{"missing environment variable", "", api.HandleCheckDeployment, "missing or malformed", false},
 		{"another format", "", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(`{"format":99,"proof":"x"}`))
-		}, "format 99", false},
+			w.Write([]byte(`{"format":{"major":99,"minor":0},"proof":"x"}`))
+		}, "format 99.0", false},
 		{"behind Vercel sign-in", "", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "https://vercel.com/login", http.StatusTemporaryRedirect)
 		}, "redirects", false},
@@ -513,8 +513,9 @@ func TestSyncWorkflowContract(t *testing.T) {
 
 // Reports that the workflow content changed.
 // It pins the SHA-256 of the content, so any change fails here.
-// If existing DB repositories need the change (a contract change with the server or a script bug fix), raise `core.DBRepoFormat`.
-// (Then a repository with a server and a workflow of different versions stops with a clear error.)
+// If existing DB repositories need the change, raise `core.DBRepoFormat`.
+// Raise the major version for a contract change with the server (then a mismatched repository stops with a clear error),
+// and the minor version for a script bug fix.
 // After that, update the value below to the new hash
 func TestSyncWorkflowChangeIsReviewed(t *testing.T) {
 	const reviewed = "f5a5d731966d118d902f431ec1a308eaaf765f8c17032cd80f8294ab0615782c"

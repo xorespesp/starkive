@@ -16,7 +16,7 @@ import (
 
 // File layout of the DB repository.
 // Together with the file format (one item per line, key order), this structure is set by the code, so it is not configurable.
-// If the layout changes, raise `DBRepoFormat`.
+// If the layout changes, raise the major version of `DBRepoFormat`.
 //
 //	.starkive                             marker of a starkive repository, and its format version
 //	config.json                           settings and the sign-in GitHub App
@@ -24,24 +24,44 @@ import (
 //	.github/workflows/starkive-sync.yml   auto sync workflow (installed by the setup tool)
 //	README.md                             readme (installed by the setup tool)
 const (
-	MarkerDBPath    = ".starkive"          // Content is `{"format":N}`. Only a repository with this file is used by starkive
+	MarkerDBPath    = ".starkive"          // Content is `{"format":{"major":1,"minor":0}}` (`EncodeMarker`). Only a repository with this file is used by starkive
 	ConfigDBPath    = "config.json"        // Sync interval, dashboard address, sign-in GitHub App (`dbConfigFile`)
 	StarItemsDBPath = "db/star-items.json" // Archive entries (`StarItem`)
 	StarListsDBPath = "db/star-lists.json" // Star list definitions (`StarList`)
 	RepoMetaDBPath  = "db/repo-meta.json"  // Snapshots of repository metadata (`RepoMeta`)
 )
 
-// Format version of the DB repository that this code reads and writes (`format` in the marker file).
-// If the repository has a different value, both the server and the setup tool stop (`newDBRepoFormatError`).
+// Version of the DB repository format (`format` in the marker file)
+type DBRepoFormatVersion struct {
+	Major int `json:"major"` // Raised by a change that other versions can't read or call correctly. A different value stops the server and the setup tool
+	Minor int `json:"minor"` // Raised by a change that keeps the contract, such as a fix in the workflow script. A different value stops nothing
+}
+
+// Format version of the DB repository that this code reads and writes.
+// If the repository has a different major version, both the server and the setup tool stop (`newDBRepoFormatError`).
 //
 // NOTE: This keeps different versions of the dashboard, setup tool and workflow from reading or writing one repository wrongly.
 // It doesn't try to adapt or convert anything.
-// Raise it when the file layout or format changes, or when installed workflows need a change.
-// That is a change of the contract between the workflow and the server (config keys, request and headers, response `status`),
-// or a fix for a bug in the workflow script.
-// But for now, before the implementation is final, it stays at 1.
+// Raise the major version when the file layout or format changes,
+// or the contract between the workflow and the server changes (config keys, request and headers, response `status`).
+// Raise the minor version for a change that installed workflows need but that keeps the contract, such as a fix for a bug in the workflow script.
+// But for now, before the implementation is final, it stays at 1.0.
 // After it is final, it is raised by this rule.
-const DBRepoFormat = 1
+//
+// History:
+//   - 1.0 (2026-10-20): The first format
+var DBRepoFormat = DBRepoFormatVersion{Major: 1, Minor: 0}
+
+// Reports whether this code can read and write a DB repository of format version `v` (the major versions are the same).
+func (v DBRepoFormatVersion) IsCompatible() bool {
+	return v.Major == DBRepoFormat.Major
+}
+
+// Returns the version as `<major>.<minor>`, as people see it (for example "1.0").
+// `fmt` uses this method for `%s` (the `fmt.Stringer` interface).
+func (v DBRepoFormatVersion) String() string {
+	return fmt.Sprintf("%d.%d", v.Major, v.Minor)
+}
 
 // Reads the environment variables, fills in the DB repository, and builds the server config.
 // Used when the repository is needed without a session.
@@ -66,7 +86,7 @@ type DBRepoState int
 
 const (
 	DBRepoEmpty    DBRepoState = iota // No commits at all. The setup tool sets it up by writing the marker
-	DBRepoStarkive                    // Has the marker, and the format version matches this code. It is a repository that starkive uses
+	DBRepoStarkive                    // Has the marker, and its major format version matches this code. It is a repository that starkive uses
 	DBRepoForeign                     // Has commits but no marker. starkive doesn't use it
 )
 
@@ -84,13 +104,17 @@ var (
 	ErrDBRepoNotStarkive = Errorf(http.StatusConflict, "The archive repository already has other files. starkive only uses an empty repository or one it set up before")                         // The repository has no marker
 )
 
-// Makes the 409 error for a DB repository whose format version differs from this code.
+// Makes the 409 error for a DB repository whose format version this code can't use.
 //
 // Args:
-//   - `format`: Format version written in the repository's marker. 0 if the marker can't be read
-func newDBRepoFormatError(format int) error {
-	return Errorf(http.StatusConflict, "The archive repository uses starkive format %d, but this version of starkive uses format %d. "+
-		"Use the starkive version that set up the repository, or set up a new repository with the setup tool of this version", format, DBRepoFormat)
+//   - `found`: Format version written in the repository's marker. `nil` if the marker can't be read
+func newDBRepoFormatError(found *DBRepoFormatVersion) error {
+	foundText := "unknown"
+	if found != nil {
+		foundText = found.String()
+	}
+	return Errorf(http.StatusConflict, "The archive repository uses starkive format %s, but this version of starkive uses format %s. "+
+		"Use the starkive version that set up the repository, or set up a new repository with the setup tool of this version", foundText, DBRepoFormat)
 }
 
 // Cache of the result of finding the DB repository by ID (`ResolveDBRepo`). The key is `makeEnvCacheKey`.
@@ -118,7 +142,7 @@ const (
 //
 // Returns:
 //   - The state of the repository.
-//     `ErrDBRepoNotFound` if the token can't see it. The error from `newDBRepoFormatError` if the format version differs
+//     `ErrDBRepoNotFound` if the token can't see it. The error from `newDBRepoFormatError` if the major format version differs
 //
 // NOTE: The name is the current name that GitHub returns, so it follows the user's renames.
 // The result is kept in `dbRepoCache`.
@@ -215,7 +239,7 @@ const dbRepoStateQuery = `query($owner: String!, $name: String!, $marker: String
 //
 // Returns:
 //   - The state of the repository.
-//     The error from `newDBRepoFormatError` if the marker's format version differs from this code, or the marker can't be read
+//     The error from `newDBRepoFormatError` if the marker's major format version differs from this code, or the marker can't be read
 //
 // NOTE: Whether it is empty is decided by a value that GitHub defines (GraphQL `Repository.isEmpty`, docs).
 // If this check wrongly said "empty", the setup tool would write a marker into a foreign repository.
@@ -244,21 +268,27 @@ func inspectDBRepo(cfg *Config) (DBRepoState, error) {
 	case data.Repository.Marker == nil:
 		return DBRepoForeign, nil
 	}
-	var marker struct {
-		Format int `json:"format"`
+	var marker dbRepoMarker
+	text := data.Repository.Marker.Text
+	if text == nil || json.Unmarshal([]byte(*text), &marker) != nil || marker.Format == nil {
+		return 0, newDBRepoFormatError(nil)
 	}
-	if text := data.Repository.Marker.Text; text != nil {
-		json.Unmarshal([]byte(*text), &marker) // If the marker can't be read, `Format` stays 0 and it is caught as a different format
-	}
-	if marker.Format != DBRepoFormat {
+	if !marker.Format.IsCompatible() {
 		return 0, newDBRepoFormatError(marker.Format)
 	}
 	return DBRepoStarkive, nil
 }
 
-// Makes the content of the marker file, `{"format":N}`. The setup tool writes it as the first commit of an empty repository
+// Content of the marker file (`MarkerDBPath`)
+type dbRepoMarker struct {
+	Format *DBRepoFormatVersion `json:"format"` // A pointer: `nil` if the key is missing, so a marker without a version isn't read as 0.0
+}
+
+// Makes the content of the marker file, `{"format":{"major":1,"minor":0}}`.
+// Only the setup tool writes the marker, but this lives in `core` so its shape matches what `inspectDBRepo` reads.
 func EncodeMarker() []byte {
-	return []byte(fmt.Sprintf("{\"format\":%d}\n", DBRepoFormat))
+	content, _ := json.Marshal(dbRepoMarker{Format: &DBRepoFormat}) // A struct of numbers always encodes, so the error is ignored
+	return append(content, '\n')
 }
 
 // Shape of a GitHub `owner/repo`.
@@ -285,7 +315,7 @@ func IsValidRepoFullName(fullName string) bool {
 //
 // NOTE: It is written as indented multi-line JSON (`encodeConfig`), so when one value changes, only that line shows in the diff.
 // The key `dashboard_url` is a contract with the workflow in the DB repository.
-// Renaming it requires raising `DBRepoFormat`.
+// Renaming it requires raising the major version of `DBRepoFormat`.
 // Each writing function (`UpdateSyncSettings`, `RecordSyncEnabled`, `SetDashboardURL`, `SaveGitHubApp`) changes only its own field.
 // So changing one value never resets another value to a default or changes it.
 type dbConfigFile struct {

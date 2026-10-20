@@ -326,7 +326,7 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 	}
 }
 
-// Tests Sync now (`POST /api/sync-archive`) and the auto sync status that the Settings dialog gets from the sign-in status response.
+// Tests Sync now (`POST /api/sync-archive`) and the auto sync status that the Settings dialog gets from `GET /api/sync-status`.
 //   - Status: interval, time turned on, workflow state, and the last finished scheduled run (start time, result, GitHub run page address)
 //   - Sync now needs sign-in and a same-site request. It syncs on every call, whatever the interval
 func TestSyncNowAndStatus(t *testing.T) {
@@ -366,7 +366,7 @@ func TestSyncNowAndStatus(t *testing.T) {
 }
 
 // Tests that each function that writes the config file changes only its own field.
-// It checks the two functions the setup tool uses.
+// It checks the two functions the setup tool uses (`SetDashboardURL`, `RecordSyncEnabled`).
 //   - Recording the dashboard address keeps an interval that can't be chosen (5), and adds no time turned on
 //   - Recording that auto sync is on adds only the time turned on. Calling it again makes no commit
 //   - An interval that can't be chosen reads as the default (1)

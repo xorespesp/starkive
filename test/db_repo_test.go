@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,15 +43,15 @@ func TestDBRepoState(t *testing.T) {
 	}
 }
 
-// Tests that every path stops with 409 and writes nothing in a repository whose marker has a different format version than this code (`core.DBRepoFormat`).
-// It checks both a marker with another number and a marker that can't be read.
+// Tests that every path stops with 409 and writes nothing in a repository whose marker has a different major format version than this code (`core.DBRepoFormat`).
+// It checks a marker with another major version, a marker without a version, and a marker that can't be read.
 // The paths checked are reading the config (`core.LoadConfig`), starting sign-in, a signed-in API and the scheduled sync.
 // "Wrote nothing" means there were no commits and no requests to turn the workflow on or off.
 //
 // NOTE: This guards the check that keeps this code from misreading or writing to a repository made by another version of starkive.
 // It stops. It doesn't adapt or convert the format.
 func TestOtherFormatStopsEverything(t *testing.T) {
-	for _, marker := range []string{`{"format":99}` + "\n", "not json\n"} {
+	for _, marker := range []string{`{"format":{"major":99,"minor":0}}` + "\n", `{}` + "\n", "not json\n"} {
 		gh := setup(t, sampleStarItems, sampleStarLists)
 		cookie := login(t)
 		// The session cookie comes from above, and the test runs on a new fake GitHub.
@@ -75,6 +76,19 @@ func TestOtherFormatStopsEverything(t *testing.T) {
 			t.Errorf("%q: wrote to the repository: %q", marker, gh.commits)
 		}
 		gh.mu.Unlock()
+	}
+}
+
+// Tests that a repository whose marker has the same major format version but another minor version is used as usual.
+// A minor version only marks a change that keeps the contract, so it must not stop anything.
+func TestOtherMinorFormatWorks(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.files[core.MarkerDBPath] = fmt.Sprintf(`{"format":{"major":%d,"minor":99}}`+"\n", core.DBRepoFormat.Major)
+	if _, err := core.LoadConfig(); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", login(t)); rec.Code != 200 {
+		t.Errorf("list: %d %s", rec.Code, rec.Body)
 	}
 }
 

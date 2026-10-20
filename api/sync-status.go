@@ -14,7 +14,7 @@ import (
 
 // Returns the auto sync status to a signed-in user.
 // Answers 401 if not signed in.
-// Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different format version).
+// Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 // If GitHub refuses a read (for example, the token lacks the Actions permission), answers 502 with GitHub's message.
 func handleSyncStatusGet(w http.ResponseWriter, r *http.Request) error {
 	cfg, err := core.Authorize(r)

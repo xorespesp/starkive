@@ -89,8 +89,6 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 //
 // NOTE: GraphQL can answer HTTP 200 and still report a failure in `errors` in the body.
 // So any `errors` counts as an error.
-// Reading repository info (`FetchRepoMeta`) must handle the case where only some items are not found.
-// So it reads the answer itself instead of using this function.
 func callGraphQL(cfg *Config, query string, variables map[string]any, dst any) error {
 	res, err := CallGitHubAPI(cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: map[string]any{"query": query, "variables": variables}})
 	if err != nil {

@@ -68,6 +68,7 @@ const MaxRepoMetaIDs = 100
 //
 // NOTE: If some IDs can't be accessed, GraphQL doesn't fail the whole answer.
 // It puts `null` in their place, and writes the reason and position (`path: ["nodes", index]`) in `errors` (docs).
+// It doesn't use `callGraphQL`, which counts any `errors` as a failure, and reads the answer itself.
 // So "request failed" and "this repository doesn't exist" can be told apart.
 // A temporary outage isn't recorded as a disappearance.
 func FetchRepoMeta(cfg *Config, ids []string) ([]json.RawMessage, []string, error) {

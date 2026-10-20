@@ -28,7 +28,7 @@
 //     It checks the repository ID and state, Star read access and Secrets access.
 //     If the repository is empty, it writes the marker (`core.MarkerDBPath`) as the first commit and makes it a starkive repository.
 //     If it is a starkive repository, it sets it up again.
-//     If it is a foreign repository or has another format version, it stops.
+//     If it is a foreign repository or has another major format version, it stops.
 //     Then it adds the initial files that are missing (`addInitialFiles`).
 //     Next it checks the Workflows and Actions permissions (this needs a branch, so it runs after initialization).
 //     Then it writes the scheduled sync key (`core.DeriveSyncKey`) to the DB repository's Actions secret (`core.SyncKeySecretName`)
@@ -285,7 +285,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	if err != nil {
 		return err
 	}
-	switch state { // `core.ResolveDBRepo` already returned an error for a repository whose format version differs from this code
+	switch state { // `core.ResolveDBRepo` already returned an error for a repository whose major format version differs from this code
 	case core.DBRepoForeign:
 		return core.ErrDBRepoNotStarkive
 	case core.DBRepoEmpty:

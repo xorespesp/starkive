@@ -132,7 +132,7 @@ func normalizeDashboardURL(input string) (string, error) {
 
 // Checks that the deployment at the address is this setup's starkive dashboard.
 // The proof from `GET /api/check-deployment?nonce=` (`core.SignDeploymentNonce`) must match the value computed from the repository ID and token being set up.
-// The format version must also match this tool.
+// The major format version must also match this tool.
 //
 // Args:
 //   - `site`: An address normalized by `normalizeDashboardURL`
@@ -165,17 +165,17 @@ func checkDashboard(cfg *core.Config, site string) error {
 	}
 	defer res.Body.Close()
 	var body struct {
-		Format int    `json:"format"` // The dashboard's format version
-		Proof  string `json:"proof"`  // The value the dashboard signed `nonce` with, using its environment variable
-		Error  string `json:"error"`  // An error answer from the dashboard API, `{"error": ...}`
+		Format core.DBRepoFormatVersion `json:"format"` // The dashboard's format version
+		Proof  string                   `json:"proof"`  // The value the dashboard signed `nonce` with, using its environment variable
+		Error  string                   `json:"error"`  // An error answer from the dashboard API, `{"error": ...}`
 	}
 	decoded := json.NewDecoder(res.Body).Decode(&body) == nil
 	switch {
 	case res.StatusCode >= 300 && res.StatusCode < 400:
 		return fmt.Errorf("%s redirects (probably to Vercel's sign-in). Use the production domain listed under the Vercel project's Domains", site)
 	case res.StatusCode == http.StatusOK && decoded && body.Proof != "":
-		if body.Format != core.DBRepoFormat {
-			return fmt.Errorf("the dashboard runs starkive format %d, but this setup tool uses format %d. Use the same version of starkive for both, redeploy, and try again", body.Format, core.DBRepoFormat)
+		if !body.Format.IsCompatible() {
+			return fmt.Errorf("the dashboard runs starkive format %s, but this setup tool uses format %s. Use the same version of starkive for both, redeploy, and try again", body.Format, core.DBRepoFormat)
 		}
 		if !hmac.Equal([]byte(body.Proof), []byte(core.SignDeploymentNonce(cfg, nonce))) {
 			return fmt.Errorf("%s: %w", site, errDashboardOtherValue) // `%w`: lets `errors.Is` find the wrapped error

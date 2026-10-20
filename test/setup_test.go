@@ -55,8 +55,8 @@ func TestCheckDeployment(t *testing.T) {
 	for _, nonce := range []string{"0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff"} {
 		rec := call(api.HandleCheckDeployment, "GET", "/api/check-deployment?nonce="+nonce, "", "")
 		var body struct {
-			Format int    `json:"format"`
-			Proof  string `json:"proof"`
+			Format core.DBRepoFormatVersion `json:"format"`
+			Proof  string                   `json:"proof"`
 		}
 		json.Unmarshal(rec.Body.Bytes(), &body)
 		if rec.Code != 200 || body.Format != core.DBRepoFormat || body.Proof != core.SignDeploymentNonce(cfg, nonce) {
