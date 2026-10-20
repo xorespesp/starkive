@@ -1,6 +1,6 @@
 // Steps that prepare the DB repository.
 // At the start of the setup, it initializes an empty repository (writes the marker) and adds the initial files.
-// At the end of the setup, it records the dashboard address and installs the workflow.
+// At the end of the setup, it records the dashboard address and installs the workflow if it is missing.
 // A small helper that asks GitHub for JSON (`getGitHubJSON`) is here too.
 package main
 
@@ -98,8 +98,8 @@ func addInitialFiles(cfg *core.Config) error {
 }
 
 // The last step of the setup.
-// Records the dashboard address in `config.json`, and installs the auto sync workflow.
-// Only when the workflow is installed for the first time, it writes to the config file that auto sync is on (`core.RecordSyncEnabled`).
+// Records the dashboard address in `config.json`, and installs the auto sync workflow if it is missing.
+// Only when it installs the workflow, it writes to the config file that auto sync is on (`core.RecordSyncEnabled`).
 //
 // Args:
 //   - `site`: The dashboard address registered in the sign-in GitHub App (the dashboard's canonical address).
@@ -108,22 +108,26 @@ func addInitialFiles(cfg *core.Config) error {
 // NOTE: The address is recorded first, and the workflow is installed after.
 // This way the workflow has an address to call from its first run.
 // The workflow can then always treat a config file it can't read as a failure, not as "not set up yet".
-// If the workflow already exists, the on/off setting isn't touched.
-// This keeps a new run of the setup tool from turning on what the person turned off in Settings.
+// If the workflow already exists, the sync options aren't touched.
 func finishDBRepo(cfg *core.Config, site string) error {
 	if err := core.SetDashboardURL(cfg, site); err != nil {
 		return err
 	}
+	// Checks whether this is the first install: an existing workflow means a new run
 	workflow, err := core.ReadFile(cfg, core.SyncWorkflowPath)
 	if err != nil {
 		return err
 	}
-	if workflow == nil { // First install: GitHub registers a new workflow as turned on (measured), so the setting is set to on too
-		if err := core.RecordSyncEnabled(cfg); err != nil {
-			return err
-		}
+	if workflow != nil {
+		return nil // Keeps the sync options the person chose
 	}
-	return installWorkflow(cfg)
+	// Records auto sync as on in the sync options, because GitHub turns a new workflow on (measured).
+	// This comes before the install.
+	// Otherwise, if this failed after the install, the next run would see the workflow and never record it
+	if err := core.RecordSyncEnabled(cfg); err != nil {
+		return err
+	}
+	return installWorkflowIfAbsent(cfg)
 }
 
 // Sends a GET to the GitHub API and decodes the JSON response into `dst`.

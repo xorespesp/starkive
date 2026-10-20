@@ -16,8 +16,10 @@ import (
 //
 // NOTE: These are the contract with the server: the config key `dashboard_url`, the secret name, the request shape,
 // and the response that counts as success (200 with `status` `not_due` or `synced`, the return values of `core.RunScheduledSync`).
-// If the contract changes, raise `core.DBRepoFormat`.
+// Raise `core.DBRepoFormat` for a change that existing DB repositories need, such as a contract change or a script bug fix.
+// An installed workflow isn't replaced otherwise (`installWorkflowIfAbsent`).
 // Then a repository with a server and a workflow of different versions stops with a clear error.
+// A change that only new installs need, such as a comment, doesn't raise it.
 // (`TestSyncWorkflowChangeIsReviewed` reports that the content changed.)
 // A run ends in success only when success is clearly confirmed. Everything else is a failure.
 // With "only known failures fail", unexpected cases would end as success, and GitHub wouldn't send a failure notice.
@@ -143,23 +145,20 @@ func checkActionsPermission(cfg *core.Config) error {
 	return getGitHubJSON(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/workflows?per_page=1", &list)
 }
 
-// Makes the DB repository's workflow match this tool's content (`syncWorkflowContent`).
-// If the workflow is missing, it installs it. If it differs, it replaces it. If it's the same, it leaves it.
-// If there is nothing to change, it doesn't commit.
+// Installs the auto sync workflow (`syncWorkflowContent`) if the DB repository doesn't have it.
+// It leaves a workflow that is already there as it is, even if its content differs.
 // Without the permission, it returns GitHub's 403 error as is (the needed permission `workflows=write` is added to the message).
-func installWorkflow(cfg *core.Config) error {
+//
+// NOTE: This tool doesn't change the code of a dashboard that is already deployed.
+// The workflow must match that dashboard, so this tool leaves it as it is too.
+func installWorkflowIfAbsent(cfg *core.Config) error {
 	paths := []string{core.SyncWorkflowPath}
 	return core.UpdateFiles(cfg, paths, func(original map[string][]byte) (map[string][]byte, core.CommitMessage, error) {
-		written := map[string][]byte{} // Files to write in this commit: path -> content
-		commitSummary := ""
-		switch {
-		case original[core.SyncWorkflowPath] == nil:
-			commitSummary = "install auto sync workflow"
-			written[core.SyncWorkflowPath] = []byte(syncWorkflowContent)
-		case string(original[core.SyncWorkflowPath]) != syncWorkflowContent:
-			commitSummary = "update auto sync workflow"
-			written[core.SyncWorkflowPath] = []byte(syncWorkflowContent)
+		if original[core.SyncWorkflowPath] != nil {
+			return nil, core.CommitMessage{}, nil // Nothing to write, so no commit
 		}
-		return written, core.NewCommitMessage("user(workflow)", commitSummary), nil
+		written := map[string][]byte{core.SyncWorkflowPath: []byte(syncWorkflowContent)} // Files to write in this commit: path -> content
+		message := core.NewCommitMessage("user(workflow)", "install auto sync workflow")
+		return written, message, nil
 	})
 }

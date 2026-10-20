@@ -40,7 +40,7 @@
 //     While waiting for the Vercel deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
 //     If the person chooses to enter it by hand, it stops the check and takes the address
 //  3. Create sign-in app: If there is no App, or it can't be read, it creates the sign-in GitHub App
-//  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow
+//  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow if it is missing
 //
 // For testing, the same environment variables as the server (`STARKIVE_GH_API_URL`, `STARKIVE_GH_WEB_URL`) can point the GitHub addresses to a fake server.
 package main
@@ -388,13 +388,13 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 		}
 	}
 
-	// 4. Record the dashboard address and install the workflow.
+	// 4. Record the dashboard address and install the workflow if it is missing.
 	// The workflow comes last, so the address to call is already recorded when it first runs
 	u.step(4)
 	if err := finishDBRepo(cfg, app.SiteURL); err != nil {
 		return err
 	}
-	u.say("Installed the automatic sync workflow in `" + cfg.DBRepoFullName + "`.")
+	u.say("The automatic sync workflow is set up in `" + cfg.DBRepoFullName + "`.")
 	u.done("Sign in to the dashboard with GitHub as `"+owner.Login+"`.", "Open the dashboard", app.SiteURL)
 	return nil
 }

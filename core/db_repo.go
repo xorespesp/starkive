@@ -36,8 +36,9 @@ const (
 //
 // NOTE: This keeps different versions of the dashboard, setup tool and workflow from reading or writing one repository wrongly.
 // It doesn't try to adapt or convert anything.
-// Raise it when the file layout or format changes, or the contract between the workflow and the server changes
-// (config keys, request and headers, response `status`).
+// Raise it when the file layout or format changes, or when installed workflows need a change.
+// That is a change of the contract between the workflow and the server (config keys, request and headers, response `status`),
+// or a fix for a bug in the workflow script.
 // But for now, before the implementation is final, it stays at 1.
 // After it is final, it is raised by this rule.
 const DBRepoFormat = 1

@@ -372,6 +372,71 @@ func TestCheckWorkflowsPermission(t *testing.T) {
 	}
 }
 
+// What the fake DB repository (`newFakeDBRepo`) received
+type fakeDBRepoWrites struct {
+	written map[string]string // Files in the tree that was made: path -> content. `nil` if no tree was made
+	message string            // Message of the commit that was made
+	count   int               // Number of write requests (POST, PATCH)
+}
+
+// Starts a fake GitHub with the DB repository `me/archive` (branch `main`) for one `core.UpdateFiles` call, and records the writes.
+// The server closes when the test ends.
+//
+// Args:
+//   - `existing`: Paths of the files already in the repository. Their content is "existing"
+//
+// Returns:
+//   - The server config that points to the fake, and what it received
+func newFakeDBRepo(t *testing.T, existing []string) (*core.Config, *fakeDBRepoWrites) {
+	got := &fakeDBRepoWrites{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			got.count++
+		}
+		switch {
+		case r.URL.Path == "/repos/me/archive/git/ref/heads/main":
+			w.Write([]byte(`{"object":{"sha":"c1"}}`))
+		case r.URL.Path == "/repos/me/archive/git/commits/c1":
+			w.Write([]byte(`{"tree":{"sha":"t1"}}`))
+		case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
+			for _, path := range existing {
+				if r.URL.Path == "/repos/me/archive/contents/"+path {
+					w.Write([]byte("existing"))
+					return
+				}
+			}
+			http.NotFound(w, r)
+		case r.URL.Path == "/repos/me/archive/git/trees":
+			var body struct {
+				Tree []struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+				} `json:"tree"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			got.written = map[string]string{}
+			for _, entry := range body.Tree {
+				got.written[entry.Path] = entry.Content
+			}
+			w.Write([]byte(`{"sha":"t2"}`))
+		case r.URL.Path == "/repos/me/archive/git/commits":
+			var body struct {
+				Message string `json:"message"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			got.message = body.Message
+			w.Write([]byte(`{"sha":"c2"}`))
+		case r.URL.Path == "/repos/me/archive/git/refs/heads/main":
+			w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close) // `t.Cleanup`: runs when the test ends, like `defer` in the test function
+	return &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}, got
+}
+
 // Guards the initial files of the DB repository (fake GitHub).
 //   - Missing files (the README and the empty file that keeps `db/`) are added in one commit, `feat: Add initial files`
 //   - A README that is already there isn't overwritten. Only the missing file is added
@@ -387,68 +452,41 @@ func TestAddInitialFiles(t *testing.T) {
 		{"nothing missing", []string{dbRepoReadmePath, dbFolderKeepPath}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var written map[string]string // Files in the tree that was made: path -> content
-			var message string            // Message of the commit that was made
-			var writes int                // Number of write requests (POST, PATCH)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					writes++
-				}
-				switch {
-				case r.URL.Path == "/repos/me/archive/git/ref/heads/main":
-					w.Write([]byte(`{"object":{"sha":"c1"}}`))
-				case r.URL.Path == "/repos/me/archive/git/commits/c1":
-					w.Write([]byte(`{"tree":{"sha":"t1"}}`))
-				case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
-					for _, path := range c.existing {
-						if r.URL.Path == "/repos/me/archive/contents/"+path {
-							w.Write([]byte("existing"))
-							return
-						}
-					}
-					http.NotFound(w, r)
-				case r.URL.Path == "/repos/me/archive/git/trees":
-					var body struct {
-						Tree []struct {
-							Path    string `json:"path"`
-							Content string `json:"content"`
-						} `json:"tree"`
-					}
-					json.NewDecoder(r.Body).Decode(&body)
-					written = map[string]string{}
-					for _, entry := range body.Tree {
-						written[entry.Path] = entry.Content
-					}
-					w.Write([]byte(`{"sha":"t2"}`))
-				case r.URL.Path == "/repos/me/archive/git/commits":
-					var body struct {
-						Message string `json:"message"`
-					}
-					json.NewDecoder(r.Body).Decode(&body)
-					message = body.Message
-					w.Write([]byte(`{"sha":"c2"}`))
-				case r.URL.Path == "/repos/me/archive/git/refs/heads/main":
-					w.Write([]byte(`{}`))
-				default:
-					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
-				}
-			}))
-			defer srv.Close()
-			cfg := &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}
+			cfg, got := newFakeDBRepo(t, c.existing)
 			if err := addInitialFiles(cfg); err != nil {
 				t.Fatal(err)
 			}
 			if c.want == nil {
-				if writes != 0 {
-					t.Errorf("sent %d write requests with nothing missing", writes)
+				if got.count != 0 {
+					t.Errorf("sent %d write requests with nothing missing", got.count)
 				}
 				return
 			}
-			if fmt.Sprint(written) != fmt.Sprint(c.want) || message != "feat: Add initial files" {
-				t.Errorf("wrote %q with message %q, want %q", written, message, c.want)
+			if fmt.Sprint(got.written) != fmt.Sprint(c.want) || got.message != "feat: Add initial files" {
+				t.Errorf("wrote %q with message %q, want %q", got.written, got.message, c.want)
 			}
 		})
+	}
+}
+
+// Guards the workflow installation (fake GitHub).
+//   - A missing workflow is installed with this version's content, in one commit, `user(workflow): install auto sync workflow`
+//   - A workflow that is already there isn't replaced, even if its content differs
+func TestInstallWorkflowIfAbsent(t *testing.T) {
+	cfg, got := newFakeDBRepo(t, nil)
+	if err := installWorkflowIfAbsent(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got.written[core.SyncWorkflowPath] != syncWorkflowContent || len(got.written) != 1 || got.message != "user(workflow): install auto sync workflow" {
+		t.Errorf("missing workflow: wrote %d files with message %q", len(got.written), got.message)
+	}
+
+	cfg, got = newFakeDBRepo(t, []string{core.SyncWorkflowPath})
+	if err := installWorkflowIfAbsent(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got.count != 0 {
+		t.Errorf("existing workflow: sent %d write requests", got.count)
 	}
 }
 
@@ -475,8 +513,7 @@ func TestSyncWorkflowContract(t *testing.T) {
 
 // Reports that the workflow content changed.
 // It pins the SHA-256 of the content, so any change fails here.
-// If the change alters the contract with the server (config key, secret name, request shape, the `status` that counts as success),
-// raise `core.DBRepoFormat`.
+// If existing DB repositories need the change (a contract change with the server or a script bug fix), raise `core.DBRepoFormat`.
 // (Then a repository with a server and a workflow of different versions stops with a clear error.)
 // After that, update the value below to the new hash
 func TestSyncWorkflowChangeIsReviewed(t *testing.T) {
