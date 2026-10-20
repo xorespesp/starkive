@@ -21,6 +21,7 @@ import (
 //	.starkive                             marker of a starkive repository, and its format version
 //	config.json                           settings and the sign-in GitHub App
 //	db/                                   the archive
+//	db/readmes/                           README snapshots, one file per repository (`ReadmesDBDir`)
 //	.github/workflows/starkive-sync.yml   auto sync workflow (installed by the setup tool)
 //	README.md                             readme (installed by the setup tool)
 const (

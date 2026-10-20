@@ -1,5 +1,6 @@
 // Storage engine for files in the DB repository, and the archive data.
-// It covers reading a file (`ReadFile`), writing and deleting several files in one commit (`UpdateFiles`, Git Data API),
+// It covers reading a file (`ReadFile`), listing a folder at a commit (`readBlobSHAsInFolder`),
+// writing and deleting several files in one commit (`UpdateFiles`, Git Data API),
 // handling the three archive files together (`UpdateArchive`), commit messages (`CommitMessage`),
 // and the data file format (`encodeLines`).
 // `db_repo.go` decides which repository to use, and whether it is safe to write to.
@@ -260,6 +261,51 @@ func readFilesAt(cfg *Config, paths []string, ref string) (map[string][]byte, er
 		files[path] = contents[i]
 	}
 	return files, nil
+}
+
+// Reads the git blob sha of every file under folder `folderPath` at commit `commitSHA`, with one request.
+// Files in subfolders are included. File contents aren't read.
+//
+// Args:
+//   - `commitSHA`: The commit sha to read at
+//   - `folderPath`: Folder path in the repository, clean and without a trailing `/` (e.g. `db/readmes/45`)
+//
+// Returns:
+//   - Path in the repository -> git blob sha of the file content. An empty map if the folder doesn't exist.
+//     A 502 `HTTPError` if GitHub cut the list short, because a short list would make present files look absent
+//
+// NOTE: The tree API takes `<commit sha>:<folder path>` in place of a tree sha (measured).
+// A list of 74,000 files (23MB) was not cut short (measured).
+func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map[string]string, error) {
+	if !isValidRepoPath(folderPath) {
+		return nil, fmt.Errorf("refusing to list a folder path that isn't valid: %q", folderPath)
+	}
+	var tree struct {
+		Tree []struct {
+			Path string `json:"path"` // Path relative to `folderPath`
+			Type string `json:"type"` // `blob` for a file, `tree` for a folder
+			SHA  string `json:"sha"`
+		} `json:"tree"`
+		Truncated bool `json:"truncated"`
+	}
+	escapedFolderPath := (&url.URL{Path: folderPath}).EscapedPath()
+	err := callRepoAPI(cfg, http.MethodGet, "/git/trees/"+commitSHA+":"+escapedFolderPath+"?recursive=1", nil, &tree)
+	if hasGitHubStatus(err, http.StatusNotFound) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if tree.Truncated {
+		return nil, Errorf(http.StatusBadGateway, "GitHub cut short the file list of %s", folderPath)
+	}
+	blobSHAByPath := map[string]string{}
+	for _, entry := range tree.Tree {
+		if entry.Type == "blob" {
+			blobSHAByPath[folderPath+"/"+entry.Path] = entry.SHA
+		}
+	}
+	return blobSHAByPath, nil
 }
 
 // Reads the three archive files from one commit, changes them with `change`, and writes only the changed files in one commit.

@@ -11,7 +11,7 @@ import (
 )
 
 // Catches changes that may require raising the format version.
-// It writes out the DB repository layout (path constants), the marker,
+// It writes out the DB repository layout (path constants and sample README paths), the marker, the line that marks a cut README,
 // and the JSON shape of the config file (`dbConfigFile`) and the data files (`StarItem`, `StarList`, `RepoMeta`), and pins their hash.
 // When they change, the test fails.
 // Then decide whether `DBRepoFormat` must go up (a layout or shape change is a major change),
@@ -19,15 +19,18 @@ import (
 // If it doesn't need to go up, only update the hash.
 // The contract with the workflow is guarded separately by `TestSyncWorkflowChangeIsReviewed` in the setup tool.
 func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
+	readmePath := FetchedReadme{extension: "md"}.buildPath(12345)
+	absentMarkerPath := FetchedReadme{isAbsent: true}.buildPath(12345)
 	shape := strings.Join([]string{
 		MarkerDBPath, ConfigDBPath, StarItemsDBPath, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
+		ReadmesDBDir, readmePath, absentMarkerPath, readmeCutLine,
 		string(EncodeMarker()),
 		describeJSONShape(reflect.TypeOf(dbConfigFile{})),
 		describeJSONShape(reflect.TypeOf(StarItem{})),
 		describeJSONShape(reflect.TypeOf(StarList{})),
 		describeJSONShape(reflect.TypeOf(RepoMeta{})),
 	}, "\n")
-	const reviewed = "8f51ffa736f054a05fbd8957de3e9167ba90937cab71bac39cdd8b09c46d85df"
+	const reviewed = "d50a773233d474b3bacae7cd2572cae455f1b8585a504882ee121ea19ec04391"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(shape))); got != reviewed {
 		t.Errorf("the DB repository format changed (sha256 %s). Decide whether core.DBRepoFormat must go up, then update the hash in this test:\n%s", got, shape)
 	}
