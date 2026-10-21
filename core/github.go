@@ -24,10 +24,11 @@ var httpClient = &http.Client{Timeout: githubTimeout}
 
 // Options of a GitHub API request. Empty fields use the default
 type GitHubAPIRequest struct {
-	Method string // HTTP method. GET if empty
-	Accept string // `Accept` header. `application/vnd.github+json` if empty
-	Body   any    // Body to send as JSON. `nil` if there is none
-	Token  string // Token to send instead of the DB repository token. The DB repository token if empty
+	Method  string        // HTTP method. GET if empty
+	Accept  string        // `Accept` header. `application/vnd.github+json` if empty
+	Body    any           // Body to send as JSON. `nil` if there is none
+	Token   string        // Token to send instead of the DB repository token. The DB repository token if empty
+	Timeout time.Duration // Time limit of this request. `githubTimeout` if 0 or longer than it
 }
 
 // Sends a request to the GitHub API (REST or GraphQL).
@@ -73,7 +74,11 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return httpClient.Do(req)
+	client := httpClient
+	if opt.Timeout > 0 && opt.Timeout < githubTimeout {
+		client = &http.Client{Timeout: opt.Timeout} // A client is cheap to make. It shares the default connection pool
+	}
+	return client.Do(req)
 }
 
 // Sends a GitHub GraphQL query and fills a value with the `data` of the result.

@@ -2,10 +2,16 @@
 package core
 
 import (
+	"bytes"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests how the README file content is made and read back.
@@ -14,7 +20,7 @@ import (
 //   - Long text is cut after its last line break within `maxReadmeBytes`, or at a character boundary if it has none,
 //     and the cut line is added
 //   - Text of exactly `maxReadmeBytes` isn't cut
-func TestBuildReadmeFile(t *testing.T) {
+func TestBuildReadmeSnapshotFile(t *testing.T) {
 	cases := []struct {
 		name        string
 		sourceBytes string
@@ -33,18 +39,18 @@ func TestBuildReadmeFile(t *testing.T) {
 		{"cut at a character boundary", strings.Repeat("가", 3000), strings.Repeat("가", 2730) + "\n" + readmeCutLine + "\n"},
 	}
 	for _, c := range cases {
-		got, usable := buildReadmeFile([]byte(c.sourceBytes))
+		got, usable := buildReadmeSnapshotFile([]byte(c.sourceBytes))
 		if usable != (c.want != "") || string(got) != c.want {
 			t.Errorf("%s: got %q (usable %v)", c.name, got, usable)
 		}
 	}
 
 	// Reading back gives the text without the cut line, and whether it was cut
-	content, _ := buildReadmeFile([]byte(strings.Repeat(strings.Repeat("x", 99)+"\n", 100)))
-	if text, isCut := parseReadmeFile(content); !isCut || text != strings.Repeat(strings.Repeat("x", 99)+"\n", 81) {
+	content, _ := buildReadmeSnapshotFile([]byte(strings.Repeat(strings.Repeat("x", 99)+"\n", 100)))
+	if text, isCut := parseReadmeSnapshotFile(content); !isCut || text != strings.Repeat(strings.Repeat("x", 99)+"\n", 81) {
 		t.Errorf("parse cut file: cut %v, %d bytes", isCut, len(text))
 	}
-	if text, isCut := parseReadmeFile([]byte("# Title\n")); isCut || text != "# Title\n" {
+	if text, isCut := parseReadmeSnapshotFile([]byte("# Title\n")); isCut || text != "# Title\n" {
 		t.Errorf("parse whole file: cut %v, %q", isCut, text)
 	}
 }
@@ -129,5 +135,114 @@ func TestReadReadmeSnapshotPaths(t *testing.T) {
 
 	if paths, err := readReadmeSnapshotPaths(cfg, "c1", 7); err != nil || len(paths) != 0 || requests.Load() != 2 {
 		t.Errorf("item with no folder: %q, %v, requests %d", paths, err, requests.Load())
+	}
+}
+
+// Tests how `FetchReadmeByRepoID` reads each kind of GitHub answer, against a test server.
+//   - A README is decoded, and its extension is kept in lower case only if it is allowed
+//   - 404, 451 and text that isn't usable mean the README is absent
+//   - 429 and a 403 rate limit answer are errors that wrap `errGitHubRateLimited`
+//   - A 403 that isn't a rate limit is an error that doesn't wrap it, so nothing is saved
+//   - 5xx and a timeout are other errors, which say nothing about the README
+//   - A README over 1MB comes with empty content, so its start is read in raw format, cut to `maxReadmeBytes`
+func TestFetchReadmeByRepoID(t *testing.T) {
+	largeReadme := strings.Repeat(strings.Repeat("x", 99)+"\n", 2000) // 200KB
+	answers := map[string]func(w http.ResponseWriter, r *http.Request){
+		"/repositories/1/readme": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"name":"README.md","size":6,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("# One\n")))
+		},
+		"/repositories/2/readme": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"name":"README.RST","size":5,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("Two\n\n")))
+		},
+		"/repositories/3/readme": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"name":"README.old-md","size":6,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("Three\n")))
+		},
+		"/repositories/4/readme": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"name":"README.md","size":3,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("a\x00b")))
+		},
+		"/repositories/5/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		},
+		"/repositories/6/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"Repository access blocked"}`, http.StatusUnavailableForLegalReasons)
+		},
+		"/repositories/7/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"Resource not accessible"}`, http.StatusForbidden)
+		},
+		"/repositories/8/readme": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+		},
+		"/repositories/13/readme": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+		},
+		"/repositories/14/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"You have exceeded a secondary rate limit"}`, http.StatusForbidden)
+		},
+		"/repositories/15/readme": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"name":"README","size":0,"content":""}`)
+		},
+		"/repositories/9/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"slow down"}`, http.StatusTooManyRequests)
+		},
+		"/repositories/10/readme": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusInternalServerError)
+		},
+		"/repositories/11/readme": func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(300 * time.Millisecond) // Longer than the time limit the test gives
+			fmt.Fprint(w, `{"name":"README.md","size":0,"content":""}`)
+		},
+		"/repositories/12/readme": func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Accept") == "application/vnd.github.raw+json" {
+				fmt.Fprint(w, largeReadme)
+				return
+			}
+			fmt.Fprintf(w, `{"name":"README.md","size":%d,"content":""}`, len(largeReadme))
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answer, ok := answers[r.URL.Path]
+		if !ok {
+			http.Error(w, `{"message":"unexpected path"}`, http.StatusTeapot)
+			return
+		}
+		answer(w, r)
+	}))
+	t.Cleanup(server.Close)
+	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+
+	cases := []struct {
+		id            int64
+		want          FetchedReadme
+		wantErr       bool // Any error
+		isRateLimited bool // The error wraps `errGitHubRateLimited`
+	}{
+		{1, FetchedReadme{extension: "md", content: []byte("# One\n")}, false, false},
+		{2, FetchedReadme{extension: "rst", content: []byte("Two\n\n")}, false, false},
+		{3, FetchedReadme{content: []byte("Three\n")}, false, false}, // `old-md` isn't allowed, so it has no extension
+		{4, FetchedReadme{isAbsent: true}, false, false},
+		{5, FetchedReadme{isAbsent: true}, false, false},
+		{6, FetchedReadme{isAbsent: true}, false, false},
+		{7, FetchedReadme{}, true, false},
+		{8, FetchedReadme{}, true, true},                  // 403 with no requests left
+		{13, FetchedReadme{}, true, true},                 // 403 with `Retry-After`
+		{14, FetchedReadme{}, true, true},                 // 403 that says "rate limit"
+		{9, FetchedReadme{}, true, true},                  // 429
+		{15, FetchedReadme{isAbsent: true}, false, false}, // An empty README, with no dot in its name, isn't read again in raw format
+		{10, FetchedReadme{}, true, false},
+		{11, FetchedReadme{}, true, false},
+	}
+	for _, c := range cases {
+		got, err := FetchReadmeByRepoID(cfg, c.id, 100*time.Millisecond)
+		if (err != nil) != c.wantErr || errors.Is(err, errGitHubRateLimited) != c.isRateLimited || fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("README of %d: %+v, %v", c.id, got, err)
+		}
+	}
+
+	got, err := FetchReadmeByRepoID(cfg, 12, 0)
+	wantContent, _ := buildReadmeSnapshotFile([]byte(largeReadme))
+	if err != nil || got.isAbsent || got.extension != "md" || !bytes.Equal(got.content, wantContent) {
+		t.Errorf("large README: %v, %d bytes", err, len(got.content))
 	}
 }

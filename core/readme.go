@@ -1,7 +1,7 @@
 // README snapshots.
 // The start of each archived repository's README is kept in its own file under `ReadmesDBDir`, so it stays after the repository is gone.
 // This file covers where the files go (`FetchedReadme.buildPath`), finding them (`readReadmeSnapshotsInFolder`),
-// and what they hold (`buildReadmeFile`, `parseReadmeFile`).
+// what they hold (`buildReadmeSnapshotFile`, `parseReadmeSnapshotFile`), and fetching a README from GitHub (`FetchReadmeByRepoID`).
 //
 // NOTE: These files aren't JSON arrays like the other data files, on purpose.
 // One file per repository keeps each change small.
@@ -10,12 +10,18 @@ package core
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -42,9 +48,9 @@ var readmeExtensionPattern = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 
 // README of one repository as fetched from GitHub: the content to save, or the fact that the README is absent
 type FetchedReadme struct {
-	isAbsent  bool   // `true` if the repository has no README, or one that isn't usable text (`buildReadmeFile`). It is saved as the marker (`readmeAbsentMarkerSuffix`)
+	isAbsent  bool   // `true` if the repository has no README, or one that isn't usable text (`buildReadmeSnapshotFile`). It is saved as the marker (`readmeAbsentMarkerSuffix`)
 	extension string // Extension of the README file name (`readmeExtensionPattern`). Empty if it has none or it isn't allowed
-	content   []byte // File content made by `buildReadmeFile`. Empty if `isAbsent`
+	content   []byte // File content made by `buildReadmeSnapshotFile`. Empty if `isAbsent`
 }
 
 // Builds the path of the file that saves this README for item `id`.
@@ -143,7 +149,7 @@ func readReadmeSnapshotPaths(cfg *Config, commitSHA string, itemID int64) ([]str
 //   - The file content, and `false` if the README isn't usable text (blank, has a NUL byte, or isn't valid UTF-8)
 //
 // NOTE: Only the kept part is checked for UTF-8, so a character cut off at the end of `sourceBytes` doesn't matter.
-func buildReadmeFile(sourceBytes []byte) ([]byte, bool) {
+func buildReadmeSnapshotFile(sourceBytes []byte) ([]byte, bool) {
 	var text []byte
 	switch {
 	case bytes.HasPrefix(sourceBytes, []byte{0xFF, 0xFE}):
@@ -186,14 +192,111 @@ func decodeUTF16(utf16Bytes []byte, order binary.ByteOrder) []byte {
 	return []byte(string(utf16.Decode(codeUnits)))
 }
 
-// Splits the content of a README file into the README text and whether it was cut (`buildReadmeFile` added `readmeCutLine`).
+// Splits the content of a README file into the README text and whether it was cut (`buildReadmeSnapshotFile` added `readmeCutLine`).
 //
 // NOTE: A README that isn't cut but itself ends with `readmeCutLine` reads as cut.
 // The line names starkive, so no real README is expected to end with it.
-func parseReadmeFile(content []byte) (string, bool) {
+func parseReadmeSnapshotFile(content []byte) (string, bool) {
 	text, endsWithCutLine := bytes.CutSuffix(content, []byte(readmeCutLine+"\n"))
 	if !endsWithCutLine || (len(text) > 0 && !bytes.HasSuffix(text, []byte("\n"))) {
 		return string(content), false
 	}
 	return string(text), true
+}
+
+// Error for a GitHub answer that says the rate limit was reached
+var errGitHubRateLimited = errors.New("GitHub rate limit reached")
+
+// Checks a GitHub answer like `CheckGitHubAPI`, and wraps a rate limit answer with `errGitHubRateLimited`.
+// A rate limit answer is 429, or 403 with no requests left, a `Retry-After` header, or "rate limit" in the message (docs).
+func checkGitHubAPIWithRateLimit(res *http.Response) error {
+	err := CheckGitHubAPI(res)
+	var apiErr *GitHubAPIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	isRateLimited := res.StatusCode == http.StatusTooManyRequests ||
+		(res.StatusCode == http.StatusForbidden && (res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "" ||
+			strings.Contains(strings.ToLower(apiErr.Message), "rate limit")))
+	if isRateLimited {
+		return fmt.Errorf("%w: %w", errGitHubRateLimited, err) // Two `%w`: `errors.Is` finds both errors
+	}
+	return err
+}
+
+// Fetches the README of repository `id` from GitHub, with each request limited to `timeout`.
+//
+// Args:
+//   - `timeout`: Time limit of each request. `githubTimeout` if 0 or longer than it
+//
+// Returns:
+//   - The README. It is absent (`isAbsent`) when GitHub answers the first request with 404 or 451,
+//     or when the README isn't usable text (`buildReadmeSnapshotFile`)
+//   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
+//     Any other error (a 403, a timeout, 5xx) means "ask again later", and says nothing about the README
+//
+// NOTE: Only 404 (no README) and 451 (blocked for legal reasons) say the README is absent (docs).
+// A 403 says this token can't see it now, not that there is no README.
+// So a 403 is an error like any other failure, and the README is asked again later.
+// It asks by ID (`/repositories/{id}/readme`), so a renamed repository needs no lookup (measured).
+// The default answer has the file name and the content in base64.
+// For a file over 1MB the content is empty (docs), so the start of the file is read again in raw format.
+func FetchReadmeByRepoID(cfg *Config, id int64, timeout time.Duration) (FetchedReadme, error) {
+	path := fmt.Sprintf("/repositories/%d/readme", id)
+	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Timeout: timeout})
+	if err != nil {
+		return FetchedReadme{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusUnavailableForLegalReasons {
+		return FetchedReadme{isAbsent: true}, nil
+	}
+	if err := checkGitHubAPIWithRateLimit(res); err != nil {
+		return FetchedReadme{}, err
+	}
+	var readmeFile struct {
+		Name    string `json:"name"`    // File name (e.g. `README.md`)
+		Size    int64  `json:"size"`    // File size in bytes
+		Content string `json:"content"` // Content in base64, broken into lines. Empty for a file over 1MB
+	}
+	if err := json.NewDecoder(res.Body).Decode(&readmeFile); err != nil {
+		return FetchedReadme{}, err
+	}
+	var sourceBytes []byte
+	if readmeFile.Content == "" && readmeFile.Size > 0 {
+		// UTF-16 text takes up to twice the bytes of the same text in UTF-8.
+		// Four times `maxReadmeBytes` still keeps more than `maxReadmeBytes` after it is turned into UTF-8,
+		// so `buildReadmeSnapshotFile` cuts it and adds `readmeCutLine`
+		if sourceBytes, err = fetchRawReadme(cfg, path, timeout, 4*maxReadmeBytes); err != nil {
+			return FetchedReadme{}, err
+		}
+	} else if sourceBytes, err = base64.StdEncoding.DecodeString(readmeFile.Content); err != nil { // It skips the line breaks GitHub puts in (docs)
+		return FetchedReadme{}, err
+	}
+	content, isUsable := buildReadmeSnapshotFile(sourceBytes)
+	if !isUsable {
+		return FetchedReadme{isAbsent: true}, nil
+	}
+	extension := ""
+	if dot := strings.LastIndexByte(readmeFile.Name, '.'); dot >= 0 {
+		extension = strings.ToLower(readmeFile.Name[dot+1:])
+	}
+	if !readmeExtensionPattern.MatchString(extension) {
+		extension = "" // An extension that isn't allowed is dropped, and the file is saved as `<ID>`
+	}
+	return FetchedReadme{extension: extension, content: content}, nil
+}
+
+// Fetches the README at API path `path` in raw format, up to `maxBytes` from its start.
+// Reading stops there and the answer is closed, so most of a large README isn't downloaded.
+func fetchRawReadme(cfg *Config, path string, timeout time.Duration, maxBytes int64) ([]byte, error) {
+	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Accept: "application/vnd.github.raw+json", Timeout: timeout})
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if err := checkGitHubAPIWithRateLimit(res); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(res.Body, maxBytes)) // `io.LimitReader`: stops reading after that many bytes
 }
