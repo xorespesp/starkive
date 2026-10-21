@@ -22,11 +22,11 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Time one sync may spend refreshing the metadata snapshot.
-// It is well below the time limit of this function (300 seconds, `maxDuration` in `vercel.json`).
-// A request for 100 repositories takes about 4.5 seconds (measured), and 6 are sent at once.
-// So this is enough to check thousands at a time. Repositories not checked yet get checked in the next run
-const metaRefreshBudget = 40 * time.Second
+// Longest time one sync may take.
+// The function time limit is 300 seconds (measured, with or without `maxDuration` in `vercel.json`).
+// The workflow waits as long (`curl --max-time 300`).
+// The 60 seconds left cover the work before and after the sync, and a last request that ends late
+const syncTimeLimit = 240 * time.Second
 
 // Handles the workflow's scheduled call.
 // Checks the sync key, syncs if today is a due day, and answers `{ status }`.
@@ -43,7 +43,8 @@ func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	status, err := core.RunScheduledSync(cfg, metaRefreshBudget, time.Now())
+	now := time.Now()
+	status, err := core.RunScheduledSync(cfg, now.Add(syncTimeLimit), now)
 	if err != nil {
 		log.Printf("scheduled sync: %v", err)
 		return core.Errorf(http.StatusBadGateway, "Sync failed. See the dashboard's server logs for details")
@@ -61,7 +62,7 @@ func handleSyncArchivePost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	result, err := core.Sync(cfg, metaRefreshBudget)
+	result, err := core.Sync(cfg, time.Now().Add(syncTimeLimit))
 	if err != nil {
 		return err
 	}

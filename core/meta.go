@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// Most time one sync spends refreshing the metadata snapshots.
+// A request for 100 repositories takes about 4.5 seconds (measured), and 6 are sent at once.
+// So this is enough to check thousands at a time. Repositories not checked yet get checked in the next sync.
+// It is capped so that a large archive can't use up the time of the whole sync
+const metaRefreshBudget = 40 * time.Second
+
 // One repository metadata snapshot (one line of `db/repo-meta.json`).
 // It keeps the last checked values, so "what it was" remains even if the repository is deleted or made private.
 // The field order is the key order in the file.
@@ -194,7 +200,7 @@ type MetaRefreshResult struct {
 //     The body lists disappeared, visible again and renamed repositories, and the number whose details changed
 //
 // Args:
-//   - `budget`: Time available. It keeps the work within the function time limit
+//   - `budget`: Time available. It keeps the work within the time limit of the sync
 //
 // Returns:
 //   - The number checked and the number not found

@@ -160,8 +160,12 @@ const syncDayStart = 6 * time.Hour
 // NOTE: It is decided by date math alone, so the last sync time doesn't need to be recorded.
 // Sync now in the dashboard doesn't shift these days.
 func isSyncDay(intervalDays int, now time.Time) bool {
-	day := int64(now.Add(-syncDayStart).Sub(time.Unix(0, 0)) / (24 * time.Hour)) // Number of days, counting 06:00 UTC as the start of a day
-	return day%int64(intervalDays) == 0
+	return syncDayNumber(now)%int64(intervalDays) == 0
+}
+
+// Returns the number of the sync day that `now` falls on: days since 1970-01-01, with each day starting at 06:00 UTC (`syncDayStart`)
+func syncDayNumber(now time.Time) int64 {
+	return int64(now.Add(-syncDayStart).Sub(time.Unix(0, 0)) / (24 * time.Hour))
 }
 
 // Handles a scheduled call (from the workflow in the DB repository).
@@ -169,7 +173,7 @@ func isSyncDay(intervalDays int, now time.Time) bool {
 // If the last finished scheduled run failed, it syncs again regardless of the interval.
 //
 // Args:
-//   - `metaBudget`: Time to spend on refreshing metadata snapshots (passed to `Sync`)
+//   - `deadline`: Time by which the sync must end (passed to `Sync`)
 //   - `now`: Current time. Taken as an argument so tests can set the date
 //
 // Returns:
@@ -185,7 +189,7 @@ func isSyncDay(intervalDays int, now time.Time) bool {
 // Overlapping runs aren't prevented.
 // The workflow's `concurrency` runs scheduled runs one after another.
 // Overlapping with Sync now gives the same sync result.
-func RunScheduledSync(cfg *Config, metaBudget time.Duration, now time.Time) (string, error) {
+func RunScheduledSync(cfg *Config, deadline time.Time, now time.Time) (string, error) {
 	settings, err := readSyncConfig(cfg)
 	if err != nil {
 		return "", err
@@ -198,7 +202,7 @@ func RunScheduledSync(cfg *Config, metaBudget time.Duration, now time.Time) (str
 	if !retry && !isSyncDay(settings.intervalDays(), now) {
 		return "not_due", nil
 	}
-	if _, err := Sync(cfg, metaBudget); err != nil {
+	if _, err := Sync(cfg, deadline); err != nil {
 		return "", err
 	}
 	return "synced", nil

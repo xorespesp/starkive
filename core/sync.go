@@ -309,10 +309,12 @@ type SyncResult struct {
 
 // Brings the archive in line with GitHub.
 //  1. Adds my GitHub Stars that aren't in the archive (`ArchiveStarredRepos`)
-//  2. Refreshes the metadata snapshots within `metaBudget` (`RefreshMeta`)
+//  2. Refreshes the metadata snapshots within `metaRefreshBudget`, or the time left before `deadline` if that is shorter (`RefreshMeta`)
 //
 // Args:
-//   - `metaBudget`: Time to spend on refreshing snapshots. When it runs out, the remaining repositories wait for the next sync
+//   - `deadline`: Time after which no new request of the metadata step starts.
+//     That step leaves what is left for the next sync.
+//     Adding new Stars doesn't check it
 //
 // Returns:
 //   - The counts (`SyncResult`). Even if a step failed, the counts of the steps that succeeded are filled in
@@ -324,7 +326,7 @@ type SyncResult struct {
 // Each run compares all Stars with the archive.
 // So overlapping runs or a skipped day give the same result.
 // GitHub Stars are never changed.
-func Sync(cfg *Config, metaBudget time.Duration) (SyncResult, error) {
+func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	result := SyncResult{}
 	var errs []error
 
@@ -337,7 +339,7 @@ func Sync(cfg *Config, metaBudget time.Duration) (SyncResult, error) {
 		errs = append(errs, fmt.Errorf("archive new stars: %w", err)) // Wrapped with `%w`, so `errors.As` still finds the inner error (`HTTPError`, `GitHubAPIError`)
 	}
 
-	meta, err := RefreshMeta(cfg, metaBudget)
+	meta, err := RefreshMeta(cfg, min(metaRefreshBudget, time.Until(deadline))) // `min`: built into Go since 1.21
 	if err == nil {
 		result.MetaChecked, result.Unavailable = meta.Checked, meta.Unavailable
 	} else {

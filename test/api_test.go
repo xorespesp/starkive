@@ -1306,7 +1306,7 @@ func TestSync(t *testing.T) {
 		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
 
 	cfg := newTestConfig()
-	result, err := core.Sync(cfg, time.Minute)
+	result, err := core.Sync(cfg, time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1334,7 +1334,7 @@ func TestSync(t *testing.T) {
 	}
 
 	// Running it again has nothing to add and no changed metadata, so no commit is made
-	if result, err = core.Sync(cfg, time.Minute); err != nil || result != (core.SyncResult{Starred: 4, Added: 0, MetaChecked: 4, Unavailable: 0}) {
+	if result, err = core.Sync(cfg, time.Now().Add(time.Minute)); err != nil || result != (core.SyncResult{Starred: 4, Added: 0, MetaChecked: 4, Unavailable: 0}) {
 		t.Errorf("second run: %+v %v", result, err)
 	}
 	if len(gh.commits) != 2 {
@@ -1352,7 +1352,7 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/kept", "a/vanishing"}
 	cfg := newTestConfig()
-	if _, err := core.Sync(cfg, time.Minute); err != nil {
+	if _, err := core.Sync(cfg, time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
@@ -1613,7 +1613,7 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 	}
 
 	// Sync: adds the other new Stars. For the same GitHub star list, they must go into the same star list as Import
-	if _, err := core.Sync(newTestConfig(), time.Minute); err != nil {
+	if _, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	var starLists []core.StarList
@@ -1699,7 +1699,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 	gh.githubStarListsDown = true // Adding new Stars needs the GitHub star lists, and only that query fails
 
 	// Adding new Stars fails, but the unrelated snapshot refresh runs to the end and commits. The error comes back with the step name
-	result, err := core.Sync(newTestConfig(), time.Minute)
+	result, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute))
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)
 	}
@@ -1709,7 +1709,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// When the outage ends, the next run fills in the missing Stars
 	gh.githubStarListsDown = false
-	if result, err := core.Sync(newTestConfig(), time.Minute); err != nil || result.Added != 1 {
+	if result, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute)); err != nil || result.Added != 1 {
 		t.Errorf("next sync: %+v %v", result, err)
 	}
 }
