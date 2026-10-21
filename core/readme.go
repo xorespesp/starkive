@@ -2,7 +2,7 @@
 // The start of each archived repository's README is kept in its own file under `ReadmesDBDir`, so it stays after the repository is gone.
 // This file covers where the files go (`FetchedReadme.buildPath`), finding them (`readReadmeSnapshotsInFolder`),
 // what they hold (`buildReadmeSnapshotFile`, `parseReadmeSnapshotFile`), what saving one writes and deletes (`planReadmeSnapshotUpdate`),
-// and fetching a README from GitHub (`FetchReadmeByRepoID`).
+// fetching a README from GitHub (`FetchReadmeByRepoID`), and reading a saved one back (`ReadReadmeSnapshot`).
 //
 // NOTE: These files aren't JSON arrays like the other data files, on purpose.
 // One file per repository keeps each change small.
@@ -353,4 +353,61 @@ func fetchRawReadme(cfg *Config, path string, deadline time.Time, maxBytes int64
 		return nil, err
 	}
 	return io.ReadAll(io.LimitReader(res.Body, maxBytes)) // `io.LimitReader`: stops reading after that many bytes
+}
+
+// States of a README snapshot as read back (`ReadmeSnapshotContent.State`)
+const (
+	readmeStateSaved     = "saved"     // A saved README
+	readmeStateAbsent    = "absent"    // Checked, with no usable README (the marker)
+	readmeStateUnchecked = "unchecked" // Not checked yet (no file)
+)
+
+// README snapshot of one item as read back: its state, and the README if one is saved
+type ReadmeSnapshotContent struct {
+	State     string `json:"state"`               // `saved`, `absent` or `unchecked` (`readmeStateSaved` and so on)
+	Format    string `json:"format,omitempty"`    // Extension of the saved file (e.g. `md`). Empty if the file has none
+	Text      string `json:"text,omitempty"`      // The saved README text, without `readmeCutLine`
+	Truncated bool   `json:"truncated,omitempty"` // `true` if the README was cut at `maxReadmeBytes`
+}
+
+// Reads the README snapshot of item `itemID` at the branch tip.
+// It reads the commit of the branch tip, lists the item's folder, and reads the file only when a README is saved.
+// That is three requests at most.
+//
+// Returns:
+//   - The snapshot. `unchecked` for an item with no file, which includes an ID that isn't in the archive.
+//     A GitHub error, or a 502 `HTTPError` if a file in the listing can't be read at the same commit
+//
+// NOTE: The code always leaves one file per item, but a hand edit of the DB repository can leave more.
+// A saved README wins over the marker, because a saved README is what this feature keeps.
+// Among several README files, the first by path is shown.
+func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error) {
+	commitSHA, err := readBranchCommit(cfg) // The tree sha isn't needed, so only the commit is read
+	if err != nil {
+		return ReadmeSnapshotContent{}, err
+	}
+	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(itemID))
+	if err != nil {
+		return ReadmeSnapshotContent{}, err
+	}
+	snapshots := snapshotsByID[itemID]
+	if len(snapshots) == 0 {
+		return ReadmeSnapshotContent{State: readmeStateUnchecked}, nil
+	}
+	for _, snapshot := range snapshots {
+		if snapshot.isAbsent {
+			continue
+		}
+		content, err := readFileAt(cfg, snapshot.path, commitSHA)
+		if err != nil {
+			return ReadmeSnapshotContent{}, err
+		}
+		if content == nil { // The listing at the same commit has the file, so this is GitHub's mistake
+			return ReadmeSnapshotContent{}, Errorf(http.StatusBadGateway, "GitHub listed %s but didn't return it", snapshot.path)
+		}
+		text, isTruncated := parseReadmeSnapshotFile(content)
+		_, extension, _ := strings.Cut(snapshot.path[strings.LastIndexByte(snapshot.path, '/')+1:], ".")
+		return ReadmeSnapshotContent{State: readmeStateSaved, Format: extension, Text: text, Truncated: isTruncated}, nil
+	}
+	return ReadmeSnapshotContent{State: readmeStateAbsent}, nil
 }

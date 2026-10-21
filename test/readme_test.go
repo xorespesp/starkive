@@ -143,3 +143,47 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 		t.Errorf("save README of item 999: %v, saved %v, listings %d", err, saved, gh.treeListCalls)
 	}
 }
+
+// Tests reading README snapshots through `GET /api/archive-repo-meta?id=`.
+//   - A saved README gives `saved`, its extension as `format`, and its text without the cut line, with `truncated`
+//   - A file with no extension has no `format`
+//   - A README and a marker together give the README
+//   - Only the marker gives `absent`, and no file gives `unchecked`
+//   - An `id` that isn't a positive number is 400, and without `id` the raw metadata file comes back as before
+func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	const cutLine = "[starkive: the rest of this README was not saved]\n"
+	gh.files[core.ReadmesDBDir+"/01/1.rst"] = "# One\n" + cutLine // Sorted after `1.no-readme`, so the README must win on purpose
+	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
+	gh.files[core.ReadmesDBDir+"/02/2"] = "Two\n"
+	gh.files[core.ReadmesDBDir+"/03/3.no-readme"] = ""
+
+	cases := []struct {
+		id   string
+		want string // Answer body, or the status code for a failure
+	}{
+		{"1", `{"id":1,"readme":{"state":"saved","format":"rst","text":"# One\n","truncated":true}}`},
+		{"2", `{"id":2,"readme":{"state":"saved","text":"Two\n"}}`},
+		{"3", `{"id":3,"readme":{"state":"absent"}}`},
+		{"4", `{"id":4,"readme":{"state":"unchecked"}}`},
+		{"0", "400"},
+		{"-1", "400"},
+		{"x", "400"},
+		{"", "400"}, // `id` sent with no value
+	}
+	for _, c := range cases {
+		rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta?id="+c.id, "", cookie)
+		got := strings.TrimSpace(rec.Body.String())
+		if rec.Code != 200 {
+			got = fmt.Sprint(rec.Code)
+		}
+		if got != c.want {
+			t.Errorf("id %s: got %s, want %s", c.id, got, c.want)
+		}
+	}
+
+	if rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta", "", cookie); rec.Code != 200 || rec.Body.String() != "[]" {
+		t.Errorf("raw metadata file: %d %s", rec.Code, rec.Body)
+	}
+}
