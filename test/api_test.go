@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -65,6 +66,7 @@ type fakeGitHub struct {
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README (404)
 	readmeCalls         int                           // Number of README requests
 	readmeRateLimitFrom int                           // If not 0, README requests from this one on (counting from 1) get the rate limit answer 429
+	blobs               map[string]string             // Created blob sha -> content
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
 	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
@@ -367,9 +369,15 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case e.Content != nil:
 				files[e.Path] = *e.Content
-			case string(e.SHA) != "null": // GitHub takes a blob sha in place of content (docs), but no test sends one, so the fake doesn't imitate it
-				http.Error(w, `{"message":"fake GitHub: a tree entry with a blob sha is not imitated"}`, http.StatusNotImplemented)
-				return
+			case string(e.SHA) != "null": // A blob made earlier (`/git/blobs`), by its sha
+				var blobSHA string
+				json.Unmarshal(e.SHA, &blobSHA)
+				content, ok := f.blobs[blobSHA]
+				if !ok {
+					http.Error(w, `{"message":"BadObjectState"}`, http.StatusUnprocessableEntity)
+					return
+				}
+				files[e.Path] = content
 			default:
 				if _, ok := files[e.Path]; !ok { // Deleting a path that isn't there fails the whole tree (measured)
 					http.Error(w, `{"message":"GitRPC::BadObjectState"}`, http.StatusUnprocessableEntity)
@@ -378,8 +386,28 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				delete(files, e.Path)
 			}
 		}
+		if maps.Equal(files, f.readFilesAt(strings.TrimPrefix(body.BaseTree, "tree-of-"))) { // Same files as the base tree give the same tree sha, like git
+			fmt.Fprintf(w, `{"sha":%q}`, body.BaseTree)
+			return
+		}
 		sha := fmt.Sprintf("tree-%d", len(f.trees)+1)
 		f.trees[sha] = files
+		fmt.Fprintf(w, `{"sha":%q}`, sha)
+
+	case r.URL.Path == "/repos/me/archive/git/blobs" && r.Method == http.MethodPost:
+		// Create a blob from base64 content. Its sha is the git blob sha of the decoded bytes
+		var body struct {
+			Content  string `json:"content"`
+			Encoding string `json:"encoding"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		content, err := base64.StdEncoding.DecodeString(body.Content)
+		if err != nil || body.Encoding != "base64" {
+			http.Error(w, `{"message":"Invalid blob"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		sha := gitBlobSHA(string(content))
+		f.blobs[sha] = string(content)
 		fmt.Fprintf(w, `{"sha":%q}`, sha)
 
 	case r.URL.Path == "/repos/me/archive/git/commits" && r.Method == http.MethodPost:
@@ -655,7 +683,7 @@ func setup(t *testing.T, starItems string, starLists string) *fakeGitHub {
 func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fakeGitHub {
 	gh := &fakeGitHub{files: map[string]string{}, head: "commit-0", snapshots: map[string]map[string]string{},
 		trees: map[string]map[string]string{}, pending: map[string]fakeCommit{}, parents: map[string]string{},
-		readmes: map[int64]fakeReadme{}, workflowState: "active"}
+		readmes: map[int64]fakeReadme{}, blobs: map[string]string{}, workflowState: "active"}
 	if starItems != "" {
 		gh.files[core.StarItemsDBPath] = starItems
 	}

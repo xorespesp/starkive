@@ -278,3 +278,20 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 		t.Errorf("star lists changed: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
 }
+
+// Tests that `core.UpdateFiles` makes no commit when its changes leave the tree as it was.
+// GitHub then answers the new tree with the sha of the base tree, so no commit is made on top of it
+func TestUnchangedTreeIsNotCommitted(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	before := len(gh.commits)
+	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		return core.FileChangesCommit{
+			FilesToWrite: map[string][]byte{core.StarListsDBPath: filesRead[core.StarListsDBPath]}, // The same content again
+			Message:      core.NewCommitMessage("user(star-lists)", "edit Graphics"),
+		}, nil
+	})
+	if err != nil || len(gh.commits) != before || gh.treeCalls != 1 {
+		t.Errorf("%v, commits %d -> %d, tree calls %d", err, before, len(gh.commits), gh.treeCalls)
+	}
+}

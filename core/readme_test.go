@@ -17,9 +17,10 @@ import (
 
 // Tests how the README file content is made and read back.
 //   - Short text is kept as it is. A UTF-8 byte order mark is removed, and UTF-16 with a byte order mark is turned into UTF-8
-//   - Blank text, text with a NUL byte, and text that isn't UTF-8 aren't usable
-//   - Long text is cut after its last line break within `maxReadmeBytes`, or at a character boundary if it has none,
-//     and the cut line is added
+//   - Blank text isn't usable. Text with a NUL byte and text that isn't UTF-8 (an older encoding) are kept as bytes
+//   - Long text is cut after its last line break within `maxReadmeBytes`,
+//     or at a character boundary if that line break would keep less than half of it, and the cut line is added
+//   - Text over the limit only by blank space at its end loses that space and isn't cut
 //   - Text of exactly `maxReadmeBytes` isn't cut
 func TestBuildReadmeSnapshotFile(t *testing.T) {
 	cases := []struct {
@@ -32,12 +33,20 @@ func TestBuildReadmeSnapshotFile(t *testing.T) {
 		{"UTF-16 little endian", "\xFF\xFE#\x00 \x00h\x00i\x00", "# hi"},
 		{"UTF-16 big endian", "\xFE\xFF\x00#\x00 \x00h\x00i", "# hi"},
 		{"blank", " \n\t\n", ""},
-		{"NUL byte", "a\x00b", ""},
-		{"not UTF-8", "a\xC3(", ""},
+		{"NUL byte", "a\x00b", "a\x00b"},
+		{"not UTF-8 (EUC-KR)", "\xC7\xD1\xB1\xDB\n", "\xC7\xD1\xB1\xDB\n"},
+		{"not UTF-8, cut at a line break", strings.Repeat("\xC7\xD1\xB1\xDB\n", 2000),
+			strings.Repeat("\xC7\xD1\xB1\xDB\n", 1638) + readmeCutLine + "\n"},
+		{"UTF-16 without a byte order mark, cut after the NUL of a line break", strings.Repeat("x\x00\n\x00", 3000),
+			strings.Repeat("x\x00\n\x00", maxReadmeBytes/4) + "\n" + readmeCutLine + "\n"},
 		{"exactly the limit", strings.Repeat("a", maxReadmeBytes), strings.Repeat("a", maxReadmeBytes)},
 		{"cut at a line break", strings.Repeat(strings.Repeat("x", 99)+"\n", 100),
 			strings.Repeat(strings.Repeat("x", 99)+"\n", 81) + readmeCutLine + "\n"},
 		{"cut at a character boundary", strings.Repeat("가", 3000), strings.Repeat("가", 2730) + "\n" + readmeCutLine + "\n"},
+		{"line break at the start", "\n" + strings.Repeat("x", 9000), "\n" + strings.Repeat("x", maxReadmeBytes-1) + "\n" + readmeCutLine + "\n"},
+		{"short first line, then one long line", "# Title\n" + strings.Repeat("y", 50000),
+			"# Title\n" + strings.Repeat("y", maxReadmeBytes-8) + "\n" + readmeCutLine + "\n"},
+		{"over the limit only by blank space at the end", strings.Repeat("a", 8000) + strings.Repeat(" \n", 500), strings.Repeat("a", 8000)},
 	}
 	for _, c := range cases {
 		got, usable := buildReadmeSnapshotFile([]byte(c.sourceBytes))
@@ -141,7 +150,7 @@ func TestReadReadmeSnapshotPaths(t *testing.T) {
 
 // Tests how `FetchReadmeByRepoID` reads each kind of GitHub answer, against a test server.
 //   - A README is decoded, and its extension is kept in lower case only if it is allowed
-//   - 404, 451 and text that isn't usable mean the README is absent
+//   - 404, 451 and a blank README mean the README is absent. Any other README is kept as bytes
 //   - 429 and a 403 rate limit answer are errors that wrap `errGitHubRateLimited`
 //   - A 403 that isn't a rate limit is an error that doesn't wrap it, so nothing is saved
 //   - 5xx and a timeout are other errors, which say nothing about the README
@@ -232,8 +241,8 @@ func TestFetchReadmeByRepoID(t *testing.T) {
 	}{
 		{1, FetchedReadme{extension: "md", content: []byte("# One\n")}, false, false},
 		{2, FetchedReadme{extension: "rst", content: []byte("Two\n\n")}, false, false},
-		{3, FetchedReadme{content: []byte("Three\n")}, false, false}, // `old-md` isn't allowed, so it has no extension
-		{4, FetchedReadme{isAbsent: true}, false, false},
+		{3, FetchedReadme{content: []byte("Three\n")}, false, false},                 // `old-md` isn't allowed, so it has no extension
+		{4, FetchedReadme{extension: "md", content: []byte("a\x00b")}, false, false}, // Kept as bytes, like any README that isn't blank
 		{5, FetchedReadme{isAbsent: true}, false, false},
 		{6, FetchedReadme{isAbsent: true}, false, false},
 		{7, FetchedReadme{}, true, false},
@@ -267,11 +276,11 @@ func TestFetchReadmeByRepoID(t *testing.T) {
 }
 
 // Tests what `planReadmeSnapshotUpdate` writes and deletes for one item.
-//   - A new README is written and the marker next to it is deleted
+//   - A new README is written and the absent marker next to it is deleted
 //   - The same content at the same path writes nothing
 //   - A README under another extension replaces the old file
-//   - An absent README keeps a saved README, and deletes only a marker next to it
-//   - An absent README of an item with no saved README writes the marker, once
+//   - An absent README keeps a saved README, and deletes only an absent marker next to it
+//   - An absent README of an item with no saved README writes the absent marker, once
 func TestPlanReadmeSnapshotUpdate(t *testing.T) {
 	fetched := FetchedReadme{extension: "md", content: []byte("# Title\n")}
 	absent := FetchedReadme{isAbsent: true}

@@ -324,8 +324,8 @@ type SyncResult struct {
 //   - The errors of the failed steps joined together, each with its step name ("archive new stars", "refresh repo meta", "refresh readmes")
 //
 // NOTE: The steps are independent, so even if one fails the others run to the end.
-// Adding comes first, so new items usually get a snapshot in the same run.
-// If the branch just written briefly shows the old commit, or the budget runs short, they get it in the next run.
+// Adding comes first, so new items usually get their metadata and README snapshots in the same run.
+// If the branch just written briefly shows the old commit, or time runs short, they get them in the next run.
 // Each run compares all Stars with the archive.
 // So overlapping runs or a skipped day give the same result.
 // GitHub Stars are never changed.

@@ -45,7 +45,7 @@ const maxReadmeBytes = 8 * 1024
 // It looks like a git merge conflict marker, so it stands out from the README text
 const readmeCutLine = ">>>>>>> starkive: truncated <<<<<<<"
 
-// End of the file name of the marker that says a repository was checked and its README is absent (`<ID>.no-readme`, empty content).
+// End of the file name of the absent marker, which says a repository was checked and its README is absent (`<ID>.no-readme`, empty content).
 // It contains `-`, so it never matches a README extension (`readmeExtensionPattern`)
 const readmeAbsentMarkerSuffix = ".no-readme"
 
@@ -55,7 +55,7 @@ var readmeExtensionPattern = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 
 // README of one repository as fetched from GitHub: the content to save, or the fact that the README is absent
 type FetchedReadme struct {
-	isAbsent  bool   // `true` if the repository has no README, or one that isn't usable text (`buildReadmeSnapshotFile`). It is saved as the marker (`readmeAbsentMarkerSuffix`)
+	isAbsent  bool   // `true` if the repository has no README, or a blank one (`buildReadmeSnapshotFile`). It is saved as the absent marker (`readmeAbsentMarkerSuffix`)
 	extension string // Extension of the README file name (`readmeExtensionPattern`). Empty if it has none or it isn't allowed
 	content   []byte // File content made by `buildReadmeSnapshotFile`. Empty if `isAbsent`
 }
@@ -83,7 +83,7 @@ func buildReadmeFolderPath(id int64) string {
 type readmeSnapshot struct {
 	path     string // Path in the repository
 	blobSHA  string // git blob sha of the file content
-	isAbsent bool   // `true` if the file is the marker that says the README is absent (`readmeAbsentMarkerSuffix`)
+	isAbsent bool   // `true` if the file is the absent marker (`readmeAbsentMarkerSuffix`)
 }
 
 // Collects the README snapshots from a listing of files under `ReadmesDBDir`, by item ID.
@@ -146,10 +146,10 @@ func readReadmeSnapshotPaths(cfg *Config, commitSHA string, itemID int64) ([]str
 // Adds to `changes` the writes and deletes that bring the saved snapshots of item `itemID` in line with `fetched`.
 // `saved` are the snapshots of the item at the commit the change is built on, so each of them is safe to delete.
 //   - A README is written unless its file already holds the same content.
-//     Every other snapshot of the item (an old extension, the marker) is deleted, so the item keeps one file
+//     Every other snapshot of the item (an old extension, the absent marker) is deleted, so the item keeps one file
 //   - An absent README keeps a saved README, because keeping what it was is the point.
-//     Only a marker next to it is deleted
-//   - An absent README of an item with no saved README is written as the marker
+//     Only an absent marker next to it is deleted
+//   - An absent README of an item with no saved README is written as the absent marker
 func planReadmeSnapshotUpdate(itemID int64, fetched FetchedReadme, saved []readmeSnapshot, changes *FileChangesCommit) {
 	if fetched.isAbsent && slices.ContainsFunc(saved, func(snapshot readmeSnapshot) bool { return !snapshot.isAbsent }) {
 		for _, snapshot := range saved {
@@ -177,18 +177,27 @@ func planReadmeSnapshotUpdate(itemID int64, fetched FetchedReadme, saved []readm
 }
 
 // Makes the content of a README file from the README bytes as GitHub stores them.
-//   - Text with a UTF-16 byte order mark is turned into UTF-8. A UTF-8 byte order mark is removed
-//   - Text over `maxReadmeBytes` is cut after its last line break in that range, or at a character boundary if there is none.
+//   - Text with a UTF-16 byte order mark is turned into UTF-8. A UTF-8 byte order mark is removed.
+//     Other text is kept as bytes, even when it isn't UTF-8 (an older encoding such as EUC-KR)
+//   - Text over `maxReadmeBytes` is cut after its last line break in that range,
+//     or at a UTF-8 character boundary if that line break would keep less than half of it.
 //     Then `readmeCutLine` is added on a line of its own, ending with `\n`
+//   - Text that is over `maxReadmeBytes` only because of whitespace at its end loses that whitespace instead of being cut
 //
 // Args:
 //   - `sourceBytes`: The README as GitHub stores it.
 //     It can be only the start of the file, if that start is longer than `maxReadmeBytes` after it is turned into UTF-8
 //
 // Returns:
-//   - The file content, and `false` if the README isn't usable text (blank, has a NUL byte, or isn't valid UTF-8)
+//   - The file content, and `false` if the README is blank
 //
-// NOTE: Only the kept part is checked for UTF-8, so a character cut off at the end of `sourceBytes` doesn't matter.
+// NOTE: Text that isn't UTF-8 is kept, because keeping the README is the point and its encoding can be guessed when it is shown.
+// Common older encodings (EUC-KR, Shift_JIS, GBK, Big5) never use the line break byte inside a character,
+// so a cut after a line break keeps every character whole.
+// UTF-16 without a byte order mark keeps the NUL byte after the line break, so its characters stay whole too.
+// Only a cut with no line break near can split the last character of such text.
+// `readmeCutLine` is ASCII, so in UTF-16 text it doesn't read as the same characters.
+// `parseReadmeSnapshotFile` still finds it, because it compares bytes.
 func buildReadmeSnapshotFile(sourceBytes []byte) ([]byte, bool) {
 	var text []byte
 	switch {
@@ -199,18 +208,31 @@ func buildReadmeSnapshotFile(sourceBytes []byte) ([]byte, bool) {
 	default:
 		text = bytes.TrimPrefix(sourceBytes, []byte("\xEF\xBB\xBF"))
 	}
+	if len(text) > maxReadmeBytes && len(bytes.TrimRight(text, " \t\r\n")) <= maxReadmeBytes {
+		text = bytes.TrimRight(text, " \t\r\n") // Only blank space is over the limit, so nothing but blank space is lost
+	}
 	isCut := len(text) > maxReadmeBytes
 	if isCut {
 		cutAt := maxReadmeBytes
-		for i := 1; i < utf8.UTFMax && cutAt > 0 && !utf8.RuneStart(text[cutAt]); i++ { // Moves back to the first byte of the character at `cutAt`, so no character is split
+		for i := 1; i < utf8.UTFMax && cutAt > 0 && !utf8.RuneStart(text[cutAt]); i++ { // Moves back to the first byte of the UTF-8 character at `cutAt`, so no UTF-8 character is split
 			cutAt--
 		}
-		text = text[:cutAt]
-		if lastLineBreak := bytes.LastIndexByte(text, '\n'); lastLineBreak >= 0 {
-			text = text[:lastLineBreak+1]
+		// The line break is looked for one byte before `cutAt`, so a NUL byte after it still fits.
+		// In UTF-16 without a byte order mark, a line break is `\n` followed by NUL, and both must stay together
+		end := cutAt
+		if lastLineBreak := bytes.LastIndexByte(text[:cutAt-1], '\n'); lastLineBreak >= 0 {
+			end = lastLineBreak + 1
+			if text[end] == 0 {
+				end++
+			}
 		}
+		// A line break near the start (for example, before one long line of HTML) would throw most of the text away
+		if end < cutAt/2 {
+			end = cutAt
+		}
+		text = text[:end]
 	}
-	if len(bytes.TrimSpace(text)) == 0 || bytes.IndexByte(text, 0) >= 0 || !utf8.Valid(text) {
+	if len(bytes.TrimSpace(text)) == 0 {
 		return nil, false
 	}
 	if !isCut {
@@ -283,7 +305,7 @@ func timeLeftUntil(deadline time.Time) (time.Duration, error) {
 //
 // Returns:
 //   - The README. It is absent (`isAbsent`) when GitHub answers the first request with 404 or 451,
-//     or when the README isn't usable text (`buildReadmeSnapshotFile`)
+//     or when the README is blank (`buildReadmeSnapshotFile`)
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
 //     Any other error (a 403, a timeout, 5xx, `errDeadlinePassed`) means "ask again later", and says nothing about the README
 //
@@ -364,16 +386,17 @@ func fetchRawReadme(cfg *Config, path string, deadline time.Time, maxBytes int64
 // States of a README snapshot as read back (`ReadmeSnapshotContent.State`)
 const (
 	readmeStateSaved     = "saved"     // A saved README
-	readmeStateAbsent    = "absent"    // Checked, with no usable README (the marker)
+	readmeStateAbsent    = "absent"    // Checked, with no README or a blank one (the absent marker)
 	readmeStateUnchecked = "unchecked" // Not checked yet (no file)
 )
 
 // README snapshot of one item as read back: its state, and the README if one is saved
 type ReadmeSnapshotContent struct {
-	State     string `json:"state"`               // `saved`, `absent` or `unchecked` (`readmeStateSaved` and so on)
-	Format    string `json:"format,omitempty"`    // Extension of the saved file (e.g. `md`). Empty if the file has none
-	Text      string `json:"text,omitempty"`      // The saved README text, without `readmeCutLine`
-	Truncated bool   `json:"truncated,omitempty"` // `true` if the README was cut at `maxReadmeBytes`
+	State     string `json:"state"`                // `saved`, `absent` or `unchecked` (`readmeStateSaved` and so on)
+	Format    string `json:"format,omitempty"`     // Extension of the saved file (e.g. `md`). Empty if the file has none
+	Text      string `json:"text,omitempty"`       // The saved README text, without `readmeCutLine`. Empty if it isn't UTF-8 text
+	RawBase64 string `json:"raw_base64,omitempty"` // The saved README in base64, in place of `Text` when it isn't UTF-8 text. Its encoding isn't detected
+	Truncated bool   `json:"truncated,omitempty"`  // `true` if the README was cut at `maxReadmeBytes`
 }
 
 // Reads the README snapshot of item `itemID` at the branch tip.
@@ -384,8 +407,8 @@ type ReadmeSnapshotContent struct {
 //   - The snapshot. `unchecked` for an item with no file, which includes an ID that isn't in the archive.
 //     A GitHub error, or a 502 `HTTPError` if a file in the listing can't be read at the same commit
 //
-// NOTE: The code always leaves one file per item, but a hand edit of the DB repository can leave more.
-// A saved README wins over the marker, because a saved README is what this feature keeps.
+// NOTE: The code leaves one file per item, but a hand edit of the DB repository can leave more.
+// A saved README wins over the absent marker, because a saved README is what this feature keeps.
 // Among several README files, the first by path is shown.
 func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error) {
 	commitSHA, err := readBranchCommit(cfg) // The tree sha isn't needed, so only the commit is read
@@ -413,15 +436,22 @@ func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error
 		}
 		text, isTruncated := parseReadmeSnapshotFile(content)
 		_, extension, _ := strings.Cut(snapshot.path[strings.LastIndexByte(snapshot.path, '/')+1:], ".")
-		return ReadmeSnapshotContent{State: readmeStateSaved, Format: extension, Text: text, Truncated: isTruncated}, nil
+		saved := ReadmeSnapshotContent{State: readmeStateSaved, Format: extension, Truncated: isTruncated}
+		// A NUL byte means UTF-16 without a byte order mark (or binary), which isn't UTF-8 text either
+		if utf8.ValidString(text) && !strings.ContainsRune(text, 0) {
+			saved.Text = text
+		} else {
+			saved.RawBase64 = base64.StdEncoding.EncodeToString([]byte(text)) // JSON strings hold only UTF-8, so the bytes go as base64
+		}
+		return saved, nil
 	}
 	return ReadmeSnapshotContent{State: readmeStateAbsent}, nil
 }
 
-// Number of groups that saved READMEs are checked in, one group per sync day.
+// Number of groups that items with a snapshot are checked in, one group per sync day.
 // A sync checks the items whose `ID % readmeRefreshGroups` equals the day number (`syncDayNumber`) modulo it.
 // It is a prime, so it shares no factor with the sync intervals (1, 2, 3, 7 days).
-// So the groups come up in turn at any interval, and each saved README is checked once in 61 syncs (61 days when syncing daily)
+// So the groups come up in turn at any interval, and each item with a snapshot is checked again once in 61 syncs (61 days when syncing daily)
 const readmeRefreshGroups = 61
 
 // Most READMEs written in one commit.
@@ -452,7 +482,8 @@ const readmeCommitReserve = 2 * githubTimeout
 // Returns:
 //   - The number of READMEs fetched and compared with the saved ones. Only the changes are committed
 //   - An error from reading the archive or from a commit.
-//     Running out of time or reaching the rate limit isn't an error: what was fetched is committed, it is logged, and the next sync goes on
+//     Running out of time or reaching the rate limit isn't an error: what was fetched is committed if time is left for the commit,
+//     it is logged, and the next sync goes on
 //
 // NOTE: Snapshots of items no longer in the archive are deleted in every commit it makes.
 // With nothing to check, it still makes one commit for them.
@@ -520,13 +551,18 @@ func SyncReadmeSnapshotsWithGitHub(cfg *Config, deadline time.Time, skippedIDs [
 // Error for README requests that weren't sent because the time ran out
 var errReadmesOutOfTime = errors.New("out of time")
 
+// Error for a batch whose README requests all failed.
+// GitHub is likely failing for every repository, so asking more would only use up the rate limit
+var errReadmesAllFailed = errors.New("every README request of a batch failed")
+
 // Fetches the READMEs of the items `itemIDs`, `readmeFetchParallel` at a time.
 // A request starts only if it can end by `fetchDeadline` even when it waits the longest (`githubTimeout`).
 //
 // Returns:
 //   - The READMEs fetched: item ID -> README. An item whose request failed isn't in it, and is asked again later
 //   - Why it stopped before asking every item: `errReadmesOutOfTime`, or an error that wraps `errGitHubRateLimited`.
-//     `nil` if every item was asked
+//     `errReadmesAllFailed` if every request failed, so no more batches are asked.
+//     `nil` if every item was asked and at least one answered
 func fetchReadmesInParallel(cfg *Config, itemIDs []int64, fetchDeadline time.Time) (map[int64]FetchedReadme, error) {
 	// Several goroutines (lightweight threads) take items one by one. Shared values are read and written while holding `mu`
 	var mu sync.Mutex
@@ -572,6 +608,9 @@ func fetchReadmesInParallel(cfg *Config, itemIDs []int64, fetchDeadline time.Tim
 	if failed > 0 {
 		log.Printf("readmes: %d requests failed, asked again later", failed)
 	}
+	if stopErr == nil && failed > 0 && len(fetched) == 0 {
+		stopErr = errReadmesAllFailed
+	}
 	return fetched, stopErr
 }
 
@@ -594,14 +633,16 @@ func writeFetchedReadmesInSingleCommit(cfg *Config, fetched map[int64]FetchedRea
 		}
 
 		changes := FileChangesCommit{FilesToWrite: map[string][]byte{}}
-		changedCount := 0         // Number of items whose files change, including ones that only lose an old file
-		savedNames := []string{}  // Items whose README is written
-		absentNames := []string{} // Items that get the absent marker
+		changedCount := 0             // Number of items whose files change, including ones that only lose an old file
+		savedNames := []string{}      // Items whose README is written
+		absentNames := []string{}     // Items that get the absent marker
+		isPlanned := map[int64]bool{} // Item ID -> `true` once planned, so an ID listed twice in the archive is planned once
 		for _, item := range starItems {
 			readme, ok := fetched[item.ID]
-			if !ok {
+			if !ok || isPlanned[item.ID] {
 				continue
 			}
+			isPlanned[item.ID] = true
 			changesBefore := len(changes.FilesToWrite) + len(changes.FilesToDelete)
 			planReadmeSnapshotUpdate(item.ID, readme, snapshotsByID[item.ID], &changes)
 			if len(changes.FilesToWrite)+len(changes.FilesToDelete) > changesBefore {

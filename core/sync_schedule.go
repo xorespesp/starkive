@@ -173,7 +173,7 @@ func syncDayNumber(now time.Time) int64 {
 // If the last finished scheduled run failed, it syncs again regardless of the interval.
 //
 // Args:
-//   - `deadline`: Time by which the sync must end (passed to `Sync`)
+//   - `deadline`: Time after which the sync starts no new request of its long steps (passed to `Sync`)
 //   - `now`: Current time. Taken as an argument so tests can set the date
 //
 // Returns:

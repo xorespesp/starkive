@@ -112,14 +112,14 @@ const maxStarredRepoIDsPerRequest = 100_000
 
 // Longest time Add waits for the README of the new repository.
 // A README usually comes in about 0.5 seconds (measured).
-// One that doesn't come in time is fetched by sync, so Add doesn't keep the user waiting
+// One that doesn't come in time, or fails, is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
 
 // Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).
 // It can add a repository without a Star.
 // The time it was added goes where the Star time would be.
 // Its README snapshot is saved in the same commit.
-// If the README can't be fetched within `addReadmeTimeout`, the item is added without it and the failure is only logged.
+// If fetching the README fails (an error, or no answer within `addReadmeTimeout`), the item is added without it and the failure is only logged.
 //
 // Args:
 //   - `fullNameOrURL`: The `owner/repo` or GitHub repository address the user typed

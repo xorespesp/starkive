@@ -2,6 +2,7 @@
 package test
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,7 +14,7 @@ import (
 )
 
 // Tests that removing an item deletes its README snapshots in the same commit, and leaves every other file.
-//   - All files of the item go: its README and a marker left next to it
+//   - All files of the item go: its README and an absent marker left next to it
 //   - Files of other items in the same folder, files of other folders, and a file that isn't a snapshot stay
 //   - Only a write that removes an item lists the folder
 //   - Editing a note sends no listing request
@@ -77,8 +78,8 @@ func TestReadmeSnapshotsAreListedAgainAfterAConflict(t *testing.T) {
 }
 
 // Tests that Add saves the README of the new repository in the same commit.
-//   - A README is saved as `<ID>.<extension>`, and old files of that ID (another extension, a marker) are deleted
-//   - A repository with no README gets the marker
+//   - A README is saved as `<ID>.<extension>`, and old files of that ID (another extension, an absent marker) are deleted
+//   - A repository with no README gets the absent marker
 //   - A README that can't be fetched doesn't stop Add. The item is added with no README file, and no folder is listed
 func TestAddSavesTheReadme(t *testing.T) {
 	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
@@ -147,8 +148,8 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 // Tests reading README snapshots through `GET /api/archive-repo-meta?id=`.
 //   - A saved README gives `saved`, its extension as `format`, and its text without the cut line, with `truncated`
 //   - A file with no extension has no `format`
-//   - A README and a marker together give the README
-//   - Only the marker gives `absent`, and no file gives `unchecked`
+//   - A README and an absent marker together give the README
+//   - Only the absent marker gives `absent`, and no file gives `unchecked`
 //   - An `id` that isn't a positive number is 400, and without `id` the raw metadata file comes back as before
 func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -282,5 +283,110 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 	cfg = loadTestConfig(t)
 	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, time.Now().Add(30*time.Second), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeCalls != 0 {
 		t.Errorf("no time: %d %v, README requests %d", checked, err, gh.readmeCalls)
+	}
+}
+
+// Tests that the README sync step stops after a batch whose requests all failed, without an error.
+// The second batch isn't asked, because GitHub is likely failing for every repository
+func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryRequestFails(t *testing.T) {
+	manyItems := []string{}
+	for id := 1; id <= 305; id++ {
+		manyItems = append(manyItems, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	gh := setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
+	cfg := loadTestConfig(t)
+	for id := int64(1); id <= 305; id++ {
+		gh.readmes[id] = fakeReadme{status: http.StatusInternalServerError}
+	}
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeCalls != 300 {
+		t.Errorf("%d %v, README requests %d", checked, err, gh.readmeCalls)
+	}
+}
+
+// Tests that an ID listed twice in the archive (for example, after a hand edit) doesn't make README writes fail.
+//   - The sync step plans the item once, so the same file isn't deleted twice in one commit
+//   - Removing both entries deletes the item's snapshots once
+func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
+	twice := "[\n" +
+		`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[],"starred_at":"x"}` + ",\n" +
+		`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[],"starred_at":"x"}` + "\n]\n"
+	gh := setup(t, twice, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
+	gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
+
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(1)); err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" {
+		t.Errorf("sync: %d %v, files %q", checked, err, gh.files)
+	}
+
+	_, err := core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+		a.StarItems = nil
+		return core.NewCommitMessage("user(star-items)", "remove a/one"), nil
+	})
+	if _, left := gh.files[core.ReadmesDBDir+"/01/1.md"]; err != nil || left {
+		t.Errorf("remove: %v, README left %v", err, left)
+	}
+}
+
+// Tests that a README that isn't UTF-8 (here EUC-KR) is kept byte for byte, and read back as base64.
+//   - The sync step writes it through a blob, because a tree entry holds only UTF-8 content
+//   - `GET /api/archive-repo-meta?id=` gives the bytes in `raw_base64`, with no `text`
+func TestReadmeThatIsNotUTF8IsKeptAsBytes(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	const eucKR = "\xC7\xD1\xB1\xDB README\n" // "한글 README" in EUC-KR
+	gh.readmes[1] = fakeReadme{name: "README.md", content: eucKR}
+
+	if _, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := gh.readFile(core.ReadmesDBDir + "/01/1.md"); got != eucKR || len(gh.blobs) != 1 {
+		t.Errorf("saved %q, blobs %d", got, len(gh.blobs))
+	}
+
+	rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta?id=1", "", login(t))
+	want := `{"id":1,"readme":{"state":"saved","format":"md","raw_base64":"` + base64.StdEncoding.EncodeToString([]byte(eucKR)) + `"}}`
+	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 200 || got != want {
+		t.Errorf("read: %d %s", rec.Code, got)
+	}
+}
+
+// Tests the READMEs that go through a blob, because a tree entry can't hold them as a JSON string.
+//   - A README with a NUL byte (UTF-16 without a byte order mark) is kept byte for byte, and read back as base64
+//   - Many READMEs that aren't UTF-8 in one commit are all kept, each through its own blob
+func TestReadmesThatNeedABlob(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	const utf16WithoutBOM = "#\x00 \x00h\x00i\x00\n\x00"
+	gh.readmes[2] = fakeReadme{name: "README.md", content: utf16WithoutBOM}
+	if _, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := gh.readFile(core.ReadmesDBDir + "/02/2.md"); got != utf16WithoutBOM || len(gh.blobs) != 1 {
+		t.Errorf("NUL README saved %q, blobs %d", got, len(gh.blobs))
+	}
+	rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta?id=2", "", login(t))
+	want := `{"id":2,"readme":{"state":"saved","format":"md","raw_base64":"` + base64.StdEncoding.EncodeToString([]byte(utf16WithoutBOM)) + `"}}`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Errorf("NUL README read: %s", got)
+	}
+
+	manyItems := []string{}
+	for id := 1; id <= 20; id++ {
+		manyItems = append(manyItems, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
+	cfg = loadTestConfig(t)
+	for id := int64(1); id <= 20; id++ {
+		gh.readmes[id] = fakeReadme{name: "README.md", content: fmt.Sprintf("\xC7\xD1\xB1\xDB %d\n", id)}
+	}
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 20 || len(gh.blobs) != 20 {
+		t.Fatalf("many: %d %v, blobs %d", checked, err, len(gh.blobs))
+	}
+	for id := int64(1); id <= 20; id++ {
+		path := fmt.Sprintf("%s/%02d/%d.md", core.ReadmesDBDir, id%100, id)
+		if got, want := gh.readFile(path), fmt.Sprintf("\xC7\xD1\xB1\xDB %d\n", id); got != want {
+			t.Errorf("%s: %q, want %q", path, got, want)
+		}
 	}
 }

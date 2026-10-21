@@ -1,9 +1,10 @@
 // `/api/archive-repo-meta`: API that reads the snapshots of repositories: metadata (`db/repo-meta.json`) and READMEs (`db/readmes/`).
 //
 //	GET            -> The raw metadata snapshot file (a JSON array, one repository per line). `[]` if the file doesn't exist yet
-//	GET  ?id=<id>  -> { id, readme: { state, format?, text?, truncated? } } (the README snapshot of one item, `core.ReadmeSnapshotContent`)
-//	               `state` is `saved`, `absent` (checked, no usable README) or `unchecked` (not checked yet).
+//	GET  ?id=<id>  -> { id, readme: { state, format?, text?, raw_base64?, truncated? } } (the README snapshot of one item, `core.ReadmeSnapshotContent`)
+//	               `state` is `saved`, `absent` (checked, no README or a blank one) or `unchecked` (not checked yet).
 //	               `format` is the extension of the saved file, `text` the saved README, `truncated` whether it was cut.
+//	               A README that isn't UTF-8 text (an older encoding, or UTF-16 with no byte order mark) comes as base64 in `raw_base64` in place of `text`.
 //
 // This API only reads.
 // Only sync (`/api/sync-archive`) writes the metadata file.
