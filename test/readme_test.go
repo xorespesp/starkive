@@ -153,7 +153,9 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
-	const cutLine = "[starkive: the rest of this README was not saved]\n"
+	// Spelled out instead of `readmeCutLine`, because it is the format of files kept in DB repositories.
+	// A change to the line must fail this test
+	const cutLine = ">>>>>>> starkive: truncated <<<<<<<\n"
 	gh.files[core.ReadmesDBDir+"/01/1.rst"] = "# One\n" + cutLine // Sorted after `1.no-readme`, so the README must win on purpose
 	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
 	gh.files[core.ReadmesDBDir+"/02/2"] = "Two\n"

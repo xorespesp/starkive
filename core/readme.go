@@ -40,8 +40,10 @@ const ReadmesDBDir = "db/readmes"
 // It holds the whole README for about 70% of repositories (measured on 729 READMEs, median 4.3KB).
 const maxReadmeBytes = 8 * 1024
 
-// Line added at the end of a README that was cut at `maxReadmeBytes`. It isn't counted in `maxReadmeBytes`
-const readmeCutLine = "[starkive: the rest of this README was not saved]"
+// Line added at the end of a README that was cut at `maxReadmeBytes`.
+// It isn't counted in `maxReadmeBytes`.
+// It looks like a git merge conflict marker, so it stands out from the README text
+const readmeCutLine = ">>>>>>> starkive: truncated <<<<<<<"
 
 // End of the file name of the marker that says a repository was checked and its README is absent (`<ID>.no-readme`, empty content).
 // It contains `-`, so it never matches a README extension (`readmeExtensionPattern`)
