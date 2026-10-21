@@ -115,3 +115,19 @@ func TestReadReadmeSnapshotsInFolder(t *testing.T) {
 		t.Errorf("snapshots: %v, %v", snapshotsByID, err)
 	}
 }
+
+// Tests that `readReadmeSnapshotPaths` lists the folder of the item once, and returns only the paths of that item.
+//   - Item 12345 shares its folder with item 345 and other files, and gets only its own README
+//   - An item whose folder doesn't exist gets no path
+func TestReadReadmeSnapshotPaths(t *testing.T) {
+	cfg, requests := startFakeTreeAPI(t)
+
+	paths, err := readReadmeSnapshotPaths(cfg, "c1", 12345)
+	if want := []string{"db/readmes/45/12345.md"}; err != nil || !slices.Equal(paths, want) || requests.Load() != 1 {
+		t.Errorf("item 12345: %q, %v, requests %d", paths, err, requests.Load())
+	}
+
+	if paths, err := readReadmeSnapshotPaths(cfg, "c1", 7); err != nil || len(paths) != 0 || requests.Load() != 2 {
+		t.Errorf("item with no folder: %q, %v, requests %d", paths, err, requests.Load())
+	}
+}

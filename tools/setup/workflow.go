@@ -156,7 +156,7 @@ func checkActionsPermission(cfg *core.Config) error {
 // The workflow must match that dashboard, so this tool leaves it as it is too.
 func installWorkflowIfAbsent(cfg *core.Config) error {
 	paths := []string{core.SyncWorkflowPath}
-	return core.UpdateFiles(cfg, paths, func(filesRead map[string][]byte) (core.FileChangesCommit, error) {
+	return core.UpdateFiles(cfg, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		if filesRead[core.SyncWorkflowPath] != nil {
 			return core.FileChangesCommit{}, nil // Nothing to write, so no commit
 		}

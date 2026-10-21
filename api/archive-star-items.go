@@ -288,6 +288,7 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Deletes one item from the archive and answers `{ ok: true }`.
+// Its README snapshots are deleted in the same commit (`core.UpdateArchive`).
 // Its metadata snapshot is removed in the next sync.
 // Answers 400 if `id` isn't a number, and 404 if the item doesn't exist.
 func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error {

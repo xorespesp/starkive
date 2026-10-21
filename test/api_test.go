@@ -9,6 +9,7 @@ package test
 
 import (
 	"compress/gzip"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -60,6 +61,7 @@ type fakeGitHub struct {
 	interfereAll        bool                          // If `true`, another device commits first on every branch move (constant conflicts)
 	treeStatus          int                           // If not 0, tree creation fails with this status code
 	treeCalls           int                           // Number of tree creation requests
+	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
 	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
@@ -154,6 +156,12 @@ func copyFiles(files map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Returns the git blob sha of file content `content`, the value GitHub gives as the sha of a file.
+// It is the SHA-1 of `blob <size>` and a NUL byte, followed by the content (docs)
+func gitBlobSHA(content string) string {
+	return fmt.Sprintf("%x", sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content))))
 }
 
 // Makes a fake repository ID from the repository name (`owner/repo`). It is the CRC32 of the name, so the same name always gives the same ID
@@ -291,6 +299,26 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/commits/") && r.Method == http.MethodGet:
 		// Read a commit. The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
 		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
+
+	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/") && r.Method == http.MethodGet:
+		// List a folder at a commit (`<commit sha>:<folder path>`, `recursive=1`).
+		// Paths are relative to the folder.
+		// Only files are listed, because the server reads only files.
+		// A folder with no file gives 404, which the server reads as an empty folder.
+		// A request without `recursive=1` also gives 404, because the server always sends it
+		f.treeListCalls++
+		commitSHA, folderPath, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/trees/"), ":")
+		entries := []string{}
+		for path, content := range f.readFilesAt(commitSHA) {
+			if relativePath, inFolder := strings.CutPrefix(path, folderPath+"/"); inFolder {
+				entries = append(entries, fmt.Sprintf(`{"path":%q,"type":"blob","sha":%q}`, relativePath, gitBlobSHA(content)))
+			}
+		}
+		if len(entries) == 0 || r.URL.Query().Get("recursive") != "1" {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
 
 	case r.URL.Path == "/repos/me/archive/git/trees" && r.Method == http.MethodPost:
 		// Create a tree: the received files overwrite the files of `base_tree`, and entries with a `null` sha delete theirs.

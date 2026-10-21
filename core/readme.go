@@ -114,6 +114,22 @@ func readReadmeSnapshotsInFolder(cfg *Config, commitSHA string, folderPath strin
 	return collectReadmeSnapshotsByID(blobSHAByPath), nil
 }
 
+// Reads the paths of every README snapshot of item `itemID` at commit `commitSHA`, with one request (a listing of its folder).
+//
+// Returns:
+//   - The paths, sorted. Empty if the item has no snapshot
+func readReadmeSnapshotPaths(cfg *Config, commitSHA string, itemID int64) ([]string, error) {
+	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(itemID))
+	if err != nil {
+		return nil, err
+	}
+	paths := []string{}
+	for _, snapshot := range snapshotsByID[itemID] {
+		paths = append(paths, snapshot.path)
+	}
+	return paths, nil
+}
+
 // Makes the content of a README file from the README bytes as GitHub stores them.
 //   - Text with a UTF-16 byte order mark is turned into UTF-8. A UTF-8 byte order mark is removed
 //   - Text over `maxReadmeBytes` is cut after its last line break in that range, or at a character boundary if there is none.

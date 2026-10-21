@@ -169,7 +169,10 @@ func (changes FileChangesCommit) check() error {
 //
 // Args:
 //   - `paths`: Paths of the files to read. Each must pass `isValidRepoPath`
-//   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist).
+//   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist),
+//     and `commitSHA`, the sha of that commit.
+//     It can read more at the same commit with `commitSHA` (for example a folder listing, `readBlobSHAsInFolder`).
+//     Paths found that way exist in the tree the new commit is built on, so they are safe to put in `FilesToDelete`.
 //     It returns the commit to make (`FileChangesCommit`).
 //     If nothing is written or deleted, nothing is committed.
 //     Otherwise the commit must pass `FileChangesCommit.check`.
@@ -189,16 +192,19 @@ func (changes FileChangesCommit) check() error {
 //     Errors while making the tree or the commit are not conflicts, so they are returned right away.
 //   - `buildFileChangesCommit` can be called more than once.
 //     If it leaves results in outer variables, it must set them from scratch on every call.
-//   - One write costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move).
-//     For the archive (three files) that is 8.
+//   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
+//     plus the requests that `buildFileChangesCommit` sends.
+//     For the archive (three files) that is 8 when `buildFileChangesCommit` sends none.
 //     Files that are only written or deleted cost no extra request.
 //     This is the price of putting several files in one commit with no in-between state.
-func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte) (FileChangesCommit, error)) error {
+func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error)) error {
 	for _, p := range paths {
 		if !isValidRepoPath(p) {
 			return fmt.Errorf("refusing to read a file path that isn't valid: %q", p)
 		}
 	}
+	// Compare-and-swap loop: the commit is built on the branch tip that was read, and the branch moves only if it is still there.
+	// If another commit (another device, a sync) got in first, the files are read and the commit is built again on the new tip
 	for attempt := 1; ; attempt++ {
 		head, err := readBranchHead(cfg)
 		if err != nil {
@@ -208,7 +214,7 @@ func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesR
 		if err != nil {
 			return err
 		}
-		changes, err := buildFileChangesCommit(filesRead) // If another commit gets in, it is called again on the next loop with the new content
+		changes, err := buildFileChangesCommit(filesRead, head.commit)
 		if err != nil {
 			return err
 		}
@@ -326,6 +332,8 @@ func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map
 // A missing file counts as an empty list, so a file that nobody touched isn't created as an empty file.
 // The config file (`config.json`) is not part of the archive, so it is not read here.
 // This keeps each save request from making one extra read for nothing.
+// The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
+// Finding them costs one more request (a folder listing) per removed item, so a write that removes no item costs nothing more.
 func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) (*Archive, error) {
 	// Turns the three data files into file content (the `encodeLines` format). Returns path -> content
 	encode := func(a *Archive) (map[string][]byte, error) {
@@ -344,7 +352,7 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 	}
 	var updated *Archive
 	// Reads the three files together from the same commit
-	err := UpdateFiles(cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(filesRead map[string][]byte) (FileChangesCommit, error) {
+	err := UpdateFiles(cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
 		a := &Archive{}
 		var err error
 		if a.StarItems, err = decodeItems[StarItem](filesRead[StarItemsDBPath]); err != nil {
@@ -359,6 +367,10 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 		before, err := encode(a) // `change` edits `a` in place, so encode it first
 		if err != nil {
 			return FileChangesCommit{}, err
+		}
+		idsBefore := make([]int64, 0, len(a.StarItems)) // IDs of the items before `change`, to find the ones it removes
+		for _, item := range a.StarItems {
+			idsBefore = append(idsBefore, item.ID)
 		}
 
 		message, err := change(a)
@@ -375,6 +387,26 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 			if !bytes.Equal(before[path], content) {
 				changes.FilesToWrite[path] = content
 			}
+		}
+
+		// Deletes the README snapshots of the items that `change` removed, in this same commit.
+		// An item is removed if its ID is in `idsBefore` but no longer in `a.StarItems`
+		isArchivedAfter := make(map[int64]bool, len(a.StarItems)) // Item ID -> `true`, for the items after `change`
+		for _, item := range a.StarItems {
+			isArchivedAfter[item.ID] = true
+		}
+		removedIDs := []int64{}
+		for _, id := range idsBefore {
+			if !isArchivedAfter[id] {
+				removedIDs = append(removedIDs, id)
+			}
+		}
+		for _, id := range removedIDs {
+			readmePaths, err := readReadmeSnapshotPaths(cfg, commitSHA, id)
+			if err != nil {
+				return FileChangesCommit{}, err
+			}
+			changes.FilesToDelete = append(changes.FilesToDelete, readmePaths...)
 		}
 		updated = a // If called again, this becomes the new archive
 		return changes, nil
