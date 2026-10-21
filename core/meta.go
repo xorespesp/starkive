@@ -5,6 +5,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -38,27 +39,6 @@ type RepoMeta struct {
 	UnavailableSince string   `json:"unavailable_since"` // Time GitHub first answered that it can't find this repository. Empty string once it is visible again
 }
 
-// GitHub GraphQL query that asks for the info of many repositories at once by `node_id`.
-// Star count, fork count and last push time are read only for display in the dashboard
-const repoMetaQuery = `query($ids: [ID!]!) {
-  nodes(ids: $ids) {
-    ... on Repository {
-      id
-      nameWithOwner
-      url
-      description
-      primaryLanguage { name color }
-      repositoryTopics(first: 20) { nodes { topic { name } } }
-      homepageUrl
-      licenseInfo { spdxId }
-      stargazerCount
-      forkCount
-      pushedAt
-      isArchived
-    }
-  }
-}`
-
 // Largest number of IDs that one GraphQL `nodes(ids:)` call can ask for (docs)
 const MaxRepoMetaIDs = 100
 
@@ -73,50 +53,49 @@ const MaxRepoMetaIDs = 100
 //   - An error if the request itself failed. Then no repository may be judged as gone
 //
 // NOTE: If some IDs can't be accessed, GraphQL doesn't fail the whole answer.
-// It puts `null` in their place, and writes the reason and position (`path: ["nodes", index]`) in `errors` (docs).
-// It doesn't use `callGraphQL`, which counts any `errors` as a failure, and reads the answer itself.
-// So "request failed" and "this repository doesn't exist" can be told apart.
+// It puts `null` in their place, and writes the reason and position in its errors (docs).
+// That partial result is used, so "request failed" and "this repository doesn't exist" can be told apart.
 // A temporary outage isn't recorded as a disappearance.
 func FetchRepoMeta(cfg *Config, ids []string) ([]json.RawMessage, []string, error) {
-	query := map[string]any{"query": repoMetaQuery, "variables": map[string]any{"ids": ids}}
-	res, err := CallGitHubAPI(cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: query})
-	if err != nil {
+	// Star count, fork count and last push time are read only for display in the dashboard
+	const query = `query($ids: [ID!]!) {
+		nodes(ids: $ids) {
+			... on Repository {
+				id
+				nameWithOwner
+				url
+				description
+				primaryLanguage { name color }
+				repositoryTopics(first: 20) { nodes { topic { name } } }
+				homepageUrl
+				licenseInfo { spdxId }
+				stargazerCount
+				forkCount
+				pushedAt
+				isArchived
+			}
+		}
+	}`
+	var data struct {
+		Nodes []json.RawMessage `json:"nodes"` // Each repository is kept raw, not decoded (it is passed to the dashboard as it is)
+	}
+	err := callGraphQL(cfg, query, map[string]any{"ids": ids}, 0, &data)
+	var nodeErrs graphQLErrors // Errors about some repositories, when the rest of the answer can be used
+	if err != nil && !errors.As(err, &nodeErrs) {
 		return nil, nil, err
 	}
-	defer res.Body.Close()
-	if err := CheckGitHubAPI(res); err != nil {
-		return nil, nil, err
-	}
-
-	var result struct {
-		Data struct {
-			Nodes []json.RawMessage `json:"nodes"` // Each repository is kept raw, not decoded (it is passed to the dashboard as it is)
-		} `json:"data"`
-		Errors []struct {
-			Type string `json:"type"`
-			Path []any  `json:"path"` // Mixes strings and numbers like `["nodes", 1]`, so it is read as `any`. JSON numbers become `float64`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
-		return nil, nil, err
-	}
-	if len(result.Data.Nodes) != len(ids) { // If positions don't line up, we can't tell which result belongs to which repository
-		return nil, nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(result.Data.Nodes), len(ids))
+	if len(data.Nodes) != len(ids) { // If positions don't line up, we can't tell which result belongs to which repository
+		return nil, nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(data.Nodes), len(ids))
 	}
 
 	nodes := make([]json.RawMessage, len(ids))
-	for i, node := range result.Data.Nodes {
-		if string(node) != "null" && string(node) != "{}" { // `{}` is an ID of another kind, not a repository
-			nodes[i] = node
-		}
-	}
 	missing := []string{}
-	for _, e := range result.Errors { // Only positions answered with `NOT_FOUND` are "not found". Other errors aren't treated as a disappearance
-		if e.Type != "NOT_FOUND" || len(e.Path) != 2 {
-			continue
-		}
-		if i, ok := e.Path[1].(float64); ok && int(i) >= 0 && int(i) < len(ids) && nodes[int(i)] == nil { // `.(float64)`: takes the value in an `any` out as its original type
-			missing = append(missing, ids[int(i)])
+	for i, node := range data.Nodes {
+		switch {
+		case string(node) != "null" && string(node) != "{}": // `{}` is an ID of another kind, not a repository
+			nodes[i] = node
+		case string(node) == "null" && nodeErrs.isNodeNotFound(i): // Other errors aren't treated as a disappearance
+			missing = append(missing, ids[i])
 		}
 	}
 	return nodes, missing, nil

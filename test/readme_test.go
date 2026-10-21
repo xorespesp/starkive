@@ -2,12 +2,13 @@
 package test
 
 import (
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	api "github.com/xorespesp/starkive/api"
 	"github.com/xorespesp/starkive/core"
@@ -81,6 +82,7 @@ func TestReadmeSnapshotsAreListedAgainAfterAConflict(t *testing.T) {
 //   - A README is saved as `<ID>.<extension>`, and old files of that ID (another extension, an absent marker) are deleted
 //   - A repository with no README gets the absent marker
 //   - A README that can't be fetched doesn't stop Add. The item is added with no README file, and no folder is listed
+//   - The README is asked by GraphQL (a listing query, then `docs` or the content)
 func TestAddSavesTheReadme(t *testing.T) {
 	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
 	folder := core.ReadmesDBDir + "/98/"
@@ -89,13 +91,14 @@ func TestAddSavesTheReadme(t *testing.T) {
 		readme        *fakeReadme       // README on the fake GitHub. `nil` if it has none
 		savedBefore   map[string]string // Files of the ID already in the DB repository: path -> content
 		wantFiles     map[string]string // Files of the ID after Add: path -> content
-		wantListCalls int               // Folder listings expected
+		wantListCalls int               // Folder listings of the DB repository expected
+		wantQueries   int               // README queries by GraphQL expected
 	}{
 		{"README", &fakeReadme{name: "README.md", content: "# Linux\n"},
 			map[string]string{folder + "2325298.rst": "old\n", folder + "2325298.no-readme": ""},
-			map[string]string{folder + "2325298.md": "# Linux\n"}, 1},
-		{"no README", nil, nil, map[string]string{folder + "2325298.no-readme": ""}, 1},
-		{"README request fails", &fakeReadme{status: http.StatusInternalServerError}, nil, map[string]string{}, 0},
+			map[string]string{folder + "2325298.md": "# Linux\n"}, 1, 2},
+		{"no README", nil, nil, map[string]string{folder + "2325298.no-readme": ""}, 1, 2},
+		{"README can't be given now", &fakeReadme{unavailable: true}, nil, map[string]string{}, 0, 1},
 	}
 	for _, c := range cases {
 		gh := setup(t, sampleStarItems, sampleStarLists)
@@ -109,9 +112,9 @@ func TestAddSavesTheReadme(t *testing.T) {
 		commitsBefore := len(gh.commits)
 
 		rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, cookie)
-		if rec.Code != 200 || len(gh.commits) != commitsBefore+1 || gh.readmeCalls != 1 || gh.treeListCalls != c.wantListCalls {
-			t.Errorf("%s: %d %s, commits %d -> %d, README requests %d, listings %d",
-				c.name, rec.Code, rec.Body, commitsBefore, len(gh.commits), gh.readmeCalls, gh.treeListCalls)
+		if rec.Code != 200 || len(gh.commits) != commitsBefore+1 || gh.readmeQueries != c.wantQueries || gh.treeListCalls != c.wantListCalls {
+			t.Errorf("%s: %d %s, commits %d -> %d, README queries %d, listings %d",
+				c.name, rec.Code, rec.Body, commitsBefore, len(gh.commits), gh.readmeQueries, gh.treeListCalls)
 		}
 		files := map[string]string{}
 		for path, content := range gh.files {
@@ -125,18 +128,72 @@ func TestAddSavesTheReadme(t *testing.T) {
 	}
 }
 
+// Tests Add when fetching the README fails as a whole, and when another commit gets in first.
+//   - When every README query fails, or GitHub answers with the rate limit, the item is still added, with no README file
+//   - When another device commits first, the change is applied again, and the README is saved with it
+func TestAddWithFailingOrConflictingReadme(t *testing.T) {
+	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
+	readmePath := core.ReadmesDBDir + "/98/2325298.md"
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.readmes[linuxID] = fakeReadme{name: "README.md", content: "# Linux\n"}
+	gh.readmeQueryFails = func(queryNumber int) bool { return true }
+	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
+	_, saved := gh.files[readmePath]
+	if rec.Code != 200 || saved || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":2325298`) {
+		t.Errorf("README queries fail: %d %s, README saved %v", rec.Code, rec.Body, saved)
+	}
+
+	gh = setup(t, sampleStarItems, sampleStarLists)
+	gh.readmes[linuxID] = fakeReadme{name: "README.md", content: "# Linux\n"}
+	gh.readmeRateLimitFrom = 1
+	rec = call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
+	_, saved = gh.files[readmePath]
+	if rec.Code != 200 || saved || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":2325298`) {
+		t.Errorf("rate limit: %d %s, README saved %v", rec.Code, rec.Body, saved)
+	}
+
+	gh = setup(t, sampleStarItems, sampleStarLists)
+	gh.readmes[linuxID] = fakeReadme{name: "README.md", content: "# Linux\n"}
+	gh.interfereOnce = func(files map[string]string) { files["other.txt"] = "from another device\n" }
+	rec = call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
+	if rec.Code != 200 || gh.readFile(readmePath) != "# Linux\n" || gh.readFile("other.txt") != "from another device\n" {
+		t.Errorf("conflict: %d %s, README %q", rec.Code, rec.Body, gh.readFile(readmePath))
+	}
+}
+
+// Tests how many GitHub requests reading one README snapshot takes.
+// A saved README takes three (the branch tip, the folder listing, the file), and the other states take two
+func TestReadReadmeSnapshotRequests(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/01/1.md"] = "# One\n"
+	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
+	for _, c := range []struct {
+		id    int64
+		state string
+		want  int // Requests expected
+	}{{1, "saved", 3}, {2, "absent", 2}, {3, "unchecked", 2}} {
+		before := gh.requests
+		got, err := core.ReadReadmeSnapshot(cfg, c.id)
+		if err != nil || got.State != c.state || gh.requests-before != c.want {
+			t.Errorf("item %d: %v, state %q, requests %d", c.id, err, got.State, gh.requests-before)
+		}
+	}
+}
+
 // Tests that a README given to `core.Archive.AddFetchedReadmeToSave` for an item that isn't in the archive is not saved.
-// Such a file would have no item to own it, and nothing would ever delete it
+// Such a file would have no item to own it.
+// The folder of that item isn't even listed
 func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	gh.readmes[999] = fakeReadme{name: "README.md", content: "# Not archived\n"}
-	fetched, err := core.FetchReadmeByRepoID(cfg, 999, time.Now().Add(time.Minute))
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
+	fetched, err := core.FetchReadmesByNodeIDs(cfg, []string{"R_999"}, time.Now().Add(time.Minute))
+	if err != nil || fetched[0] == nil {
+		t.Fatalf("fetch: %v, %v", err, fetched)
 	}
 	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
-		a.AddFetchedReadmeToSave(999, fetched)
+		a.AddFetchedReadmeToSave(999, *fetched[0])
 		a.StarItems[0].Note = "x" // A change to commit, so the commit isn't skipped as empty
 		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
 	})
@@ -150,7 +207,7 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 //   - A file with no extension has no `format`
 //   - A README and an absent marker together give the README
 //   - Only the absent marker gives `absent`, and no file gives `unchecked`
-//   - An `id` that isn't a positive number is 400, and without `id` the raw metadata file comes back as before
+//   - An `id` that isn't a positive number is 400, and without `id` the raw metadata file comes back
 func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
@@ -200,7 +257,7 @@ func syncDay(dayNumber int) time.Time {
 //   - An item with no snapshot is always checked
 //   - An item with a snapshot is checked only on the day of its group (`ID % 61`)
 //   - A changed README is written again, and a README under a new extension replaces the old file
-//   - Items in `skippedIDs` aren't asked
+//   - Items in `skippedIDs` and items without `node_id` aren't asked
 //   - Everything checked goes in one `sync(readmes)` commit that lists the saved READMEs
 func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -226,9 +283,66 @@ func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 
 	// A skipped item isn't asked, even with no snapshot
 	delete(gh.files, core.ReadmesDBDir+"/02/2.rst")
-	readmeCallsBefore := gh.readmeCalls
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), []int64{2}, syncDay(2)); err != nil || checked != 0 || gh.readmeCalls != readmeCallsBefore {
-		t.Errorf("skipped item: %d %v, README requests %d -> %d", checked, err, readmeCallsBefore, gh.readmeCalls)
+	queriesBefore := gh.readmeQueries
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), []int64{2}, syncDay(2)); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
+		t.Errorf("skipped item: %d %v, README queries %d -> %d", checked, err, queriesBefore, gh.readmeQueries)
+	}
+
+	// An item without `node_id` can't be asked by GraphQL, so it isn't asked either
+	gh.files[core.StarItemsDBPath] = strings.Replace(gh.files[core.StarItemsDBPath], `"node_id":"R_2",`, "", 1)
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(2)); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
+		t.Errorf("item without node_id: %d %v, README queries %d -> %d", checked, err, queriesBefore, gh.readmeQueries)
+	}
+}
+
+// Tests that items with no snapshot are asked before today's group.
+// 31 items have no snapshot, and item 61 has one and is in today's group (`61 % 61 == 0`).
+// So the first call of 30 asks only items with no snapshot, and item 61 goes in the next call
+func TestSyncReadmeSnapshotsWithGitHubAsksUncheckedItemsFirst(t *testing.T) {
+	items := []string{}
+	for _, id := range []int{61, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31} {
+		items = append(items, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	gh := setup(t, "[\n"+strings.Join(items, ",\n")+"\n]\n", sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/61/61.md"] = "# Old\n"
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 32 {
+		t.Fatalf("sync: %d %v", checked, err)
+	}
+	for _, listedIDs := range gh.readmeListedIDs {
+		if slices.Contains(listedIDs, "R_61") && len(listedIDs) != 2 {
+			t.Errorf("item 61 was asked with %d items: %v", len(listedIDs), listedIDs)
+		}
+	}
+}
+
+// Tests that the sync doesn't ask the README of a repository that the metadata step found missing.
+// It would only get an absent marker
+func TestSyncDoesNotAskReadmesOfMissingRepos(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.gone = map[string]bool{"R_2": true}
+	result, err := core.Sync(newTestConfig(), testDeadline())
+	_, hasMarker := gh.files[core.ReadmesDBDir+"/02/2.no-readme"]
+	if err != nil || result.NumUnavailableRepos != 1 || hasMarker || slices.ContainsFunc(gh.readmeListedIDs, func(ids []string) bool { return slices.Contains(ids, "R_2") }) {
+		t.Errorf("%+v %v, absent marker %v, listed %v", result, err, hasMarker, gh.readmeListedIDs)
+	}
+}
+
+// Tests that each README fetched in one call is saved for its own item.
+// Three items with different READMEs (one of them absent) are asked together
+func TestSyncReadmeSnapshotsWithGitHubSavesEachReadmeForItsItem(t *testing.T) {
+	threeItems := "[\n" +
+		`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[],"starred_at":"x"}` + ",\n" +
+		`{"id":2,"node_id":"R_2","name":"b/two","note":"","star_list_ids":[],"starred_at":"x"}` + ",\n" +
+		`{"id":3,"node_id":"R_3","name":"c/three","note":"","star_list_ids":[],"starred_at":"x"}` + "\n]\n"
+	gh := setup(t, threeItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
+	gh.readmes[2] = fakeReadme{name: "README.rst", content: "Two\n"}
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0))
+	_, absent := gh.files[core.ReadmesDBDir+"/03/3.no-readme"]
+	if err != nil || checked != 3 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" || gh.readFile(core.ReadmesDBDir+"/02/2.rst") != "Two\n" || !absent {
+		t.Errorf("%d %v, files %q", checked, err, gh.files)
 	}
 }
 
@@ -248,10 +362,29 @@ func TestSyncReadmeSnapshotsWithGitHubDeletesSnapshotsOfRemovedItems(t *testing.
 	}
 }
 
+// Tests that the README sync step deletes no snapshot when the item file reads as missing.
+// A missing file reads as an empty archive, and every snapshot would look like one of a removed item
+func TestSyncReadmeSnapshotsWithGitHubKeepsSnapshotsWithoutTheItemFile(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/01/1.md"] = "# One\n"
+	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
+	delete(gh.files, core.StarItemsDBPath)
+	commitsBefore := len(gh.commits)
+	_, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0))
+	_, readmeLeft := gh.files[core.ReadmesDBDir+"/01/1.md"]
+	_, markerLeft := gh.files[core.ReadmesDBDir+"/02/2.no-readme"]
+	if err != nil || !readmeLeft || !markerLeft || len(gh.commits) != commitsBefore {
+		t.Errorf("%v, README left %v, marker left %v, commits %d -> %d", err, readmeLeft, markerLeft, commitsBefore, len(gh.commits))
+	}
+}
+
 // Tests the limits of the README sync step.
 //   - More than `maxReadmesPerCommit` (300) items go in several commits
 //   - A rate limit answer stops it early without an error, and the READMEs fetched before it are committed
-//   - With too little time before the deadline, it sends no README request
+//   - With too little time before the deadline, it sends no README query.
+//     A call starts only if one request time limit is left before the time kept for the commit.
+//     With too little time even for the commit, it commits nothing
 func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 	manyItems := []string{}
 	for id := 1; id <= 305; id++ {
@@ -266,7 +399,7 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 
 	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
 	cfg = loadTestConfig(t)
-	gh.readmeRateLimitFrom = 11 // The first 10 README requests are answered, then GitHub answers 429
+	gh.readmeRateLimitFrom = 7 // The first 6 README queries are answered, then GitHub answers with the rate limit error
 	checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0))
 	savedFiles := 0
 	for path := range gh.files {
@@ -274,32 +407,64 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 			savedFiles++
 		}
 	}
-	// The fake GitHub answers one request at a time, and each of the 6 goroutines stops after its first 429
-	if err != nil || checked != 10 || savedFiles != 10 || gh.readmeCalls > 10+6 {
-		t.Errorf("rate limit: %d %v, files %d, README requests %d", checked, err, savedFiles, gh.readmeCalls)
+	// These items have no README, so a call of 30 items is two queries (the listing, then `docs`).
+	// Each of the 3 goroutines has at most one call going, so 6 queries finish 2 or 3 calls.
+	// Each goroutine stops after its first rate limit answer
+	if err != nil || checked%30 != 0 || checked < 60 || checked > 90 || savedFiles != checked || gh.readmeQueries > 6+3 {
+		t.Errorf("rate limit: %d %v, files %d, README queries %d", checked, err, savedFiles, gh.readmeQueries)
 	}
 
 	gh = setup(t, sampleStarItems, sampleStarLists)
 	cfg = loadTestConfig(t)
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, time.Now().Add(30*time.Second), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeCalls != 0 {
-		t.Errorf("no time: %d %v, README requests %d", checked, err, gh.readmeCalls)
+	// 30 seconds is less than the time kept for the commit (40 seconds).
+	// 50 seconds leaves 10 seconds before it, less than one request time limit (20 seconds)
+	for _, seconds := range []time.Duration{30, 50} {
+		if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, time.Now().Add(seconds*time.Second), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 0 {
+			t.Errorf("no time (%d seconds): %d %v, README queries %d", seconds, checked, err, gh.readmeQueries)
+		}
+	}
+
+	// With too little time even for the commit, nothing is committed, not even the deletion of removed items' snapshots
+	gh.files[core.ReadmesDBDir+"/03/3.md"] = "# Removed item\n"
+	commitsBefore = len(gh.commits)
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, time.Now().Add(10*time.Second), nil, syncDay(0)); err != nil || checked != 0 || len(gh.commits) != commitsBefore {
+		t.Errorf("no time to commit: %d %v, commits %d -> %d", checked, err, commitsBefore, len(gh.commits))
 	}
 }
 
-// Tests that the README sync step stops after a batch whose requests all failed, without an error.
-// The second batch isn't asked, because GitHub is likely failing for every repository
-func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryRequestFails(t *testing.T) {
+// Tests when the README sync step stops because README calls fail.
+//   - After a batch whose calls all failed, it stops without an error.
+//     The second batch isn't asked, because GitHub is likely failing as a whole
+//   - A failure about each repository isn't a failed call.
+//     Nothing is saved for those repositories, and the second batch is still asked.
+//     It is still asked when some calls of the first batch failed and the others fetched nothing, because GitHub answered those
+func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryCallFails(t *testing.T) {
 	manyItems := []string{}
 	for id := 1; id <= 305; id++ {
 		manyItems = append(manyItems, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
 	}
 	gh := setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
 	cfg := loadTestConfig(t)
-	for id := int64(1); id <= 305; id++ {
-		gh.readmes[id] = fakeReadme{status: http.StatusInternalServerError}
+	gh.readmeQueryFails = func(queryNumber int) bool { return true }
+	// The first batch of 300 items is 10 calls, and each fails at its first query
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 10 {
+		t.Errorf("every call fails: %d %v, README queries %d", checked, err, gh.readmeQueries)
 	}
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeCalls != 300 {
-		t.Errorf("%d %v, README requests %d", checked, err, gh.readmeCalls)
+
+	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
+	cfg = loadTestConfig(t)
+	for id := int64(1); id <= 305; id++ {
+		gh.readmes[id] = fakeReadme{unavailable: true}
+	}
+	// Both batches are asked: 11 calls of one listing query each, with nothing left to read after them
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 11 {
+		t.Errorf("each repository fails: %d %v, README queries %d", checked, err, gh.readmeQueries)
+	}
+
+	gh.readmeQueries = 0
+	gh.readmeQueryFails = func(queryNumber int) bool { return queryNumber%2 == 1 }
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 11 {
+		t.Errorf("some calls fail, the others fetch nothing: %d %v, README queries %d", checked, err, gh.readmeQueries)
 	}
 }
 
@@ -328,65 +493,47 @@ func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
 	}
 }
 
-// Tests that a README that isn't UTF-8 (here EUC-KR) is kept byte for byte, and read back as base64.
-//   - The sync step writes it through a blob, because a tree entry holds only UTF-8 content
-//   - `GET /api/archive-repo-meta?id=` gives the bytes in `raw_base64`, with no `text`
-func TestReadmeThatIsNotUTF8IsKeptAsBytes(t *testing.T) {
+// Tests that a saved README that isn't UTF-8 text still reads back as valid JSON.
+// Only a hand edit can leave such a file. Its bytes that aren't UTF-8 come as U+FFFD in `text`
+func TestReadmeSnapshotThatIsNotUTF8IsReadAsText(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
-	cfg := loadTestConfig(t)
-	const eucKR = "\xC7\xD1\xB1\xDB README\n" // "한글 README" in EUC-KR
-	gh.readmes[1] = fakeReadme{name: "README.md", content: eucKR}
-
-	if _, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if got := gh.readFile(core.ReadmesDBDir + "/01/1.md"); got != eucKR || len(gh.blobs) != 1 {
-		t.Errorf("saved %q, blobs %d", got, len(gh.blobs))
-	}
-
+	gh.files[core.ReadmesDBDir+"/01/1.md"] = "\xC7\xD1\xB1\xDB README\n" // "Hangul README" in EUC-KR (two Korean characters)
 	rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta?id=1", "", login(t))
-	want := `{"id":1,"readme":{"state":"saved","format":"md","raw_base64":"` + base64.StdEncoding.EncodeToString([]byte(eucKR)) + `"}}`
-	if got := strings.TrimSpace(rec.Body.String()); rec.Code != 200 || got != want {
-		t.Errorf("read: %d %s", rec.Code, got)
+	var answer struct {
+		Readme struct {
+			State string `json:"state"`
+			Text  string `json:"text"`
+		} `json:"readme"`
+	}
+	err := json.Unmarshal(rec.Body.Bytes(), &answer)
+	if rec.Code != 200 || err != nil || answer.Readme.State != "saved" || !utf8.ValidString(answer.Readme.Text) || !strings.HasSuffix(answer.Readme.Text, " README\n") {
+		t.Errorf("%d %v %s", rec.Code, err, rec.Body)
 	}
 }
 
-// Tests the READMEs that go through a blob, because a tree entry can't hold them as a JSON string.
-//   - A README with a NUL byte (UTF-16 without a byte order mark) is kept byte for byte, and read back as base64
-//   - Many READMEs that aren't UTF-8 in one commit are all kept, each through its own blob
-func TestReadmesThatNeedABlob(t *testing.T) {
+// Tests that `core.UpdateFiles` writes any bytes as they are.
+//   - A file with a NUL byte goes in the tree entry as text, with no blob
+//   - A file that isn't UTF-8 goes through a blob, byte for byte
+func TestUpdateFilesWritesAnyBytes(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
-	const utf16WithoutBOM = "#\x00 \x00h\x00i\x00\n\x00"
-	gh.readmes[2] = fakeReadme{name: "README.md", content: utf16WithoutBOM}
-	if _, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil {
-		t.Fatalf("sync: %v", err)
+	want := map[string]string{ // Path -> content
+		core.ReadmesDBDir + "/02/2.md": "#\x00 \x00h\x00i\x00\n\x00",
+		core.ReadmesDBDir + "/01/1.md": "\xC7\xD1\xB1\xDB\n", // EUC-KR
 	}
-	if got := gh.readFile(core.ReadmesDBDir + "/02/2.md"); got != utf16WithoutBOM || len(gh.blobs) != 1 {
-		t.Errorf("NUL README saved %q, blobs %d", got, len(gh.blobs))
+	err := core.UpdateFiles(cfg, nil, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		changes := core.FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: core.NewCommitMessage("sync(readmes)", "write test files")}
+		for path, content := range want {
+			changes.FilesToWrite[path] = []byte(content)
+		}
+		return changes, nil
+	})
+	if err != nil || len(gh.blobs) != 1 {
+		t.Fatalf("%v, blobs %d", err, len(gh.blobs))
 	}
-	rec := call(api.HandleArchiveRepoMeta, "GET", "/api/archive-repo-meta?id=2", "", login(t))
-	want := `{"id":2,"readme":{"state":"saved","format":"md","raw_base64":"` + base64.StdEncoding.EncodeToString([]byte(utf16WithoutBOM)) + `"}}`
-	if got := strings.TrimSpace(rec.Body.String()); got != want {
-		t.Errorf("NUL README read: %s", got)
-	}
-
-	manyItems := []string{}
-	for id := 1; id <= 20; id++ {
-		manyItems = append(manyItems, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
-	}
-	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
-	cfg = loadTestConfig(t)
-	for id := int64(1); id <= 20; id++ {
-		gh.readmes[id] = fakeReadme{name: "README.md", content: fmt.Sprintf("\xC7\xD1\xB1\xDB %d\n", id)}
-	}
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 20 || len(gh.blobs) != 20 {
-		t.Fatalf("many: %d %v, blobs %d", checked, err, len(gh.blobs))
-	}
-	for id := int64(1); id <= 20; id++ {
-		path := fmt.Sprintf("%s/%02d/%d.md", core.ReadmesDBDir, id%100, id)
-		if got, want := gh.readFile(path), fmt.Sprintf("\xC7\xD1\xB1\xDB %d\n", id); got != want {
-			t.Errorf("%s: %q, want %q", path, got, want)
+	for path, content := range want {
+		if got := gh.readFile(path); got != content {
+			t.Errorf("%s: %q, want %q", path, got, content)
 		}
 	}
 }

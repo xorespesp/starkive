@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,10 +64,12 @@ type fakeGitHub struct {
 	treeStatus          int                           // If not 0, tree creation fails with this status code
 	treeCalls           int                           // Number of tree creation requests
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
-	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README (404)
-	readmeCalls         int                           // Number of README requests
-	readmeRateLimitFrom int                           // If not 0, README requests from this one on (counting from 1) get the rate limit answer 429
 	blobs               map[string]string             // Created blob sha -> content
+	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
+	readmeQueries       int                           // Number of README queries by GraphQL (folder listings and file contents)
+	readmeListedIDs     [][]string                    // `node_id`s of each README folder listing query, in the order the queries came
+	readmeQueryFails    func(queryNumber int) bool    // If not `nil`, README queries by GraphQL for which it returns `true` fail with 502. `queryNumber` counts from 1
+	readmeRateLimitFrom int                           // If not 0, README queries by GraphQL from this one on (counting from 1) get the rate limit answer (200 with an error)
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
 	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
@@ -116,9 +119,162 @@ type fakeRun struct {
 
 // README of one repository on the fake GitHub
 type fakeReadme struct {
-	name    string // File name (e.g. `README.md`)
-	content string // File content
-	status  int    // If not 0, the README request fails with this status code
+	name        string // File name (e.g. `README.md`)
+	content     string // File content
+	unavailable bool   // If `true`, GraphQL gives `null` with an error for the repository, as for a repository it can't give now
+}
+
+// Answers a README query by GraphQL: a listing of the `.github` and root folders, a listing of `docs`, or file contents.
+// A repository's README (`readmes`) is in its root folder next to `main.go`, and `.github` and `docs` don't exist.
+// Like GitHub, it answers only the fields the query asks for, and names each answer by the alias in the query.
+// It lists each folder by the path in its expression (`HEAD:<path>`), and finds a file only at the path its variable gives (`HEAD:<name>`).
+// A query that uses a variable it wasn't given, or doesn't declare it with the type GitHub expects, fails as a whole.
+// A README that is `unavailable` gets `null` with an error, as GitHub does for a repository it can't give now.
+// Call it while holding `mu`.
+//
+// Args:
+//   - `query`: The GraphQL query, which tells which of the three kinds it is
+//   - `rawBody`: The whole request body, for the variables of each file in a content query (`$id<position>`, `$path<position>`)
+func (f *fakeGitHub) answerReadmeQuery(w http.ResponseWriter, query string, rawBody []byte) {
+	f.readmeQueries++
+	if f.readmeQueryFails != nil && f.readmeQueryFails(f.readmeQueries) {
+		http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		return
+	}
+	if f.readmeRateLimitFrom != 0 && f.readmeQueries >= f.readmeRateLimitFrom {
+		// The measured shape: 200, an error with no type, and no points left
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		io.WriteString(w, `{"data":null,"errors":[{"message":"API rate limit exceeded for user ID 4242."}]}`)
+		return
+	}
+	if !isEveryGraphQLVariableDeclared(query) {
+		io.WriteString(w, `{"data":null,"errors":[{"message":"Variable is not declared, is declared with another type, or is declared but not used"}]}`)
+		return
+	}
+	var body struct {
+		Variables map[string]any `json:"variables"`
+	}
+	json.Unmarshal(rawBody, &body)
+	readmeOf := func(nodeID string) (fakeReadme, bool) {
+		var id int64
+		fmt.Sscanf(nodeID, "R_%d", &id)
+		readme, ok := f.readmes[id]
+		return readme, ok
+	}
+	data := map[string]any{}
+	errs := []map[string]any{}
+	switch {
+	case readmeFolderFields.MatchString(query):
+		nodeIDs, _ := body.Variables["ids"].([]any)
+		listedIDs := []string{}
+		nodes := []any{}
+		for i, id := range nodeIDs {
+			listedIDs = append(listedIDs, id.(string))
+			nodeID := id.(string)
+			readme, ok := readmeOf(nodeID)
+			switch {
+			case f.gone[nodeID]:
+				nodes = append(nodes, nil)
+				errs = append(errs, map[string]any{"type": "NOT_FOUND", "path": []any{"nodes", i}, "message": "Could not resolve to a node"})
+			case ok && readme.unavailable:
+				nodes = append(nodes, nil)
+				errs = append(errs, map[string]any{"type": "FORBIDDEN", "path": []any{"nodes", i}, "message": "README failed"})
+			default:
+				node := map[string]any{}
+				for _, field := range readmeFolderFields.FindAllStringSubmatch(query, -1) {
+					alias, folderPath := field[1], field[2]
+					if folderPath != "" { // Only the root folder exists
+						node[alias] = nil
+						continue
+					}
+					names := []string{"main.go"}
+					if ok {
+						names = append(names, readme.name)
+					}
+					entries := []any{}
+					for _, name := range names {
+						entry := map[string]any{}
+						if graphQLQueryAsks(query, "name") {
+							entry["name"] = name
+						}
+						if graphQLQueryAsks(query, "type") {
+							entry["type"] = "blob"
+						}
+						if graphQLQueryAsks(query, "mode") {
+							entry["mode"] = 0o100644
+						}
+						entries = append(entries, entry)
+					}
+					node[alias] = map[string]any{"entries": entries}
+				}
+				if graphQLQueryAsks(query, "id") {
+					node["id"] = nodeID
+				}
+				nodes = append(nodes, node)
+			}
+		}
+		f.readmeListedIDs = append(f.readmeListedIDs, listedIDs)
+		data["nodes"] = nodes
+	default:
+		for _, field := range readmeContentFields.FindAllStringSubmatch(query, -1) {
+			alias, idVariable, pathVariable := field[1], field[2], field[3]
+			nodeID, idGiven := body.Variables[idVariable].(string)
+			path, pathGiven := body.Variables[pathVariable].(string)
+			if !idGiven || !pathGiven {
+				io.WriteString(w, `{"data":null,"errors":[{"message":"Variable is used but not given"}]}`)
+				return
+			}
+			readme, ok := readmeOf(nodeID)
+			if !ok || path != "HEAD:"+readme.name {
+				data[alias] = map[string]any{"object": nil}
+				continue
+			}
+			file := map[string]any{}
+			if graphQLQueryAsks(query, "text") {
+				file["text"] = readme.content
+			}
+			data[alias] = map[string]any{"object": file}
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
+}
+
+// One field of a README content query: its alias, the variable of the `node_id`, and the variable of the file path.
+// It matches the query that `core.FetchReadmesByNodeIDs` builds
+var readmeContentFields = regexp.MustCompile(`(\w+): node\(id: \$(\w+)\) \{ \.\.\. on Repository \{ object\(expression: \$(\w+)\)`)
+
+// One folder field of a README listing query: its alias and the folder path in its expression (`HEAD:<path>`, empty for the root)
+var readmeFolderFields = regexp.MustCompile(`(\w+): object\(expression: "HEAD:([^"]*)"\)`)
+
+// Reports whether GraphQL query `query` asks for field `name` (a whole word that isn't an argument or a variable)
+func graphQLQueryAsks(query string, name string) bool {
+	return regexp.MustCompile(`[{\s]` + name + `[\s}]`).MatchString(query)
+}
+
+// Reports whether README query `query` declares in its head exactly the variables its body uses,
+// each with the type GitHub expects (`$ids: [ID!]!`, `$id<n>: ID!`, `$path<n>: String!`).
+// GitHub fails the whole query otherwise (docs).
+func isEveryGraphQLVariableDeclared(query string) bool {
+	head, body, _ := strings.Cut(query, "{")
+	declared := map[string]string{} // Variable name -> declared type
+	for _, m := range regexp.MustCompile(`\$(\w+): ([\w!\[\]]+)`).FindAllStringSubmatch(head, -1) {
+		declared[m[1]] = m[2]
+	}
+	used := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\$(\w+)`).FindAllStringSubmatch(body, -1) {
+		used[m[1]] = true
+		wantType := "String!"
+		switch {
+		case m[1] == "ids":
+			wantType = "[ID!]!"
+		case strings.HasPrefix(m[1], "id"):
+			wantType = "ID!"
+		}
+		if declared[m[1]] != wantType {
+			return false
+		}
+	}
+	return len(used) == len(declared)
 }
 
 // A commit the fake GitHub created that isn't on the branch yet
@@ -504,28 +660,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"id":%d,"login":"user%d"}`, id, id)
 
-	case strings.HasPrefix(r.URL.Path, "/repositories/") && strings.HasSuffix(r.URL.Path, "/readme"):
-		// README of a repository by ID: the file name and the content in base64
-		f.readmeCalls++
-		if f.readmeRateLimitFrom != 0 && f.readmeCalls >= f.readmeRateLimitFrom {
-			http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusTooManyRequests)
-			return
-		}
-		var id int64
-		fmt.Sscanf(r.URL.Path, "/repositories/%d/readme", &id)
-		readme, ok := f.readmes[id]
-		switch {
-		case !ok:
-			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
-		case readme.status != 0:
-			http.Error(w, `{"message":"README failed"}`, readme.status)
-		default:
-			fmt.Fprintf(w, `{"name":%q,"size":%d,"content":%q}`, readme.name, len(readme.content), base64.StdEncoding.EncodeToString([]byte(readme.content)))
-		}
-
 	case r.URL.Path == "/repos/torvalds/linux":
 		// One repository to look up when adding a repository directly (Add)
-		io.WriteString(w, `{"id":2325298,"node_id":"R_linux","full_name":"torvalds/linux"}`)
+		io.WriteString(w, `{"id":2325298,"node_id":"R_2325298","full_name":"torvalds/linux"}`)
 
 	case r.URL.Path == "/user/starred" && r.Method == http.MethodGet:
 		// One page of my Stars (`per_page`, `page`)
@@ -566,7 +703,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Marker string   `json:"marker"`
 			} `json:"variables"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		rawBody, _ := io.ReadAll(r.Body)
+		json.Unmarshal(rawBody, &body)
+		if strings.Contains(body.Query, `"HEAD:.github"`) || strings.Contains(body.Query, `"HEAD:docs"`) || strings.Contains(body.Query, "expression: $path") {
+			f.answerReadmeQuery(w, body.Query, rawBody)
+			return
+		}
 		if strings.Contains(body.Query, "isEmpty") {
 			// DB repository state: `isEmpty` for an empty repository. Otherwise the file at `HEAD:<path>` is answered as `marker`. A missing file is `null`
 			if body.Variables.Owner+"/"+body.Variables.Name != "me/archive" {
@@ -667,6 +809,10 @@ func setup(t *testing.T, starItems string, starLists string) *fakeGitHub {
 	return gh
 }
 
+// Number of fake GitHub servers started so far.
+// It gives each test's server address its own path (`setupWithoutGitHubApp`)
+var fakeGitHubServers atomic.Int64
+
 // Starts a fake GitHub with a DB repository that has no sign-in GitHub App yet (before the setup tool creates the App), and sets the environment variables.
 // The repository has the marker for this version (`.starkive`),
 // a config file with the sync interval and a time turned on one hour ago, and an auto sync workflow file that is on.
@@ -693,12 +839,16 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 	gh.files[core.MarkerDBPath] = string(core.EncodeMarker())
 	gh.files[core.ConfigDBPath] = makeTestConfigFile("", "")
 	gh.files[core.SyncWorkflowPath] = "name: starkive sync\n" // The server doesn't read the workflow content. It only checks the state with the Actions API
-	srv := httptest.NewServer(gh)
+	// The server code caches values by the GitHub address and the token (`core/cache.go`), and every test uses the same token.
+	// A closed test server's port can be given again to a later test (seen on Windows), which would then get the earlier test's cached values.
+	// So each test's address gets its own path, which `http.StripPrefix` removes before the fake GitHub sees the request
+	pathPrefix := fmt.Sprintf("/test%d", fakeGitHubServers.Add(1))
+	srv := httptest.NewServer(http.StripPrefix(pathPrefix, gh))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { checkCommitSubjects(t, gh) }) // When the test ends, checks the format of the commit subjects made so far
 	// Makes the server code call the fake GitHub. `t.Setenv` restores the original value when the test ends
-	t.Setenv("STARKIVE_GH_API_URL", srv.URL)
-	t.Setenv("STARKIVE_GH_WEB_URL", srv.URL)
+	t.Setenv("STARKIVE_GH_API_URL", srv.URL+pathPrefix)
+	t.Setenv("STARKIVE_GH_WEB_URL", srv.URL+pathPrefix)
 	t.Setenv(core.DBRepoAccessKeyEnv, core.FormatDBRepoAccessKey(testRepoID, testToken))
 	return gh
 }
@@ -886,7 +1036,8 @@ func TestGitHubLogin(t *testing.T) {
 	}
 	json.Unmarshal(rec.Body.Bytes(), &start)
 	u, _ := url.Parse(start.URL)
-	if u.Path != "/login/oauth/authorize" || u.Query().Get("client_id") != testClientID || u.Query().Has("scope") || u.Query().Has("redirect_uri") {
+	web, _ := url.Parse(os.Getenv("STARKIVE_GH_WEB_URL"))
+	if u.Path != web.Path+"/login/oauth/authorize" || u.Query().Get("client_id") != testClientID || u.Query().Has("scope") || u.Query().Has("redirect_uri") {
 		t.Errorf("authorize url = %s", start.URL)
 	}
 
@@ -1212,7 +1363,7 @@ func TestStarItemsAdd(t *testing.T) {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body)
 	}
 	firstLine := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")[1]
-	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_linux","name":"torvalds/linux","note":"","star_list_ids":[200],`) {
+	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_2325298","name":"torvalds/linux","note":"","star_list_ids":[200],`) {
 		t.Errorf("new entry should be first: %s", firstLine)
 	}
 
@@ -1740,7 +1891,8 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 	gh.starred = []string{"new/one"}
 	gh.githubStarListsDown = true // Adding new Stars needs the GitHub star lists, and only that query fails
 
-	// Adding new Stars fails, but the unrelated snapshot refresh runs to the end and commits. The error comes back with the step name
+	// Adding new Stars fails, but the unrelated snapshot refreshes run to the end and commit.
+	// The error comes back with the step name
 	result, err := core.Sync(newTestConfig(), testDeadline())
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)

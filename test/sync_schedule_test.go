@@ -328,7 +328,8 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 
 // Tests Sync now (`POST /api/sync-archive`) and the auto sync status that the Settings dialog gets from `GET /api/sync-status`.
 //   - Status: interval, time turned on, workflow state, and the last finished scheduled run (start time, result, GitHub run page address)
-//   - Sync now needs sign-in and a same-site request. It syncs on every call, whatever the interval
+//   - Sync now needs sign-in and a same-site request. It syncs on every call, whatever the interval.
+//     It answers with the counts of every step
 func TestSyncNowAndStatus(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/one"}
@@ -359,7 +360,11 @@ func TestSyncNowAndStatus(t *testing.T) {
 		t.Errorf("cross-origin: %d", cross.Code)
 	}
 	for i, want := range []string{`"added":1`, `"added":0`} { // The second call syncs too. There are no new Stars, so it is 0
-		if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); rec.Code != 200 || !strings.Contains(rec.Body.String(), want) {
+		rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie)
+		var counts map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &counts)
+		_, hasReadmesChecked := counts["readmes_checked"]
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), want) || len(counts) != 5 || !hasReadmesChecked {
 			t.Errorf("sync now %d: %d %s", i, rec.Code, rec.Body)
 		}
 	}

@@ -214,7 +214,8 @@ func (changes FileChangesCommit) check() error {
 //   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
 //     plus the requests that `buildFileChangesCommit` sends.
 //     For the archive (three files) that is 8 when `buildFileChangesCommit` sends none.
-//     Files that are only written or deleted cost no extra request, except one per written file that needs a blob (`isTreeContentSafe`).
+//     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
+//     That one is sent again on every attempt.
 //     This is the price of putting several files in one commit with no in-between state.
 func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error)) error {
 	for _, p := range paths {
@@ -343,64 +344,6 @@ func gitBlobSHA(content []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// Reports whether `content` can go into a tree entry as a JSON string as it is.
-// JSON strings hold only UTF-8.
-// A NUL byte is left out too, because how GitHub stores `\u0000` in tree content isn't measured
-func isTreeContentSafe(content []byte) bool {
-	return utf8.Valid(content) && bytes.IndexByte(content, 0) < 0
-}
-
-// Number of blobs created at the same time for one commit (`createBlobs`).
-// A commit can hold hundreds of files that need a blob, and one at a time would take minutes
-const blobCreateParallel = 6
-
-// Creates a blob from base64 for each of `paths`, with the content in `contentByPath`, `blobCreateParallel` at a time.
-//
-// Returns:
-//   - Path -> blob sha. Empty if `paths` is empty, and then no request is sent
-//   - The first error from GitHub. Blobs created before it are left unused, which is harmless
-func createBlobs(cfg *Config, paths []string, contentByPath map[string][]byte) (map[string]string, error) {
-	// Several goroutines (lightweight threads) take paths one by one. Shared values are read and written while holding `mu`
-	var mu sync.Mutex
-	next := 0
-	blobSHAByPath := map[string]string{}
-	var firstErr error
-	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
-	for w := 0; w < blobCreateParallel; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				mu.Lock()
-				if firstErr != nil || next >= len(paths) {
-					mu.Unlock()
-					return
-				}
-				path := paths[next]
-				next++
-				mu.Unlock()
-
-				var blob struct {
-					SHA string `json:"sha"`
-				}
-				request := map[string]any{"content": base64.StdEncoding.EncodeToString(contentByPath[path]), "encoding": "base64"}
-				err := callRepoAPI(cfg, http.MethodPost, "/git/blobs", request, &blob)
-				mu.Lock()
-				if err != nil && firstErr == nil {
-					firstErr = err
-				}
-				blobSHAByPath[path] = blob.SHA
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return blobSHAByPath, nil
-}
-
 // Reads the three archive files from one commit, changes them with `change`, and writes only the changed files in one commit.
 // It works on top of `UpdateFiles`.
 //
@@ -500,7 +443,7 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 		// Saves the READMEs given to `AddFetchedReadmeToSave`, against the snapshots already saved for those items
 		for id, fetched := range a.fetchedReadmesToSave {
 			if !isArchivedAfter[id] {
-				continue // A README of an item not in the archive would have no item to own it, and nothing would delete it
+				continue // A README of an item not in the archive would have no item to own it
 			}
 			snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(id))
 			if err != nil {
@@ -578,10 +521,12 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //     `errBranchMoved` if the branch moved in the meantime. Otherwise the GitHub error
 //
 // NOTE:
-//   - A tree entry carries its content as a JSON string, which holds only UTF-8.
-//     So a file that can't go in a JSON string as it is (`isTreeContentSafe`) is first made into a blob from base64 (docs),
-//     and its entry carries the blob sha.
-//     That costs one more request for each such file, sent `blobCreateParallel` at a time (`createBlobs`).
+//   - A tree entry carries the file content as a JSON string, which holds only UTF-8.
+//     A NUL byte (`\u0000`) in it is stored as it is (measured).
+//     Content that isn't UTF-8 is first made into a blob from base64 (docs), and its entry carries the blob sha.
+//     That costs one more request for each such file, sent one at a time.
+//     The server and the setup tool write only UTF-8 (JSON they make, README text from GitHub GraphQL, fixed text).
+//     So the blob path only keeps the promise that any bytes can be written.
 //   - A tree entry with a `null` sha and no content deletes that path (measured).
 //     A folder left empty disappears with it (measured).
 //     Deleting a path that isn't there fails the whole tree with 422 (measured).
@@ -603,20 +548,25 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //     The data is safe, and the request can simply be sent again.
 func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error {
 	entries := []map[string]any{} // Tree entries. `any` lets one entry hold a string and another a JSON `null`
-	blobPaths := []string{}       // Paths of the files that go through a blob
 	for path, content := range changes.FilesToWrite {
-		if isTreeContentSafe(content) {
+		// The entry carries the content as a JSON string, which holds only UTF-8.
+		// A NUL byte is UTF-8 too, and GitHub stores it as it is (measured)
+		if utf8.Valid(content) {
 			entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "content": string(content)})
-		} else {
-			blobPaths = append(blobPaths, path)
+			continue
 		}
-	}
-	blobSHAByPath, err := createBlobs(cfg, blobPaths, changes.FilesToWrite)
-	if err != nil {
-		return err
-	}
-	for _, path := range blobPaths {
-		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "sha": blobSHAByPath[path]})
+		// Content that isn't UTF-8 can't go in the JSON string.
+		// Encoding it as JSON would turn the bad bytes into U+FFFD, so GitHub would store other bytes than ours.
+		// The blob API takes the content in base64, which carries any bytes as they are (docs).
+		// So the blob is made first with one more request, and the tree entry points to it by its sha instead of carrying the content
+		var blob struct {
+			SHA string `json:"sha"`
+		}
+		request := map[string]any{"content": base64.StdEncoding.EncodeToString(content), "encoding": "base64"}
+		if err := callRepoAPI(cfg, http.MethodPost, "/git/blobs", request, &blob); err != nil {
+			return err
+		}
+		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "sha": blob.SHA})
 	}
 	for _, path := range changes.FilesToDelete {
 		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "sha": nil}) // `nil` becomes JSON `null`
@@ -637,7 +587,7 @@ func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error 
 		return err
 	}
 	// Moves without force. If the branch moved in the meantime, GitHub refuses
-	err = callRepoAPI(cfg, http.MethodPatch, "/git/refs/heads/"+cfg.DBRepoBranch, map[string]any{"sha": commit.SHA, "force": false}, nil)
+	err := callRepoAPI(cfg, http.MethodPatch, "/git/refs/heads/"+cfg.DBRepoBranch, map[string]any{"sha": commit.SHA, "force": false}, nil)
 	if err == nil {
 		return nil
 	}

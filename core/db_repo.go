@@ -226,15 +226,6 @@ func findDBRepo(cfg *Config) (dbRepo, error) {
 	return found, nil
 }
 
-// GraphQL query that asks, in one go, whether the DB repository is empty and what the marker file at the tip of the default branch is.
-// `$marker` is `HEAD:<marker path>`
-const dbRepoStateQuery = `query($owner: String!, $name: String!, $marker: String!) {
-  repository(owner: $owner, name: $name) {
-    isEmpty
-    marker: object(expression: $marker) { ... on Blob { text } }
-  }
-}`
-
 // Decides the state of the DB repository by looking inside it.
 // No commits means an empty repository. No marker means a foreign repository. With a marker, the format version is checked.
 //
@@ -249,6 +240,14 @@ const dbRepoStateQuery = `query($owner: String!, $name: String!, $marker: String
 // There is no exception like "allow it if it only has the initial files GitHub made". This keeps the rule simple.
 func inspectDBRepo(cfg *Config) (DBRepoState, error) {
 	owner, name, _ := strings.Cut(cfg.DBRepoFullName, "/")
+	// Asks, in one go, whether the DB repository is empty and what the marker file at the tip of the default branch is.
+	// `$marker` is `HEAD:<marker path>`
+	const query = `query($owner: String!, $name: String!, $marker: String!) {
+		repository(owner: $owner, name: $name) {
+			isEmpty
+			marker: object(expression: $marker) { ... on Blob { text } }
+		}
+	}`
 	var data struct {
 		Repository *struct {
 			IsEmpty bool `json:"isEmpty"`
@@ -258,7 +257,7 @@ func inspectDBRepo(cfg *Config) (DBRepoState, error) {
 		} `json:"repository"` // `nil` if the repository can't be seen
 	}
 	vars := map[string]any{"owner": owner, "name": name, "marker": "HEAD:" + MarkerDBPath}
-	if err := callGraphQL(cfg, dbRepoStateQuery, vars, &data); err != nil {
+	if err := callGraphQL(cfg, query, vars, 0, &data); err != nil {
 		return 0, err
 	}
 	switch {

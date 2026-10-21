@@ -1,7 +1,7 @@
 // Sync that brings the archive in line with GitHub.
 // It reads my GitHub Stars and GitHub star lists, puts Stars into the archive, and ties them together in `Sync`.
 // When to sync (the schedule decision, turning it on and off) is in `sync_schedule.go`.
-// Refreshing the metadata snapshots is in `meta.go`.
+// Refreshing the metadata snapshots is in `meta.go`, and the README snapshots in `readme.go`.
 package core
 
 import (
@@ -125,30 +125,6 @@ func FetchAllStarredRepos(cfg *Config) ([]StarredRepo, error) {
 	return starredRepos, nil
 }
 
-// GraphQL query that reads my GitHub star lists and the first 100 repositories in each.
-// If there are more than 100 star lists, reading continues with `$after`
-const githubStarListsQuery = `query($after: String) {
-  viewer {
-    lists(first: 100, after: $after) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        id
-        name
-        items(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on Repository { databaseId } } }
-      }
-    }
-  }
-}`
-
-// GraphQL query that reads the repositories of one GitHub star list, continuing after the first 100
-const githubStarListItemsQuery = `query($id: ID!, $after: String) {
-  node(id: $id) {
-    ... on UserList {
-      items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Repository { databaseId } } }
-    }
-  }
-}`
-
 // One batch of repositories in a GitHub star list (GraphQL `items`), and whether there is a next batch
 type githubStarListItems struct {
 	PageInfo struct {
@@ -171,6 +147,28 @@ type githubStarListItems struct {
 // Star lists and the repositories in them both come 100 at a time.
 // So both are read until there is no next batch.
 func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
+	// Reads my GitHub star lists and the first 100 repositories in each.
+	// If there are more than 100 star lists, reading continues with `$after`
+	const listsQuery = `query($after: String) {
+		viewer {
+			lists(first: 100, after: $after) {
+				pageInfo { hasNextPage endCursor }
+				nodes {
+					id
+					name
+					items(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on Repository { databaseId } } }
+				}
+			}
+		}
+	}`
+	// Reads the repositories of one GitHub star list, continuing after the first 100
+	const itemsQuery = `query($id: ID!, $after: String) {
+		node(id: $id) {
+			... on UserList {
+				items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Repository { databaseId } } }
+			}
+		}
+	}`
 	byRepo := map[int64][]string{}
 	addItems := func(name string, items githubStarListItems) {
 		for _, n := range items.Nodes {
@@ -197,7 +195,7 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 				} `json:"lists"`
 			} `json:"viewer"`
 		}
-		if err := callGraphQL(cfg, githubStarListsQuery, map[string]any{"after": after}, &data); err != nil {
+		if err := callGraphQL(cfg, listsQuery, map[string]any{"after": after}, 0, &data); err != nil {
 			return nil, err
 		}
 		for _, githubStarList := range data.Viewer.Lists.Nodes {
@@ -208,7 +206,7 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 						Items githubStarListItems `json:"items"`
 					} `json:"node"`
 				}
-				if err := callGraphQL(cfg, githubStarListItemsQuery, map[string]any{"id": githubStarList.ID, "after": page.PageInfo.EndCursor}, &more); err != nil {
+				if err := callGraphQL(cfg, itemsQuery, map[string]any{"id": githubStarList.ID, "after": page.PageInfo.EndCursor}, 0, &more); err != nil {
 					return nil, err
 				}
 				page = more.Node.Items

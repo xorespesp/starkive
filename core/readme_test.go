@@ -2,43 +2,35 @@
 package core
 
 import (
-	"bytes"
-	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 )
 
 // Tests how the README file content is made and read back.
-//   - Short text is kept as it is. A UTF-8 byte order mark is removed, and UTF-16 with a byte order mark is turned into UTF-8
-//   - Blank text isn't usable. Text with a NUL byte and text that isn't UTF-8 (an older encoding) are kept as bytes
+//   - Short text is kept as it is. A UTF-8 byte order mark is removed
+//   - Blank text isn't usable
 //   - Long text is cut after its last line break within `maxReadmeBytes`,
-//     or at a character boundary if that line break would keep less than half of it, and the cut line is added
+//     or at a character boundary if there is no line break or it would keep less than half of it, and the cut line is added
 //   - Text over the limit only by blank space at its end loses that space and isn't cut
 //   - Text of exactly `maxReadmeBytes` isn't cut
 func TestBuildReadmeSnapshotFile(t *testing.T) {
 	cases := []struct {
-		name        string
-		sourceBytes string
-		want        string // File content. Empty if not usable
+		name       string
+		readmeText string
+		want       string // File content. Empty if not usable
 	}{
 		{"short", "# Title\nbody\n", "# Title\nbody\n"},
 		{"UTF-8 byte order mark", "\xEF\xBB\xBF# Title\n", "# Title\n"},
-		{"UTF-16 little endian", "\xFF\xFE#\x00 \x00h\x00i\x00", "# hi"},
-		{"UTF-16 big endian", "\xFE\xFF\x00#\x00 \x00h\x00i", "# hi"},
 		{"blank", " \n\t\n", ""},
-		{"NUL byte", "a\x00b", "a\x00b"},
-		{"not UTF-8 (EUC-KR)", "\xC7\xD1\xB1\xDB\n", "\xC7\xD1\xB1\xDB\n"},
-		{"not UTF-8, cut at a line break", strings.Repeat("\xC7\xD1\xB1\xDB\n", 2000),
-			strings.Repeat("\xC7\xD1\xB1\xDB\n", 1638) + readmeCutLine + "\n"},
-		{"UTF-16 without a byte order mark, cut after the NUL of a line break", strings.Repeat("x\x00\n\x00", 3000),
-			strings.Repeat("x\x00\n\x00", maxReadmeBytes/4) + "\n" + readmeCutLine + "\n"},
 		{"exactly the limit", strings.Repeat("a", maxReadmeBytes), strings.Repeat("a", maxReadmeBytes)},
 		{"cut at a line break", strings.Repeat(strings.Repeat("x", 99)+"\n", 100),
 			strings.Repeat(strings.Repeat("x", 99)+"\n", 81) + readmeCutLine + "\n"},
@@ -49,14 +41,14 @@ func TestBuildReadmeSnapshotFile(t *testing.T) {
 		{"over the limit only by blank space at the end", strings.Repeat("a", 8000) + strings.Repeat(" \n", 500), strings.Repeat("a", 8000)},
 	}
 	for _, c := range cases {
-		got, usable := buildReadmeSnapshotFile([]byte(c.sourceBytes))
+		got, usable := buildReadmeSnapshotFile(c.readmeText)
 		if usable != (c.want != "") || string(got) != c.want {
 			t.Errorf("%s: got %q (usable %v)", c.name, got, usable)
 		}
 	}
 
 	// Reading back gives the text without the cut line, and whether it was cut
-	content, _ := buildReadmeSnapshotFile([]byte(strings.Repeat(strings.Repeat("x", 99)+"\n", 100)))
+	content, _ := buildReadmeSnapshotFile(strings.Repeat(strings.Repeat("x", 99)+"\n", 100))
 	if text, isCut := parseReadmeSnapshotFile(content); !isCut || text != strings.Repeat(strings.Repeat("x", 99)+"\n", 81) {
 		t.Errorf("parse cut file: cut %v, %d bytes", isCut, len(text))
 	}
@@ -148,136 +140,389 @@ func TestReadReadmeSnapshotPaths(t *testing.T) {
 	}
 }
 
-// Tests how `FetchReadmeByRepoID` reads each kind of GitHub answer, against a test server.
-//   - A README is decoded, and its extension is kept in lower case only if it is allowed
-//   - 404, 451 and a blank README mean the README is absent. Any other README is kept as bytes
-//   - 429 and a 403 rate limit answer are errors that wrap `errGitHubRateLimited`
-//   - A 403 that isn't a rate limit is an error that doesn't wrap it, so nothing is saved
-//   - 5xx and a timeout are other errors, which say nothing about the README
-//   - A README over 1MB comes with empty content, so its start is read in raw format, cut to `maxReadmeBytes`
-//   - Both requests of a large README share one deadline, and no request is sent after it
-func TestFetchReadmeByRepoID(t *testing.T) {
-	requestsOf16 := &atomic.Int32{}                                   // Requests for README 16. The server answers in its own goroutine, so the count is atomic
-	largeReadme := strings.Repeat(strings.Repeat("x", 99)+"\n", 2000) // 200KB
-	answers := map[string]func(w http.ResponseWriter, r *http.Request){
-		"/repositories/1/readme": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"name":"README.md","size":6,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("# One\n")))
-		},
-		"/repositories/2/readme": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"name":"README.RST","size":5,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("Two\n\n")))
-		},
-		"/repositories/3/readme": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"name":"README.old-md","size":6,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("Three\n")))
-		},
-		"/repositories/4/readme": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"name":"README.md","size":3,"content":%q}`, base64.StdEncoding.EncodeToString([]byte("a\x00b")))
-		},
-		"/repositories/5/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
-		},
-		"/repositories/6/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"Repository access blocked"}`, http.StatusUnavailableForLegalReasons)
-		},
-		"/repositories/7/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"Resource not accessible"}`, http.StatusForbidden)
-		},
-		"/repositories/8/readme": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-RateLimit-Remaining", "0")
-			http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
-		},
-		"/repositories/13/readme": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
-		},
-		"/repositories/14/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"You have exceeded a secondary rate limit"}`, http.StatusForbidden)
-		},
-		"/repositories/15/readme": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"name":"README","size":0,"content":""}`)
-		},
-		"/repositories/9/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"slow down"}`, http.StatusTooManyRequests)
-		},
-		"/repositories/10/readme": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, `{"message":"Server Error"}`, http.StatusInternalServerError)
-		},
-		"/repositories/11/readme": func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(300 * time.Millisecond) // Longer than the time limit the test gives
-			fmt.Fprint(w, `{"name":"README.md","size":0,"content":""}`)
-		},
-		"/repositories/12/readme": func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Accept") == "application/vnd.github.raw+json" {
-				fmt.Fprint(w, largeReadme)
-				return
-			}
-			fmt.Fprintf(w, `{"name":"README.md","size":%d,"content":""}`, len(largeReadme))
-		},
-		"/repositories/16/readme": func(w http.ResponseWriter, r *http.Request) {
-			requestsOf16.Add(1)
-			time.Sleep(150 * time.Millisecond) // Each answer fits in the deadline the test gives, but the two together don't
-			if r.Header.Get("Accept") == "application/vnd.github.raw+json" {
-				fmt.Fprint(w, largeReadme)
-				return
-			}
-			fmt.Fprintf(w, `{"name":"README.md","size":%d,"content":""}`, len(largeReadme))
-		},
+// Tests which file of a folder is picked as the README.
+//   - `readme` alone or with one extension counts, in any case. Two dots, other names, folders, submodules and symbolic links don't
+//   - Markdown comes before another extension, which comes before no extension. A tie goes by byte order
+func TestPickReadmeFileName(t *testing.T) {
+	file := func(name string) githubFolderEntry {
+		return githubFolderEntry{Name: name, Type: "blob", Mode: 0o100644}
 	}
+	cases := []struct {
+		name    string
+		entries []githubFolderEntry
+		want    string
+	}{
+		{"one", []githubFolderEntry{file("LICENSE"), file("Readme.md")}, "Readme.md"},
+		{"no extension", []githubFolderEntry{file("README")}, "README"},
+		{"other extension before none", []githubFolderEntry{file("README"), file("README.rst")}, "README.rst"},
+		{"Markdown first", []githubFolderEntry{file("README.TXT"), file("README"), file("README.md")}, "README.md"},
+		{"markdown extension", []githubFolderEntry{file("README.rst"), file("readme.markdown")}, "readme.markdown"},
+		{"two dots", []githubFolderEntry{file("README.ko.md"), file("README.zh-CN.md")}, ""},
+		{"two dots beside one", []githubFolderEntry{file("README.Music.md"), file("README.md")}, "README.md"},
+		{"byte order", []githubFolderEntry{file("readme.md"), file("README.md")}, "README.md"},
+		{"other names", []githubFolderEntry{file("READMEFIRST.md"), file("docs-readme.md")}, ""},
+		{"folder, submodule, symbolic link", []githubFolderEntry{
+			{Name: "readme", Type: "tree", Mode: 0o40000},
+			{Name: "README.md", Type: "commit", Mode: 0o160000},
+			{Name: "README.rst", Type: "blob", Mode: 0o120000},
+		}, ""},
+	}
+	for _, c := range cases {
+		if got := (&githubFolder{Entries: c.entries}).pickReadmeFileName(); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	var missingFolder *githubFolder
+	if got := missingFolder.pickReadmeFileName(); got != "" {
+		t.Errorf("no folder: %q", got)
+	}
+}
+
+// One repository on the GraphQL test server of `TestFetchReadmesByNodeIDs`
+type testReadmeRepo struct {
+	github    []string          // Files in `.github`. `nil` if the folder doesn't exist
+	root      []string          // Files in the root folder. `nil` for an empty repository
+	docs      []string          // Files in `docs`. `nil` if the folder doesn't exist
+	texts     map[string]string // File path -> text. A file not in it is binary (`text` is `null`)
+	missing   bool              // `true` if GraphQL answers `null` with `NOT_FOUND`
+	other     bool              // `true` if the ID isn't a repository (GraphQL answers `{}`)
+	denied    bool              // `true` if the content query answers `null` with a `FORBIDDEN` error, while the rest of the answer is usable
+	rootFails bool              // `true` if the listing answers the root folder as `null` with an error inside the repository
+	docsFails bool              // `true` if the `docs` listing answers the folder as `null` with an error inside the repository
+	docsGone  bool              // `true` if the `docs` listing answers the repository as `null`, as for one gone after the first query
+	fileGone  bool              // `true` if the content query answers the file as `null`, as for a file gone after the listing
+	links     []string          // Files in the root folder that are symbolic links
+}
+
+// Tests fetching READMEs of many repositories with GraphQL.
+//   - The README is picked from `.github`, then the root, then `docs`, and only repositories with none in the first two get `docs` listed
+//   - The picked file is read by its path, cut like any README, and its extension is kept in lower case
+//   - A repository not found, one with no README anywhere, and a blank README are absent
+//   - An ID that isn't a repository, a binary README, a README whose content query alone failed,
+//     a repository with an error inside it (a folder that failed), a repository gone before the `docs` listing,
+//     and a file gone before the content query give `nil`, so they are asked again later.
+//     The test server answers like GitHub: only the fields asked for, each folder by the path in its expression,
+//     each file by its alias and its own path variable, and an error for a variable that isn't declared with the right type
+//   - A rate limit passes through as an error that wraps `errGitHubRateLimited` (each kind is tested in `TestCallGraphQL`).
+//     A failed query, an answer with no data and an answer whose node count doesn't match are errors that don't wrap it.
+//     The whole call fails even when only the `docs` listing or the content query fails
+//   - A call whose deadline has passed fails with `errDeadlinePassed`, and a query still waiting at the deadline fails then
+func TestFetchReadmesByNodeIDs(t *testing.T) {
+	longReadme := strings.Repeat(strings.Repeat("y", 99)+"\n", 100) // 10KB
+	repos := map[string]testReadmeRepo{
+		"R_md":       {root: []string{"LICENSE", "README.md"}, texts: map[string]string{"README.md": "# MD\n"}},
+		"R_github":   {github: []string{"README.md"}, root: []string{"README.md"}, texts: map[string]string{".github/README.md": "# GitHub\n", "README.md": "# Root\n"}},
+		"R_docs":     {root: []string{"main.c"}, docs: []string{"README.rst"}, texts: map[string]string{"docs/README.rst": "Docs\n"}},
+		"R_none":     {root: []string{"main.c"}, docs: []string{"guide.md"}},
+		"R_empty":    {},
+		"R_gone":     {missing: true},
+		"U_user":     {other: true},
+		"R_binary":   {root: []string{"README.md"}},
+		"R_blank":    {root: []string{"README.md"}, texts: map[string]string{"README.md": " \n"}},
+		"R_noext":    {root: []string{"README"}, texts: map[string]string{"README": "plain\n"}},
+		"R_badext":   {root: []string{"README.old-md"}, texts: map[string]string{"README.old-md": "old\n"}},
+		"R_long":     {root: []string{"README.md"}, texts: map[string]string{"README.md": longReadme}},
+		"R_several":  {root: []string{"README", "README.TXT", "readme.md", "README.md"}, texts: map[string]string{"README.md": "# Upper\n"}},
+		"R_denied":   {root: []string{"README.md"}, texts: map[string]string{"README.md": "# Denied\n"}, denied: true},
+		"R_rootErr":  {root: []string{"README.md"}, rootFails: true},
+		"R_docsErr":  {root: []string{"main.c"}, docs: []string{"README.md"}, docsFails: true},
+		"R_docsGone": {root: []string{"main.c"}, docsGone: true},
+		"R_fileGone": {root: []string{"README.md"}, texts: map[string]string{"README.md": "# Gone\n"}, fileGone: true},
+		"R_link":     {root: []string{"main.c"}, links: []string{"README.md"}, texts: map[string]string{"README.md": "docs/intro.md"}},
+		"R_upper":    {root: []string{"README.MD"}, texts: map[string]string{"README.MD": "# Upper case\n"}},
+	}
+	// Repositories with nothing to read come between the ones with a README, so a position that slips would show
+	ids := []string{"R_md", "R_github", "R_docs", "R_none", "R_empty", "R_gone", "U_user", "R_binary", "R_blank", "R_noext", "R_badext", "R_long", "R_several", "R_denied", "R_rootErr", "R_docsErr", "R_docsGone", "R_fileGone", "R_link", "R_upper"}
+
+	var mu sync.Mutex
+	var failWith func(w http.ResponseWriter) // If not `nil`, every query is answered with it
+	failQuery := ""                          // Kind of the query that `failWith` answers. Empty for every kind
+	queries := []string{}                    // Kind of each query received: `listing`, `docs` or `content`
+	docsAsked := []string{}                  // IDs whose `docs` folder was listed
+	var query string                         // The query being answered. Only the fields it asks for are given, as GitHub does
+	asks := func(name string) bool { return regexp.MustCompile(`[{\s]` + name + `[\s}]`).MatchString(query) }
+	folder := func(names []string, links []string) any {
+		if names == nil {
+			return nil
+		}
+		entries := []map[string]any{}
+		addEntry := func(name string, mode int) {
+			entry := map[string]any{}
+			if asks("name") {
+				entry["name"] = name
+			}
+			if asks("type") {
+				entry["type"] = "blob"
+			}
+			if asks("mode") {
+				entry["mode"] = mode
+			}
+			entries = append(entries, entry)
+		}
+		for _, name := range names {
+			addEntry(name, 0o100644)
+		}
+		for _, name := range links {
+			addEntry(name, 0o120000)
+		}
+		return map[string]any{"entries": entries}
+	}
+	// One folder field of a listing query: its alias and the folder path in its expression (`HEAD:<path>`, empty for the root)
+	folderFields := regexp.MustCompile(`(\w+): object\(expression: "HEAD:([^"]*)"\)`)
+	// Answers repository `id` at position `i` of a listing query, with one field for each folder the query asks for
+	listedRepository := func(i int, id string, errs *[]map[string]any) map[string]any {
+		repo := repos[id]
+		fields := map[string]any{}
+		for _, field := range folderFields.FindAllStringSubmatch(query, -1) {
+			alias, folderPath := field[1], field[2]
+			if (repo.rootFails && folderPath == "") || (repo.docsFails && folderPath == "docs") {
+				fields[alias] = nil
+				*errs = append(*errs, map[string]any{"type": "FORBIDDEN", "path": []any{"nodes", i, alias}, "message": "Something went wrong"})
+				continue
+			}
+			switch folderPath {
+			case ".github":
+				fields[alias] = folder(repo.github, nil)
+			case "":
+				fields[alias] = folder(repo.root, repo.links)
+			case "docs":
+				fields[alias] = folder(repo.docs, nil)
+			default:
+				fields[alias] = nil
+			}
+		}
+		if asks("id") {
+			fields["id"] = id
+		}
+		return fields
+	}
+	// One field of a content query: its alias, the variable of the `node_id`, and the variable of the file path
+	contentFields := regexp.MustCompile(`(\w+): node\(id: \$(\w+)\) \{ \.\.\. on Repository \{ object\(expression: \$(\w+)\)`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		answer, ok := answers[r.URL.Path]
-		if !ok {
-			http.Error(w, `{"message":"unexpected path"}`, http.StatusTeapot)
+		var body struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		query = body.Query
+		kind := "content"
+		switch {
+		case strings.Contains(body.Query, `"HEAD:.github"`):
+			kind = "listing"
+		case strings.Contains(body.Query, `"HEAD:docs"`):
+			kind = "docs"
+		}
+		if failWith != nil && (failQuery == "" || failQuery == kind) {
+			failWith(w)
 			return
 		}
-		answer(w, r)
+		if !isEveryGraphQLVariableDeclared(query) {
+			fmt.Fprint(w, `{"data":null,"errors":[{"message":"Variable is not declared, is declared with another type, or is declared but not used"}]}`)
+			return
+		}
+		data := map[string]any{}
+		errs := []map[string]any{}
+		nodeIDs, _ := body.Variables["ids"].([]any)
+		switch kind {
+		case "listing":
+			queries = append(queries, "listing")
+			nodes := []any{}
+			for i, id := range nodeIDs {
+				repo := repos[id.(string)]
+				switch {
+				case repo.missing:
+					nodes = append(nodes, nil)
+					errs = append(errs, map[string]any{"type": "NOT_FOUND", "path": []any{"nodes", i}, "message": "Could not resolve to a node"})
+				case repo.other:
+					nodes = append(nodes, map[string]any{})
+				default:
+					nodes = append(nodes, listedRepository(i, id.(string), &errs))
+				}
+			}
+			data["nodes"] = nodes
+		case "docs":
+			queries = append(queries, "docs")
+			nodes := []any{}
+			for k, id := range nodeIDs {
+				docsAsked = append(docsAsked, id.(string))
+				if repos[id.(string)].docsGone {
+					nodes = append(nodes, nil)
+					continue
+				}
+				nodes = append(nodes, listedRepository(k, id.(string), &errs))
+			}
+			data["nodes"] = nodes
+		default:
+			queries = append(queries, "content")
+			for _, field := range contentFields.FindAllStringSubmatch(query, -1) {
+				alias, idVariable, pathVariable := field[1], field[2], field[3]
+				nodeID, idGiven := body.Variables[idVariable].(string)
+				path, pathGiven := body.Variables[pathVariable].(string)
+				if !idGiven || !pathGiven || !strings.HasPrefix(path, "HEAD:") {
+					fmt.Fprint(w, `{"data":null,"errors":[{"message":"Variable is used but not given"}]}`)
+					return
+				}
+				repo := repos[nodeID]
+				switch {
+				case repo.denied:
+					data[alias] = nil
+					errs = append(errs, map[string]any{"type": "FORBIDDEN", "path": []any{alias}, "message": "Resource not accessible"})
+				case repo.fileGone:
+					data[alias] = map[string]any{"object": nil}
+				default:
+					file := map[string]any{}
+					if asks("text") {
+						var text any // `nil` (JSON `null`) for a binary file
+						if t, ok := repo.texts[strings.TrimPrefix(path, "HEAD:")]; ok {
+							text = t
+						}
+						file["text"] = text
+					}
+					data[alias] = map[string]any{"object": file}
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
 	}))
 	t.Cleanup(server.Close)
 	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
 
-	cases := []struct {
-		id            int64
-		want          FetchedReadme
-		wantErr       bool // Any error
+	got, err := FetchReadmesByNodeIDs(cfg, ids, time.Now().Add(githubTimeout))
+	wantLong, _ := buildReadmeSnapshotFile(longReadme)
+	absent := &FetchedReadme{isAbsent: true}
+	want := []*FetchedReadme{
+		{extension: "md", content: []byte("# MD\n")},
+		{extension: "md", content: []byte("# GitHub\n")},
+		{extension: "rst", content: []byte("Docs\n")},
+		absent, absent, absent,
+		nil, nil,
+		absent,
+		{content: []byte("plain\n")},
+		{content: []byte("old\n")}, // `old-md` isn't allowed, so it has no extension
+		{extension: "md", content: wantLong},
+		{extension: "md", content: []byte("# Upper\n")},
+		nil, nil, nil, nil, nil,
+		absent, // A symbolic link isn't picked, and nothing else is a README
+		{extension: "md", content: []byte("# Upper case\n")},
+	}
+	if err != nil || fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes(want)) {
+		t.Errorf("READMEs: %v\n got %v", err, derefReadmes(got))
+	}
+	if !slices.Equal(queries, []string{"listing", "docs", "content"}) || !slices.Equal(docsAsked, []string{"R_docs", "R_none", "R_empty", "R_docsErr", "R_docsGone", "R_link"}) {
+		t.Errorf("queries %v, docs asked for %v", queries, docsAsked)
+	}
+
+	queries = nil
+	if got, err := FetchReadmesByNodeIDs(cfg, []string{"R_gone", "U_user"}, time.Now().Add(githubTimeout)); err != nil ||
+		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{absent, nil})) || !slices.Equal(queries, []string{"listing"}) {
+		t.Errorf("nothing to read: %v, %v, queries %v", derefReadmes(got), err, queries)
+	}
+
+	errorCases := []struct {
+		name          string
+		query         string // Kind of the query that fails. Empty for every kind
+		answer        func(w http.ResponseWriter)
 		isRateLimited bool // The error wraps `errGitHubRateLimited`
 	}{
-		{1, FetchedReadme{extension: "md", content: []byte("# One\n")}, false, false},
-		{2, FetchedReadme{extension: "rst", content: []byte("Two\n\n")}, false, false},
-		{3, FetchedReadme{content: []byte("Three\n")}, false, false},                 // `old-md` isn't allowed, so it has no extension
-		{4, FetchedReadme{extension: "md", content: []byte("a\x00b")}, false, false}, // Kept as bytes, like any README that isn't blank
-		{5, FetchedReadme{isAbsent: true}, false, false},
-		{6, FetchedReadme{isAbsent: true}, false, false},
-		{7, FetchedReadme{}, true, false},
-		{8, FetchedReadme{}, true, true},                  // 403 with no requests left
-		{13, FetchedReadme{}, true, true},                 // 403 with `Retry-After`
-		{14, FetchedReadme{}, true, true},                 // 403 that says "rate limit"
-		{9, FetchedReadme{}, true, true},                  // 429
-		{15, FetchedReadme{isAbsent: true}, false, false}, // An empty README, with no dot in its name, isn't read again in raw format
-		{10, FetchedReadme{}, true, false},
-		{11, FetchedReadme{}, true, false},
+		{"rate limit with 200", "", func(w http.ResponseWriter) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			fmt.Fprint(w, `{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
+		}, true},
+		{"rate limit with 403", "", func(w http.ResponseWriter) {
+			http.Error(w, `{"message":"You have exceeded a secondary rate limit"}`, http.StatusForbidden)
+		}, true},
+		{"other error", "", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `{"data":null,"errors":[{"type":"INTERNAL","message":"Something went wrong"}]}`)
+		}, false},
+		{"502 HTML", "", func(w http.ResponseWriter) {
+			http.Error(w, "<html>502 Bad Gateway</html>", http.StatusBadGateway)
+		}, false},
+		{"node count", "", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `{"data":{"nodes":[]}}`)
+		}, false},
+		{"docs node count", "docs", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `{"data":{"nodes":[]}}`)
+		}, false},
+		{"content with no data", "content", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `{"data":null,"errors":[{"type":"INTERNAL","message":"Something went wrong"}]}`)
+		}, false},
+		{"rate limit at the content query", "content", func(w http.ResponseWriter) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			fmt.Fprint(w, `{"data":null,"errors":[{"message":"API rate limit exceeded"}]}`)
+		}, true},
 	}
-	for _, c := range cases {
-		got, err := FetchReadmeByRepoID(cfg, c.id, time.Now().Add(100*time.Millisecond))
-		if (err != nil) != c.wantErr || errors.Is(err, errGitHubRateLimited) != c.isRateLimited || fmt.Sprint(got) != fmt.Sprint(c.want) {
-			t.Errorf("README of %d: %+v, %v", c.id, got, err)
+	for _, c := range errorCases {
+		mu.Lock()
+		failWith = c.answer
+		failQuery = c.query
+		mu.Unlock()
+		got, err := FetchReadmesByNodeIDs(cfg, []string{"R_md", "R_docs"}, time.Now().Add(githubTimeout))
+		if err == nil || got != nil || errors.Is(err, errGitHubRateLimited) != c.isRateLimited {
+			t.Errorf("%s: %v, %v", c.name, got, err)
 		}
 	}
 
-	got, err := FetchReadmeByRepoID(cfg, 12, time.Now().Add(githubTimeout))
-	wantContent, _ := buildReadmeSnapshotFile([]byte(largeReadme))
-	if err != nil || got.isAbsent || got.extension != "md" || !bytes.Equal(got.content, wantContent) {
-		t.Errorf("large README: %v, %d bytes", err, len(got.content))
-	}
-
-	if _, err := FetchReadmeByRepoID(cfg, 16, time.Now().Add(250*time.Millisecond)); err == nil || requestsOf16.Load() != 2 {
-		t.Errorf("large README past one shared deadline: %v, requests %d", err, requestsOf16.Load())
-	}
-	if _, err := FetchReadmeByRepoID(cfg, 1, time.Now().Add(-time.Second)); !errors.Is(err, errDeadlinePassed) {
+	if _, err := FetchReadmesByNodeIDs(cfg, []string{"R_md"}, time.Now().Add(-time.Second)); !errors.Is(err, errDeadlinePassed) {
 		t.Errorf("deadline already passed: %v", err)
 	}
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		fmt.Fprint(w, `{"data":{"nodes":[null]}}`)
+	}))
+	t.Cleanup(slow.Close)
+	start := time.Now()
+	slowCfg := &Config{GitHubAPI: slow.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+	if _, err := FetchReadmesByNodeIDs(slowCfg, []string{"R_md"}, time.Now().Add(100*time.Millisecond)); err == nil || time.Since(start) > 400*time.Millisecond {
+		t.Errorf("slow answer past the deadline: %v after %v", err, time.Since(start))
+	}
+}
+
+// Reports whether GraphQL query `query` declares in its head exactly the variables its body uses,
+// each with the type GitHub expects (`$ids: [ID!]!`, `$id<n>: ID!`, `$path<n>: String!`).
+// GitHub fails the whole query otherwise (docs).
+func isEveryGraphQLVariableDeclared(query string) bool {
+	head, body, _ := strings.Cut(query, "{")
+	declared := map[string]string{} // Variable name -> declared type
+	for _, m := range regexp.MustCompile(`\$(\w+): ([\w!\[\]]+)`).FindAllStringSubmatch(head, -1) {
+		declared[m[1]] = m[2]
+	}
+	used := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\$(\w+)`).FindAllStringSubmatch(body, -1) {
+		used[m[1]] = true
+		wantType := "String!"
+		switch {
+		case m[1] == "ids":
+			wantType = "[ID!]!"
+		case strings.HasPrefix(m[1], "id"):
+			wantType = "ID!"
+		}
+		if declared[m[1]] != wantType {
+			return false
+		}
+	}
+	return len(used) == len(declared)
+}
+
+// Returns the READMEs `readmes` as values, so they print with their content. `nil` stays `nil`
+func derefReadmes(readmes []*FetchedReadme) []any {
+	values := []any{}
+	for _, readme := range readmes {
+		if readme == nil {
+			values = append(values, nil)
+		} else {
+			values = append(values, *readme)
+		}
+	}
+	return values
 }
 
 // Tests what `planReadmeSnapshotUpdate` writes and deletes for one item.
 //   - A new README is written and the absent marker next to it is deleted
 //   - The same content at the same path writes nothing
+//   - Changed content at the same path is written again, and nothing is deleted
 //   - A README under another extension replaces the old file
 //   - An absent README keeps a saved README, and deletes only an absent marker next to it
 //   - An absent README of an item with no saved README writes the absent marker, once

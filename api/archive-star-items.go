@@ -1,4 +1,5 @@
 // `/api/archive-star-items`: API that reads and changes the archive items (`db/star-items.json`).
+// Add and delete also write or delete the item's README snapshot (`db/readmes/`) in the same commit.
 //
 //	GET              -> The raw item file (a JSON array, one item per line). `[]` if the file doesn't exist yet
 //	POST             { repo_full_name_or_url, star_list_id? } -> The added item (Add: adds one repository directly, without a Star)
@@ -16,6 +17,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"regexp"
@@ -111,7 +113,8 @@ func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
 const maxStarredRepoIDsPerRequest = 100_000
 
 // Longest time Add waits for the README of the new repository.
-// A README usually comes in about 0.5 seconds (measured).
+// Fetching one README (two or three GraphQL queries) usually takes about 1 second.
+// The slowest of 20 tries took 1.6 seconds (measured).
 // One that doesn't come in time, or fails, is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
 
@@ -154,7 +157,10 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 		return err
 	}
 
-	readme, readmeErr := core.FetchReadmeByRepoID(cfg, repo.ID, time.Now().Add(addReadmeTimeout))
+	readmes, readmeErr := core.FetchReadmesByNodeIDs(cfg, []string{repo.NodeID}, time.Now().Add(addReadmeTimeout))
+	if readmeErr == nil && readmes[0] == nil {
+		readmeErr = errors.New("GitHub can't tell about the README now") // Sync asks it again later
+	}
 	if readmeErr != nil {
 		log.Printf("add %s: README not saved: %v", repo.FullName, readmeErr)
 	}
@@ -171,7 +177,7 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 		item.StarListIDs = ids
 		a.StarItems = append([]core.StarItem{item}, a.StarItems...)
 		if readmeErr == nil {
-			a.AddFetchedReadmeToSave(item.ID, readme)
+			a.AddFetchedReadmeToSave(item.ID, *readmes[0])
 		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
