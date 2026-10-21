@@ -2,8 +2,11 @@
 package test
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	api "github.com/xorespesp/starkive/api"
 	"github.com/xorespesp/starkive/core"
@@ -70,5 +73,73 @@ func TestReadmeSnapshotsAreListedAgainAfterAConflict(t *testing.T) {
 	rec := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id=1", "", cookie)
 	if _, readmeLeft := gh.files[itemReadme]; rec.Code != 200 || readmeLeft || gh.treeListCalls != 2 {
 		t.Errorf("remove item 1: %d %s, README left %v, listings %d", rec.Code, rec.Body, readmeLeft, gh.treeListCalls)
+	}
+}
+
+// Tests that Add saves the README of the new repository in the same commit.
+//   - A README is saved as `<ID>.<extension>`, and old files of that ID (another extension, a marker) are deleted
+//   - A repository with no README gets the marker
+//   - A README that can't be fetched doesn't stop Add. The item is added with no README file, and no folder is listed
+func TestAddSavesTheReadme(t *testing.T) {
+	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
+	folder := core.ReadmesDBDir + "/98/"
+	cases := []struct {
+		name          string
+		readme        *fakeReadme       // README on the fake GitHub. `nil` if it has none
+		savedBefore   map[string]string // Files of the ID already in the DB repository: path -> content
+		wantFiles     map[string]string // Files of the ID after Add: path -> content
+		wantListCalls int               // Folder listings expected
+	}{
+		{"README", &fakeReadme{name: "README.md", content: "# Linux\n"},
+			map[string]string{folder + "2325298.rst": "old\n", folder + "2325298.no-readme": ""},
+			map[string]string{folder + "2325298.md": "# Linux\n"}, 1},
+		{"no README", nil, nil, map[string]string{folder + "2325298.no-readme": ""}, 1},
+		{"README request fails", &fakeReadme{status: http.StatusInternalServerError}, nil, map[string]string{}, 0},
+	}
+	for _, c := range cases {
+		gh := setup(t, sampleStarItems, sampleStarLists)
+		cookie := login(t)
+		if c.readme != nil {
+			gh.readmes[linuxID] = *c.readme
+		}
+		for path, content := range c.savedBefore {
+			gh.files[path] = content
+		}
+		commitsBefore := len(gh.commits)
+
+		rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, cookie)
+		if rec.Code != 200 || len(gh.commits) != commitsBefore+1 || gh.readmeCalls != 1 || gh.treeListCalls != c.wantListCalls {
+			t.Errorf("%s: %d %s, commits %d -> %d, README requests %d, listings %d",
+				c.name, rec.Code, rec.Body, commitsBefore, len(gh.commits), gh.readmeCalls, gh.treeListCalls)
+		}
+		files := map[string]string{}
+		for path, content := range gh.files {
+			if strings.HasPrefix(path, folder) {
+				files[path] = content
+			}
+		}
+		if fmt.Sprint(files) != fmt.Sprint(c.wantFiles) {
+			t.Errorf("%s: files %q, want %q", c.name, files, c.wantFiles)
+		}
+	}
+}
+
+// Tests that a README given to `core.Archive.AddFetchedReadmeToSave` for an item that isn't in the archive is not saved.
+// Such a file would have no item to own it, and nothing would ever delete it
+func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.readmes[999] = fakeReadme{name: "README.md", content: "# Not archived\n"}
+	fetched, err := core.FetchReadmeByRepoID(cfg, 999, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+		a.AddFetchedReadmeToSave(999, fetched)
+		a.StarItems[0].Note = "x" // A change to commit, so the commit isn't skipped as empty
+		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
+	})
+	if _, saved := gh.files[core.ReadmesDBDir+"/99/999.md"]; err != nil || saved || gh.treeListCalls != 0 {
+		t.Errorf("save README of item 999: %v, saved %v, listings %d", err, saved, gh.treeListCalls)
 	}
 }

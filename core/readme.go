@@ -1,7 +1,8 @@
 // README snapshots.
 // The start of each archived repository's README is kept in its own file under `ReadmesDBDir`, so it stays after the repository is gone.
 // This file covers where the files go (`FetchedReadme.buildPath`), finding them (`readReadmeSnapshotsInFolder`),
-// what they hold (`buildReadmeSnapshotFile`, `parseReadmeSnapshotFile`), and fetching a README from GitHub (`FetchReadmeByRepoID`).
+// what they hold (`buildReadmeSnapshotFile`, `parseReadmeSnapshotFile`), what saving one writes and deletes (`planReadmeSnapshotUpdate`),
+// and fetching a README from GitHub (`FetchReadmeByRepoID`).
 //
 // NOTE: These files aren't JSON arrays like the other data files, on purpose.
 // One file per repository keeps each change small.
@@ -136,6 +137,39 @@ func readReadmeSnapshotPaths(cfg *Config, commitSHA string, itemID int64) ([]str
 	return paths, nil
 }
 
+// Adds to `changes` the writes and deletes that bring the saved snapshots of item `itemID` in line with `fetched`.
+// `saved` are the snapshots of the item at the commit the change is built on, so each of them is safe to delete.
+//   - A README is written unless its file already holds the same content.
+//     Every other snapshot of the item (an old extension, the marker) is deleted, so the item keeps one file
+//   - An absent README keeps a saved README, because keeping what it was is the point.
+//     Only a marker next to it is deleted
+//   - An absent README of an item with no saved README is written as the marker
+func planReadmeSnapshotUpdate(itemID int64, fetched FetchedReadme, saved []readmeSnapshot, changes *FileChangesCommit) {
+	if fetched.isAbsent && slices.ContainsFunc(saved, func(snapshot readmeSnapshot) bool { return !snapshot.isAbsent }) {
+		for _, snapshot := range saved {
+			if snapshot.isAbsent {
+				changes.FilesToDelete = append(changes.FilesToDelete, snapshot.path)
+			}
+		}
+		return
+	}
+	path := fetched.buildPath(itemID)
+	isAlreadySaved := false
+	for _, snapshot := range saved {
+		if snapshot.path == path && snapshot.blobSHA == gitBlobSHA(fetched.content) {
+			isAlreadySaved = true
+		} else if snapshot.path != path {
+			changes.FilesToDelete = append(changes.FilesToDelete, snapshot.path)
+		}
+	}
+	if !isAlreadySaved {
+		if changes.FilesToWrite == nil {
+			changes.FilesToWrite = map[string][]byte{}
+		}
+		changes.FilesToWrite[path] = fetched.content
+	}
+}
+
 // Makes the content of a README file from the README bytes as GitHub stores them.
 //   - Text with a UTF-16 byte order mark is turned into UTF-8. A UTF-8 byte order mark is removed
 //   - Text over `maxReadmeBytes` is cut after its last line break in that range, or at a character boundary if there is none.
@@ -224,16 +258,28 @@ func checkGitHubAPIWithRateLimit(res *http.Response) error {
 	return err
 }
 
-// Fetches the README of repository `id` from GitHub, with each request limited to `timeout`.
-//
-// Args:
-//   - `timeout`: Time limit of each request. `githubTimeout` if 0 or longer than it
+// Error for a request that isn't sent because its deadline has passed
+var errDeadlinePassed = errors.New("deadline passed before the request")
+
+// Returns the time left until `deadline`, as the time limit of the next request.
+// It returns `errDeadlinePassed` if no time is left.
+// A zero `GitHubAPIRequest.Timeout` means the default limit, so a request must never get one in place of "no time left".
+func timeLeftUntil(deadline time.Time) (time.Duration, error) {
+	timeLeft := time.Until(deadline)
+	if timeLeft <= 0 {
+		return 0, errDeadlinePassed
+	}
+	return timeLeft, nil
+}
+
+// Fetches the README of repository `id` from GitHub, with all its requests ending by `deadline`.
+// A README over 1MB needs two requests, and both share the same deadline.
 //
 // Returns:
 //   - The README. It is absent (`isAbsent`) when GitHub answers the first request with 404 or 451,
 //     or when the README isn't usable text (`buildReadmeSnapshotFile`)
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
-//     Any other error (a 403, a timeout, 5xx) means "ask again later", and says nothing about the README
+//     Any other error (a 403, a timeout, 5xx, `errDeadlinePassed`) means "ask again later", and says nothing about the README
 //
 // NOTE: Only 404 (no README) and 451 (blocked for legal reasons) say the README is absent (docs).
 // A 403 says this token can't see it now, not that there is no README.
@@ -241,9 +287,13 @@ func checkGitHubAPIWithRateLimit(res *http.Response) error {
 // It asks by ID (`/repositories/{id}/readme`), so a renamed repository needs no lookup (measured).
 // The default answer has the file name and the content in base64.
 // For a file over 1MB the content is empty (docs), so the start of the file is read again in raw format.
-func FetchReadmeByRepoID(cfg *Config, id int64, timeout time.Duration) (FetchedReadme, error) {
+func FetchReadmeByRepoID(cfg *Config, id int64, deadline time.Time) (FetchedReadme, error) {
+	timeLeft, err := timeLeftUntil(deadline)
+	if err != nil {
+		return FetchedReadme{}, err
+	}
 	path := fmt.Sprintf("/repositories/%d/readme", id)
-	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Timeout: timeout})
+	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Timeout: timeLeft})
 	if err != nil {
 		return FetchedReadme{}, err
 	}
@@ -267,7 +317,7 @@ func FetchReadmeByRepoID(cfg *Config, id int64, timeout time.Duration) (FetchedR
 		// UTF-16 text takes up to twice the bytes of the same text in UTF-8.
 		// Four times `maxReadmeBytes` still keeps more than `maxReadmeBytes` after it is turned into UTF-8,
 		// so `buildReadmeSnapshotFile` cuts it and adds `readmeCutLine`
-		if sourceBytes, err = fetchRawReadme(cfg, path, timeout, 4*maxReadmeBytes); err != nil {
+		if sourceBytes, err = fetchRawReadme(cfg, path, deadline, 4*maxReadmeBytes); err != nil {
 			return FetchedReadme{}, err
 		}
 	} else if sourceBytes, err = base64.StdEncoding.DecodeString(readmeFile.Content); err != nil { // It skips the line breaks GitHub puts in (docs)
@@ -287,10 +337,14 @@ func FetchReadmeByRepoID(cfg *Config, id int64, timeout time.Duration) (FetchedR
 	return FetchedReadme{extension: extension, content: content}, nil
 }
 
-// Fetches the README at API path `path` in raw format, up to `maxBytes` from its start.
+// Fetches the README at API path `path` in raw format, up to `maxBytes` from its start, ending by `deadline`.
 // Reading stops there and the answer is closed, so most of a large README isn't downloaded.
-func fetchRawReadme(cfg *Config, path string, timeout time.Duration, maxBytes int64) ([]byte, error) {
-	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Accept: "application/vnd.github.raw+json", Timeout: timeout})
+func fetchRawReadme(cfg *Config, path string, deadline time.Time, maxBytes int64) ([]byte, error) {
+	timeLeft, err := timeLeftUntil(deadline)
+	if err != nil {
+		return nil, err
+	}
+	res, err := CallGitHubAPI(cfg, path, GitHubAPIRequest{Accept: "application/vnd.github.raw+json", Timeout: timeLeft})
 	if err != nil {
 		return nil, err
 	}

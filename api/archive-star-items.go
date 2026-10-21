@@ -16,10 +16,12 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/xorespesp/starkive/core"
 )
@@ -108,9 +110,16 @@ func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
 // It only keeps a bad request from doing a needlessly large job
 const maxStarredRepoIDsPerRequest = 100_000
 
+// Longest time Add waits for the README of the new repository.
+// A README usually comes in about 0.5 seconds (measured).
+// One that doesn't come in time isn't saved, so Add doesn't keep the user waiting
+const addReadmeTimeout = 5 * time.Second
+
 // Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).
 // It can add a repository without a Star.
 // The time it was added goes where the Star time would be.
+// Its README snapshot is saved in the same commit.
+// If the README can't be fetched within `addReadmeTimeout`, the item is added without it and the failure is only logged.
 //
 // Args:
 //   - `fullNameOrURL`: The `owner/repo` or GitHub repository address the user typed
@@ -145,6 +154,11 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 		return err
 	}
 
+	readme, readmeErr := core.FetchReadmeByRepoID(cfg, repo.ID, time.Now().Add(addReadmeTimeout))
+	if readmeErr != nil {
+		log.Printf("add %s: README not saved: %v", repo.FullName, readmeErr)
+	}
+
 	item := core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}
 	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
 		ids, err := a.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
@@ -156,6 +170,9 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 		}
 		item.StarListIDs = ids
 		a.StarItems = append([]core.StarItem{item}, a.StarItems...)
+		if readmeErr == nil {
+			a.AddFetchedReadmeToSave(item.ID, readme)
+		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
 	if err != nil {

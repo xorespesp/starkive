@@ -1,13 +1,15 @@
 // Storage engine for files in the DB repository, and the archive data.
 // It covers reading a file (`ReadFile`), listing a folder at a commit (`readBlobSHAsInFolder`),
 // writing and deleting several files in one commit (`UpdateFiles`, Git Data API),
-// handling the three archive files together (`UpdateArchive`), commit messages (`CommitMessage`),
+// handling the three archive files together with the README snapshots of their items (`UpdateArchive`), commit messages (`CommitMessage`),
 // and the data file format (`encodeLines`).
 // `db_repo.go` decides which repository to use, and whether it is safe to write to.
 package core
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,9 +106,23 @@ func readItems[T any](cfg *Config, path string) ([]T, error) {
 
 // All archive data. `UpdateArchive` reads the three files together from one commit and puts them here
 type Archive struct {
-	StarItems []StarItem // Archive entries (`StarItemsDBPath`)
-	StarLists []StarList // Star list definitions (`StarListsDBPath`)
-	RepoMeta  []RepoMeta // Snapshots of repository metadata (`RepoMetaDBPath`)
+	StarItems            []StarItem              // Archive entries (`StarItemsDBPath`)
+	StarLists            []StarList              // Star list definitions (`StarListsDBPath`)
+	RepoMeta             []RepoMeta              // Snapshots of repository metadata (`RepoMetaDBPath`)
+	fetchedReadmesToSave map[int64]FetchedReadme // READMEs to save in the same commit (`AddFetchedReadmeToSave`): item ID -> README
+}
+
+// Adds `fetched` to the READMEs to save as the README snapshot of item `itemID`.
+// They are written in the commit that `UpdateArchive` makes for the change, not when this is called.
+// Call it on the archive given to the `change` of `UpdateArchive`.
+// Called on any other archive, it saves nothing.
+// The rules for what is written and deleted are in `planReadmeSnapshotUpdate`.
+// It is ignored if the item isn't in the archive when the change ends.
+func (a *Archive) AddFetchedReadmeToSave(itemID int64, fetched FetchedReadme) {
+	if a.fetchedReadmesToSave == nil {
+		a.fetchedReadmesToSave = map[int64]FetchedReadme{}
+	}
+	a.fetchedReadmesToSave[itemID] = fetched
 }
 
 // Error for a write that has files to write or delete but a commit message that isn't valid (`isValid`).
@@ -314,6 +330,16 @@ func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map
 	return blobSHAByPath, nil
 }
 
+// Returns the git blob sha of file content `content`, the value GitHub gives as the sha of a file.
+// It is the SHA-1 of `blob <size>` and a NUL byte, followed by the content (docs).
+// Comparing it with a listed sha tells whether a file already holds `content`, without reading the file.
+func gitBlobSHA(content []byte) string {
+	hash := sha1.New() // `sha1.New`: a hash that takes its input in parts, like a streaming hash object in C++
+	fmt.Fprintf(hash, "blob %d%c", len(content), 0)
+	hash.Write(content)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
 // Reads the three archive files from one commit, changes them with `change`, and writes only the changed files in one commit.
 // It works on top of `UpdateFiles`.
 //
@@ -333,7 +359,8 @@ func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map
 // The config file (`config.json`) is not part of the archive, so it is not read here.
 // This keeps each save request from making one extra read for nothing.
 // The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
-// Finding them costs one more request (a folder listing) per removed item, so a write that removes no item costs nothing more.
+// READMEs given to `AddFetchedReadmeToSave` are written in the same commit too.
+// Each removed item and each saved README costs one more request (a listing of its folder).
 func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) (*Archive, error) {
 	// Turns the three data files into file content (the `encodeLines` format). Returns path -> content
 	encode := func(a *Archive) (map[string][]byte, error) {
@@ -407,6 +434,18 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 				return FileChangesCommit{}, err
 			}
 			changes.FilesToDelete = append(changes.FilesToDelete, readmePaths...)
+		}
+
+		// Saves the READMEs given to `AddFetchedReadmeToSave`, next to the snapshots already saved for those items
+		for id, fetched := range a.fetchedReadmesToSave {
+			if !isArchivedAfter[id] {
+				continue // A README of an item not in the archive would have no item to own it, and nothing would delete it
+			}
+			snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(id))
+			if err != nil {
+				return FileChangesCommit{}, err
+			}
+			planReadmeSnapshotUpdate(id, fetched, snapshotsByID[id], &changes)
 		}
 		updated = a // If called again, this becomes the new archive
 		return changes, nil

@@ -62,6 +62,8 @@ type fakeGitHub struct {
 	treeStatus          int                           // If not 0, tree creation fails with this status code
 	treeCalls           int                           // Number of tree creation requests
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
+	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README (404)
+	readmeCalls         int                           // Number of README requests
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
 	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
@@ -107,6 +109,13 @@ type fakeRun struct {
 	status     string    // `completed` or `in_progress`
 	conclusion string    // Result when finished: `success`, `failure`, etc. Empty while in progress
 	started    time.Time // Start time
+}
+
+// README of one repository on the fake GitHub
+type fakeReadme struct {
+	name    string // File name (e.g. `README.md`)
+	content string // File content
+	status  int    // If not 0, the README request fails with this status code
 }
 
 // A commit the fake GitHub created that isn't on the branch yet
@@ -462,6 +471,21 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"id":%d,"login":"user%d"}`, id, id)
 
+	case strings.HasPrefix(r.URL.Path, "/repositories/") && strings.HasSuffix(r.URL.Path, "/readme"):
+		// README of a repository by ID: the file name and the content in base64
+		f.readmeCalls++
+		var id int64
+		fmt.Sscanf(r.URL.Path, "/repositories/%d/readme", &id)
+		readme, ok := f.readmes[id]
+		switch {
+		case !ok:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case readme.status != 0:
+			http.Error(w, `{"message":"README failed"}`, readme.status)
+		default:
+			fmt.Fprintf(w, `{"name":%q,"size":%d,"content":%q}`, readme.name, len(readme.content), base64.StdEncoding.EncodeToString([]byte(readme.content)))
+		}
+
 	case r.URL.Path == "/repos/torvalds/linux":
 		// One repository to look up when adding a repository directly (Add)
 		io.WriteString(w, `{"id":2325298,"node_id":"R_linux","full_name":"torvalds/linux"}`)
@@ -622,7 +646,7 @@ func setup(t *testing.T, starItems string, starLists string) *fakeGitHub {
 func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fakeGitHub {
 	gh := &fakeGitHub{files: map[string]string{}, head: "commit-0", snapshots: map[string]map[string]string{},
 		trees: map[string]map[string]string{}, pending: map[string]fakeCommit{}, parents: map[string]string{},
-		workflowState: "active"}
+		readmes: map[int64]fakeReadme{}, workflowState: "active"}
 	if starItems != "" {
 		gh.files[core.StarItemsDBPath] = starItems
 	}

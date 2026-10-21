@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -145,7 +146,9 @@ func TestReadReadmeSnapshotPaths(t *testing.T) {
 //   - A 403 that isn't a rate limit is an error that doesn't wrap it, so nothing is saved
 //   - 5xx and a timeout are other errors, which say nothing about the README
 //   - A README over 1MB comes with empty content, so its start is read in raw format, cut to `maxReadmeBytes`
+//   - Both requests of a large README share one deadline, and no request is sent after it
 func TestFetchReadmeByRepoID(t *testing.T) {
+	requestsOf16 := &atomic.Int32{}                                   // Requests for README 16. The server answers in its own goroutine, so the count is atomic
 	largeReadme := strings.Repeat(strings.Repeat("x", 99)+"\n", 2000) // 200KB
 	answers := map[string]func(w http.ResponseWriter, r *http.Request){
 		"/repositories/1/readme": func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +203,15 @@ func TestFetchReadmeByRepoID(t *testing.T) {
 			}
 			fmt.Fprintf(w, `{"name":"README.md","size":%d,"content":""}`, len(largeReadme))
 		},
+		"/repositories/16/readme": func(w http.ResponseWriter, r *http.Request) {
+			requestsOf16.Add(1)
+			time.Sleep(150 * time.Millisecond) // Each answer fits in the deadline the test gives, but the two together don't
+			if r.Header.Get("Accept") == "application/vnd.github.raw+json" {
+				fmt.Fprint(w, largeReadme)
+				return
+			}
+			fmt.Fprintf(w, `{"name":"README.md","size":%d,"content":""}`, len(largeReadme))
+		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		answer, ok := answers[r.URL.Path]
@@ -234,15 +246,66 @@ func TestFetchReadmeByRepoID(t *testing.T) {
 		{11, FetchedReadme{}, true, false},
 	}
 	for _, c := range cases {
-		got, err := FetchReadmeByRepoID(cfg, c.id, 100*time.Millisecond)
+		got, err := FetchReadmeByRepoID(cfg, c.id, time.Now().Add(100*time.Millisecond))
 		if (err != nil) != c.wantErr || errors.Is(err, errGitHubRateLimited) != c.isRateLimited || fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("README of %d: %+v, %v", c.id, got, err)
 		}
 	}
 
-	got, err := FetchReadmeByRepoID(cfg, 12, 0)
+	got, err := FetchReadmeByRepoID(cfg, 12, time.Now().Add(githubTimeout))
 	wantContent, _ := buildReadmeSnapshotFile([]byte(largeReadme))
 	if err != nil || got.isAbsent || got.extension != "md" || !bytes.Equal(got.content, wantContent) {
 		t.Errorf("large README: %v, %d bytes", err, len(got.content))
+	}
+
+	if _, err := FetchReadmeByRepoID(cfg, 16, time.Now().Add(250*time.Millisecond)); err == nil || requestsOf16.Load() != 2 {
+		t.Errorf("large README past one shared deadline: %v, requests %d", err, requestsOf16.Load())
+	}
+	if _, err := FetchReadmeByRepoID(cfg, 1, time.Now().Add(-time.Second)); !errors.Is(err, errDeadlinePassed) {
+		t.Errorf("deadline already passed: %v", err)
+	}
+}
+
+// Tests what `planReadmeSnapshotUpdate` writes and deletes for one item.
+//   - A new README is written and the marker next to it is deleted
+//   - The same content at the same path writes nothing
+//   - A README under another extension replaces the old file
+//   - An absent README keeps a saved README, and deletes only a marker next to it
+//   - An absent README of an item with no saved README writes the marker, once
+func TestPlanReadmeSnapshotUpdate(t *testing.T) {
+	fetched := FetchedReadme{extension: "md", content: []byte("# Title\n")}
+	absent := FetchedReadme{isAbsent: true}
+	savedMarkdown := readmeSnapshot{path: "db/readmes/45/12345.md", blobSHA: gitBlobSHA([]byte("# Title\n"))}
+	oldMarkdown := readmeSnapshot{path: "db/readmes/45/12345.md", blobSHA: gitBlobSHA([]byte("# Old\n"))}
+	savedMarker := readmeSnapshot{path: "db/readmes/45/12345.no-readme", blobSHA: gitBlobSHA(nil), isAbsent: true}
+	savedText := readmeSnapshot{path: "db/readmes/45/12345.rst", blobSHA: "old"}
+
+	cases := []struct {
+		name        string
+		fetched     FetchedReadme
+		saved       []readmeSnapshot
+		wantWritten []string
+		wantDeleted []string
+	}{
+		{"new README", fetched, []readmeSnapshot{savedMarker}, []string{savedMarkdown.path}, []string{savedMarker.path}},
+		{"same content", fetched, []readmeSnapshot{savedMarkdown}, nil, nil},
+		{"changed content", fetched, []readmeSnapshot{oldMarkdown}, []string{savedMarkdown.path}, nil},
+		{"other extension", fetched, []readmeSnapshot{savedText}, []string{savedMarkdown.path}, []string{savedText.path}},
+		{"absent with a saved README", absent, []readmeSnapshot{savedMarkdown}, nil, nil},
+		{"absent with a saved README and a marker", absent, []readmeSnapshot{savedMarkdown, savedMarker}, nil, []string{savedMarker.path}},
+		{"absent with nothing saved", absent, nil, []string{savedMarker.path}, nil},
+		{"absent with the marker saved", absent, []readmeSnapshot{savedMarker}, nil, nil},
+	}
+	for _, c := range cases {
+		changes := FileChangesCommit{}
+		planReadmeSnapshotUpdate(12345, c.fetched, c.saved, &changes)
+		written := []string{}
+		for path := range changes.FilesToWrite {
+			written = append(written, path)
+		}
+		// `fmt.Sprint` prints a `nil` slice and an empty one the same way, so "nothing" compares equal either way
+		if fmt.Sprint(written) != fmt.Sprint(c.wantWritten) || fmt.Sprint(changes.FilesToDelete) != fmt.Sprint(c.wantDeleted) {
+			t.Errorf("%s: written %q, deleted %q", c.name, written, changes.FilesToDelete)
+		}
 	}
 }
