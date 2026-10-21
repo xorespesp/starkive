@@ -1,10 +1,10 @@
-// `/api/sync-archive`: API for syncing the archive with GitHub (adding new Stars, refreshing the metadata snapshot) and for the auto sync settings.
+// `/api/sync-archive`: API for syncing the archive with GitHub (adding new Stars, refreshing the metadata and README snapshots) and for the auto sync settings.
 //
 //	GET              Scheduled call. The DB repository's workflow (`starkive-sync.yml`) calls it every day,
 //	                 with the sync key in `Authorization: Bearer` -> { status }.
 //	                 `status` is `not_due` (not a day to sync) or `synced` (synced). 401 if the key is missing or wrong.
 //	                 If the sync fails, it answers 502, so the workflow fails and GitHub notifies the user
-//	POST             Sync now: a signed-in user syncs right away, whatever the interval -> { starred, added, meta_checked, unavailable }
+//	POST             Sync now: a signed-in user syncs right away, whatever the interval -> { starred, added, meta_checked, unavailable, readmes_checked }
 //	PATCH            { enabled?, sync_interval_days? } -> The changed auto sync status (`core.SyncStatus`).
 //	                 `enabled` turns the DB repository's workflow itself on or off,
 //	                 and writes the state the person chose (`enabled_since`) to `config.json`.

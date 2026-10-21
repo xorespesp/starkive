@@ -301,26 +301,29 @@ func ArchiveStarredRepos(cfg *Config, starredRepos []StarredRepo, starListIDs []
 
 // Result of one sync. It is the answer to Sync now in the dashboard, and it is also written to the server log
 type SyncResult struct {
-	Starred     int `json:"starred"`      // Number of repositories starred on GitHub
-	Added       int `json:"added"`        // Number newly archived this time
-	MetaChecked int `json:"meta_checked"` // Number of repositories whose metadata snapshot was checked
-	Unavailable int `json:"unavailable"`  // Number of repositories that can't be found on GitHub
+	NumStarredRepos     int `json:"starred"`         // Number of repositories starred on GitHub
+	NumAddedRepos       int `json:"added"`           // Number newly archived this time
+	NumMetaCheckedRepos int `json:"meta_checked"`    // Number of repositories whose metadata snapshot was checked
+	NumUnavailableRepos int `json:"unavailable"`     // Number of repositories that can't be found on GitHub
+	NumCheckedReadmes   int `json:"readmes_checked"` // Number of READMEs fetched and compared with the saved ones this time
 }
 
 // Brings the archive in line with GitHub.
 //  1. Adds my GitHub Stars that aren't in the archive (`ArchiveStarredRepos`)
 //  2. Refreshes the metadata snapshots within `metaRefreshBudget`, or the time left before `deadline` if that is shorter (`RefreshMeta`)
+//  3. Refreshes the README snapshots with the time left before `deadline` (`SyncReadmeSnapshotsWithGitHub`).
+//     Repositories that the metadata step found missing aren't asked. If that step failed, none are skipped
 //
 // Args:
-//   - `deadline`: Time after which no new request of the metadata step starts.
-//     That step leaves what is left for the next sync.
+//   - `deadline`: Time after which the metadata and README steps start no new request.
+//     They leave what is left for the next sync.
 //     Adding new Stars doesn't check it
 //
 // Returns:
 //   - The counts (`SyncResult`). Even if a step failed, the counts of the steps that succeeded are filled in
-//   - The errors of the failed steps joined together, each with its step name ("archive new stars", "refresh repo meta")
+//   - The errors of the failed steps joined together, each with its step name ("archive new stars", "refresh repo meta", "refresh readmes")
 //
-// NOTE: The two steps are independent, so even if one fails the other runs to the end.
+// NOTE: The steps are independent, so even if one fails the others run to the end.
 // Adding comes first, so new items usually get a snapshot in the same run.
 // If the branch just written briefly shows the old commit, or the budget runs short, they get it in the next run.
 // Each run compares all Stars with the archive.
@@ -332,8 +335,8 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 
 	starredRepos, err := FetchAllStarredRepos(cfg)
 	if err == nil {
-		result.Starred = len(starredRepos)
-		result.Added, err = ArchiveStarredRepos(cfg, starredRepos, []int64{}, "sync(star-items)")
+		result.NumStarredRepos = len(starredRepos)
+		result.NumAddedRepos, err = ArchiveStarredRepos(cfg, starredRepos, []int64{}, "sync(star-items)")
 	}
 	if err != nil {
 		errs = append(errs, fmt.Errorf("archive new stars: %w", err)) // Wrapped with `%w`, so `errors.As` still finds the inner error (`HTTPError`, `GitHubAPIError`)
@@ -341,11 +344,17 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 
 	meta, err := RefreshMeta(cfg, min(metaRefreshBudget, time.Until(deadline))) // `min`: built into Go since 1.21
 	if err == nil {
-		result.MetaChecked, result.Unavailable = meta.Checked, meta.Unavailable
+		result.NumMetaCheckedRepos, result.NumUnavailableRepos = meta.NumCheckedRepos, len(meta.UnavailableRepoIDs)
 	} else {
 		errs = append(errs, fmt.Errorf("refresh repo meta: %w", err))
 	}
 
-	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, errors: %v", result.Starred, result.Added, result.MetaChecked, result.Unavailable, errs)
+	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(cfg, deadline, meta.UnavailableRepoIDs, time.Now())
+	if err != nil {
+		errs = append(errs, fmt.Errorf("refresh readmes: %w", err))
+	}
+
+	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, readmes checked: %d, errors: %v",
+		result.NumStarredRepos, result.NumAddedRepos, result.NumMetaCheckedRepos, result.NumUnavailableRepos, result.NumCheckedReadmes, errs)
 	return result, errors.Join(errs...)
 }

@@ -112,7 +112,7 @@ const maxStarredRepoIDsPerRequest = 100_000
 
 // Longest time Add waits for the README of the new repository.
 // A README usually comes in about 0.5 seconds (measured).
-// One that doesn't come in time isn't saved, so Add doesn't keep the user waiting
+// One that doesn't come in time is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
 
 // Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).

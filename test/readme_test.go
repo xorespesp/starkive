@@ -187,3 +187,98 @@ func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
 		t.Errorf("raw metadata file: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// Returns a time on sync day `dayNumber` (days since 1970-01-01, each starting at 06:00 UTC), to pick today's README group
+func syncDay(dayNumber int) time.Time {
+	return time.Unix(0, 0).UTC().Add(6*time.Hour + time.Duration(dayNumber)*24*time.Hour + time.Hour)
+}
+
+// Tests which READMEs the README sync step (`core.SyncReadmeSnapshotsWithGitHub`) checks, and what it writes.
+//   - An item with no snapshot is always checked
+//   - An item with a snapshot is checked only on the day of its group (`ID % 61`)
+//   - A changed README is written again, and a README under a new extension replaces the old file
+//   - Items in `skippedIDs` aren't asked
+//   - Everything checked goes in one `sync(readmes)` commit that lists the saved READMEs
+func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/01/1.txt"] = "Old\n" // Saved under another extension than the new README
+	gh.readmes[1] = fakeReadme{name: "README.md", content: "# New\n"}
+	gh.readmes[2] = fakeReadme{name: "README.rst", content: "Two\n"}
+
+	// Day 2: item 1 has a snapshot and isn't in group 2, so only item 2 (no snapshot) is checked
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(2))
+	if err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.txt") != "Old\n" || gh.readFile(core.ReadmesDBDir+"/02/2.rst") != "Two\n" {
+		t.Errorf("day 2: %d %v, files %q", checked, err, gh.files)
+	}
+
+	// Day 1: item 1 is in group 1, so its changed README is written. Item 2 now has a snapshot and isn't in group 1
+	commitsBefore := len(gh.commits)
+	checked, err = core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(1))
+	_, oldFileLeft := gh.files[core.ReadmesDBDir+"/01/1.txt"]
+	if err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# New\n" || oldFileLeft || len(gh.commits) != commitsBefore+1 ||
+		gh.commits[len(gh.commits)-1] != "sync(readmes): update readmes of 1 repo\n\nSaved:\n- a/one" {
+		t.Errorf("day 1: %d %v, commits %q", checked, err, gh.commits[commitsBefore:])
+	}
+
+	// A skipped item isn't asked, even with no snapshot
+	delete(gh.files, core.ReadmesDBDir+"/02/2.rst")
+	readmeCallsBefore := gh.readmeCalls
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), []int64{2}, syncDay(2)); err != nil || checked != 0 || gh.readmeCalls != readmeCallsBefore {
+		t.Errorf("skipped item: %d %v, README requests %d -> %d", checked, err, readmeCallsBefore, gh.readmeCalls)
+	}
+}
+
+// Tests that the README sync step deletes the snapshots of items no longer in the archive.
+// With nothing to check, it still makes a commit for them, with a subject that says so
+func TestSyncReadmeSnapshotsWithGitHubDeletesSnapshotsOfRemovedItems(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cfg := loadTestConfig(t)
+	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
+	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
+	gh.files[core.ReadmesDBDir+"/03/3.md"] = "# Removed item\n" // Item 3 isn't in the archive
+
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(3)) // Group 3: neither item 1 nor item 2
+	_, orphanLeft := gh.files[core.ReadmesDBDir+"/03/3.md"]
+	if err != nil || checked != 0 || orphanLeft || gh.commits[len(gh.commits)-1] != "sync(readmes): remove readmes of 1 repo no longer in the archive" {
+		t.Errorf("%d %v, orphan left %v, commits %q", checked, err, orphanLeft, gh.commits)
+	}
+}
+
+// Tests the limits of the README sync step.
+//   - More than `maxReadmesPerCommit` (300) items go in several commits
+//   - A rate limit answer stops it early without an error, and the READMEs fetched before it are committed
+//   - With too little time before the deadline, it sends no README request
+func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
+	manyItems := []string{}
+	for id := 1; id <= 305; id++ {
+		manyItems = append(manyItems, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	gh := setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
+	cfg := loadTestConfig(t)
+	commitsBefore := len(gh.commits)
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0)); err != nil || checked != 305 || len(gh.commits) != commitsBefore+2 {
+		t.Errorf("305 items: %d %v, commits %d -> %d", checked, err, commitsBefore, len(gh.commits))
+	}
+
+	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
+	cfg = loadTestConfig(t)
+	gh.readmeRateLimitFrom = 11 // The first 10 README requests are answered, then GitHub answers 429
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, testDeadline(), nil, syncDay(0))
+	savedFiles := 0
+	for path := range gh.files {
+		if strings.HasPrefix(path, core.ReadmesDBDir+"/") {
+			savedFiles++
+		}
+	}
+	// The fake GitHub answers one request at a time, and each of the 6 goroutines stops after its first 429
+	if err != nil || checked != 10 || savedFiles != 10 || gh.readmeCalls > 10+6 {
+		t.Errorf("rate limit: %d %v, files %d, README requests %d", checked, err, savedFiles, gh.readmeCalls)
+	}
+
+	gh = setup(t, sampleStarItems, sampleStarLists)
+	cfg = loadTestConfig(t)
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(cfg, time.Now().Add(30*time.Second), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeCalls != 0 {
+		t.Errorf("no time: %d %v, README requests %d", checked, err, gh.readmeCalls)
+	}
+}

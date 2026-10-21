@@ -183,8 +183,8 @@ const metaRefreshParallel = 6
 
 // Result of one snapshot refresh
 type MetaRefreshResult struct {
-	Checked     int `json:"checked"`     // Number of repositories asked of GitHub this time (batches whose request failed aren't counted)
-	Unavailable int `json:"unavailable"` // Number of repositories in the "not found" state after the refresh
+	NumCheckedRepos    int     // Number of repositories asked of GitHub this time (batches whose request failed aren't counted)
+	UnavailableRepoIDs []int64 // IDs of the repositories in the "not found" state after the refresh
 }
 
 // Refreshes the metadata snapshots (`db/repo-meta.json`) of the repositories in the archive with GitHub's current values.
@@ -203,7 +203,7 @@ type MetaRefreshResult struct {
 //   - `budget`: Time available. It keeps the work within the time limit of the sync
 //
 // Returns:
-//   - The number checked and the number not found
+//   - The number checked and the IDs not found
 //
 // NOTE: Because of the random order, different repositories get checked in each run, even when there are too many to check at once.
 // Items have no check time, so the file doesn't change when the content is the same.
@@ -344,10 +344,10 @@ func RefreshMeta(cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
 	if err != nil {
 		return MetaRefreshResult{}, err
 	}
-	result := MetaRefreshResult{Checked: checked}
+	result := MetaRefreshResult{NumCheckedRepos: checked}
 	for _, m := range updated.RepoMeta {
 		if m.UnavailableSince != "" {
-			result.Unavailable++
+			result.UnavailableRepoIDs = append(result.UnavailableRepoIDs, m.ID)
 		}
 	}
 	return result, nil

@@ -64,6 +64,7 @@ type fakeGitHub struct {
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README (404)
 	readmeCalls         int                           // Number of README requests
+	readmeRateLimitFrom int                           // If not 0, README requests from this one on (counting from 1) get the rate limit answer 429
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
 	refLostReply        bool                          // If `true`, the branch move is applied but the response is 502 (GitHub applied it, then the response was lost)
@@ -172,6 +173,10 @@ func copyFiles(files map[string]string) map[string]string {
 func gitBlobSHA(content string) string {
 	return fmt.Sprintf("%x", sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content))))
 }
+
+// Returns a sync deadline far enough away that every sync step runs to the end in a test.
+// The README step keeps time for its commit before the deadline (`readmeCommitReserve`), so a short deadline would skip it
+func testDeadline() time.Time { return time.Now().Add(time.Hour) }
 
 // Makes a fake repository ID from the repository name (`owner/repo`). It is the CRC32 of the name, so the same name always gives the same ID
 func makeRepoID(name string) int64 { return int64(crc32.ChecksumIEEE([]byte(name))) }
@@ -474,6 +479,10 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/repositories/") && strings.HasSuffix(r.URL.Path, "/readme"):
 		// README of a repository by ID: the file name and the content in base64
 		f.readmeCalls++
+		if f.readmeRateLimitFrom != 0 && f.readmeCalls >= f.readmeRateLimitFrom {
+			http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
 		var id int64
 		fmt.Sscanf(r.URL.Path, "/repositories/%d/readme", &id)
 		readme, ok := f.readmes[id]
@@ -668,8 +677,8 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 
 // Format of DB repository commit subjects: `<who>(<file>): <summary>`.
 // Who is `user` (a person's edit) or `sync` (auto sync).
-// File is the name of the DB repository file that the commit changed
-var commitSubjectRule = regexp.MustCompile(`^(user|sync)\((star-items|star-lists|repo-meta|config|workflow)\): \S`)
+// File is the DB repository file that the commit changed, or the folder `readmes` (`core.ReadmesDBDir`)
+var commitSubjectRule = regexp.MustCompile(`^(user|sync)\((star-items|star-lists|repo-meta|readmes|config|workflow)\): \S`)
 
 // Reports a test failure for each commit made on the fake GitHub during the test whose subject breaks the format (`commitSubjectRule`).
 // `setupWithoutGitHubApp` calls it when the test ends.
@@ -1296,7 +1305,8 @@ func TestRepoMetaDropsInaccessible(t *testing.T) {
 // Tests the sync (`core.Sync`).
 //   - New Stars go at the top of the archive in GitHub's order. Existing items (including notes) aren't touched
 //   - Metadata snapshots are made in archive order
-//   - There are two commits, one for adding and one for refreshing snapshots. The add commit's body lists the added repositories
+//   - There are three commits: adding, refreshing metadata snapshots, and refreshing README snapshots.
+//     The add commit's body lists the added repositories
 //   - Running it again changes nothing, so there is no commit
 func TestSync(t *testing.T) {
 	gh := setup(t, "", "")
@@ -1306,11 +1316,11 @@ func TestSync(t *testing.T) {
 		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
 
 	cfg := newTestConfig()
-	result, err := core.Sync(cfg, time.Now().Add(time.Minute))
+	result, err := core.Sync(cfg, testDeadline())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result != (core.SyncResult{Starred: 4, Added: 3, MetaChecked: 4, Unavailable: 0}) {
+	if result != (core.SyncResult{NumStarredRepos: 4, NumAddedRepos: 3, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0, NumCheckedReadmes: 4}) {
 		t.Errorf("result = %+v", result)
 	}
 	lines := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")
@@ -1328,17 +1338,21 @@ func TestSync(t *testing.T) {
 	want := []string{
 		"sync(star-items): archive 3 stars\n\n- new/first\n- new/second\n- new/third",
 		"sync(repo-meta): refresh 4 repos, 0 unavailable",
+		"sync(readmes): update readmes of 4 repos\n\nNo README:\n- new/first\n- new/second\n- new/third\n- old/archived",
 	}
 	if strings.Join(gh.commits, "|") != strings.Join(want, "|") {
 		t.Errorf("commits = %q", gh.commits)
 	}
 
-	// Running it again has nothing to add and no changed metadata, so no commit is made
-	if result, err = core.Sync(cfg, time.Now().Add(time.Minute)); err != nil || result != (core.SyncResult{Starred: 4, Added: 0, MetaChecked: 4, Unavailable: 0}) {
+	// Running it again has nothing to add, no changed metadata and no changed README, so no commit is made.
+	// The READMEs of today's group are asked again, and which items are in it depends on the date, so that count isn't compared
+	result, err = core.Sync(cfg, testDeadline())
+	result.NumCheckedReadmes = 0
+	if err != nil || result != (core.SyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {
 		t.Errorf("second run: %+v %v", result, err)
 	}
-	if len(gh.commits) != 2 {
-		t.Errorf("second run should not commit: %q", gh.commits[2:])
+	if len(gh.commits) != 3 {
+		t.Errorf("second run should not commit: %q", gh.commits[3:])
 	}
 }
 
@@ -1352,21 +1366,21 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/kept", "a/vanishing"}
 	cfg := newTestConfig()
-	if _, err := core.Sync(cfg, time.Now().Add(time.Minute)); err != nil {
+	if _, err := core.Sync(cfg, testDeadline()); err != nil {
 		t.Fatal(err)
 	}
 	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
 
 	// If the query fails because of a GitHub outage, nothing is recorded as "gone"
 	gh.graphqlDown = true
-	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || result.Unavailable != 0 || result.Checked != 0 {
+	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
 		t.Errorf("outage: %+v %v", result, err)
 	}
 	gh.graphqlDown = false
 
 	// When deleted, the snapshot (description, etc.) stays and only the time is added
 	gh.gone = map[string]bool{vanishingID: true}
-	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || result.Unavailable != 1 {
+	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Errorf("vanished: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]
@@ -1395,7 +1409,7 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	}
 
 	// With no time, it neither asks nor changes anything
-	if result, err := core.RefreshMeta(cfg, 0); err != nil || result.Checked != 0 {
+	if result, err := core.RefreshMeta(cfg, 0); err != nil || result.NumCheckedRepos != 0 {
 		t.Errorf("no budget: %+v %v", result, err)
 	}
 }
@@ -1613,7 +1627,7 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 	}
 
 	// Sync: adds the other new Stars. For the same GitHub star list, they must go into the same star list as Import
-	if _, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute)); err != nil {
+	if _, err := core.Sync(newTestConfig(), testDeadline()); err != nil {
 		t.Fatal(err)
 	}
 	var starLists []core.StarList
@@ -1690,8 +1704,8 @@ func TestNoteLengthLimit(t *testing.T) {
 	}
 }
 
-// Tests that the two sync steps (adding new Stars, refreshing snapshots) don't block each other.
-// If adding fails, the snapshot refresh still runs to the end and commits.
+// Tests that the sync steps (adding new Stars, refreshing metadata and README snapshots) don't block each other.
+// If adding fails, the snapshot refreshes still run to the end and commit.
 // The error has the name of the failed step. When the outage ends, the next run fills in the missing Stars
 func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -1699,17 +1713,18 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 	gh.githubStarListsDown = true // Adding new Stars needs the GitHub star lists, and only that query fails
 
 	// Adding new Stars fails, but the unrelated snapshot refresh runs to the end and commits. The error comes back with the step name
-	result, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute))
+	result, err := core.Sync(newTestConfig(), testDeadline())
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)
 	}
-	if result.MetaChecked == 0 || len(gh.commits) != 1 || !strings.HasPrefix(gh.commits[0], "sync(repo-meta): ") {
+	if result.NumMetaCheckedRepos == 0 || result.NumCheckedReadmes == 0 || len(gh.commits) != 2 ||
+		!strings.HasPrefix(gh.commits[0], "sync(repo-meta): ") || !strings.HasPrefix(gh.commits[1], "sync(readmes): ") {
 		t.Errorf("meta refresh must still run: %+v, commits %q", result, gh.commits)
 	}
 
 	// When the outage ends, the next run fills in the missing Stars
 	gh.githubStarListsDown = false
-	if result, err := core.Sync(newTestConfig(), time.Now().Add(time.Minute)); err != nil || result.Added != 1 {
+	if result, err := core.Sync(newTestConfig(), testDeadline()); err != nil || result.NumAddedRepos != 1 {
 		t.Errorf("next sync: %+v %v", result, err)
 	}
 }
@@ -1864,7 +1879,7 @@ func TestUpdateSkipsUntouchedMissingFiles(t *testing.T) {
 func TestSnapshotOfRepoVanishedBeforeFirstCheck(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.gone = map[string]bool{"R_2": true} // A repository already gone at the first check
-	if result, err := core.RefreshMeta(newTestConfig(), time.Minute); err != nil || result.Unavailable != 1 {
+	if result, err := core.RefreshMeta(newTestConfig(), time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Fatalf("refresh: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]

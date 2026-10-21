@@ -80,7 +80,7 @@ var scheduledAt = time.Date(2026, 10, 14, 18, 17, 0, 0, time.UTC)
 func findSyncDay(t *testing.T, cfg *core.Config) int {
 	due := -1
 	for day := 0; day < 3; day++ { // Runs each of the three days and finds the day that synced
-		got, err := core.RunScheduledSync(cfg, time.Now().Add(time.Minute), scheduledAt.AddDate(0, 0, day))
+		got, err := core.RunScheduledSync(cfg, testDeadline(), scheduledAt.AddDate(0, 0, day))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +125,7 @@ func TestScheduledSync(t *testing.T) {
 	cfg := loadTestConfig(t)
 	due := findSyncDay(t, cfg)
 	late := scheduledAt.AddDate(0, 0, due).Add(10 * time.Hour)
-	if got, err := core.RunScheduledSync(cfg, time.Now().Add(time.Minute), late); err != nil || got != "synced" {
+	if got, err := core.RunScheduledSync(cfg, testDeadline(), late); err != nil || got != "synced" {
 		t.Errorf("a run delayed past midnight UTC: %q %v", got, err)
 	}
 
@@ -178,7 +178,7 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		gh.mu.Lock()
 		gh.runs = c.runs
 		gh.mu.Unlock()
-		if got, err := core.RunScheduledSync(cfg, time.Now().Add(time.Minute), notDue); err != nil || got != c.want {
+		if got, err := core.RunScheduledSync(cfg, testDeadline(), notDue); err != nil || got != c.want {
 			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
 		}
 	}

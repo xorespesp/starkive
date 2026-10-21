@@ -2,7 +2,8 @@
 // The start of each archived repository's README is kept in its own file under `ReadmesDBDir`, so it stays after the repository is gone.
 // This file covers where the files go (`FetchedReadme.buildPath`), finding them (`readReadmeSnapshotsInFolder`),
 // what they hold (`buildReadmeSnapshotFile`, `parseReadmeSnapshotFile`), what saving one writes and deletes (`planReadmeSnapshotUpdate`),
-// fetching a README from GitHub (`FetchReadmeByRepoID`), and reading a saved one back (`ReadReadmeSnapshot`).
+// fetching a README from GitHub (`FetchReadmeByRepoID`), reading a saved one back (`ReadReadmeSnapshot`),
+// and the sync step that keeps them up to date (`SyncReadmeSnapshotsWithGitHub`).
 //
 // NOTE: These files aren't JSON arrays like the other data files, on purpose.
 // One file per repository keeps each change small.
@@ -17,11 +18,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -410,4 +414,225 @@ func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error
 		return ReadmeSnapshotContent{State: readmeStateSaved, Format: extension, Text: text, Truncated: isTruncated}, nil
 	}
 	return ReadmeSnapshotContent{State: readmeStateAbsent}, nil
+}
+
+// Number of groups that saved READMEs are checked in, one group per sync day.
+// A sync checks the items whose `ID % readmeRefreshGroups` equals the day number (`syncDayNumber`) modulo it.
+// It is a prime, so it shares no factor with the sync intervals (1, 2, 3, 7 days).
+// So the groups come up in turn at any interval, and each saved README is checked once in 61 syncs (61 days when syncing daily)
+const readmeRefreshGroups = 61
+
+// Most READMEs written in one commit.
+// Making a tree of 300 files of 4.7KB took about 4 seconds, and 2,000 files took 18.6 seconds (measured).
+// This keeps one commit far below the request time limit (`githubTimeout`)
+const maxReadmesPerCommit = 300
+
+// Number of README requests sent at the same time during sync.
+// One takes about 0.5 seconds (measured), so 6 at once check 300 in about 25 seconds
+const readmeFetchParallel = 6
+
+// Time kept before the deadline for the commit after the last README request of a batch.
+// A commit of `maxReadmesPerCommit` READMEs makes a tree that took about 4 seconds (measured),
+// so this leaves room for a slow commit
+const readmeCommitReserve = 2 * githubTimeout
+
+// Brings the README snapshots of the archive in line with the READMEs on GitHub, until `deadline`.
+//  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`), each in random order.
+//     Items in `skippedIDs` aren't asked
+//  2. Fetches up to `maxReadmesPerCommit` READMEs, `readmeFetchParallel` at a time, and writes them in one commit (`writeFetchedReadmesInSingleCommit`)
+//  3. Goes on with the next batch while time is left
+//
+// Args:
+//   - `deadline`: A README request starts only if it can end `readmeCommitReserve` before this
+//   - `skippedIDs`: IDs of repositories that GitHub can't find now. Asking them would only make absent markers
+//   - `now`: Time that picks today's group. Taken as an argument so tests can set the day
+//
+// Returns:
+//   - The number of READMEs fetched and compared with the saved ones. Only the changes are committed
+//   - An error from reading the archive or from a commit.
+//     Running out of time or reaching the rate limit isn't an error: what was fetched is committed, it is logged, and the next sync goes on
+//
+// NOTE: Snapshots of items no longer in the archive are deleted in every commit it makes.
+// With nothing to check, it still makes one commit for them.
+// So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
+func SyncReadmeSnapshotsWithGitHub(cfg *Config, deadline time.Time, skippedIDs []int64, now time.Time) (int, error) {
+	commitSHA, err := readBranchCommit(cfg)
+	if err != nil {
+		return 0, err
+	}
+	starItems, err := readItems[StarItem](cfg, StarItemsDBPath)
+	if err != nil {
+		return 0, err
+	}
+	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, ReadmesDBDir)
+	if err != nil {
+		return 0, err
+	}
+	isSkipped := map[int64]bool{}
+	for _, id := range skippedIDs {
+		isSkipped[id] = true
+	}
+	todaysGroup := syncDayNumber(now) % readmeRefreshGroups
+	uncheckedIDs := []int64{}
+	todaysIDs := []int64{}
+	for _, item := range starItems {
+		switch {
+		case isSkipped[item.ID]:
+		case len(snapshotsByID[item.ID]) == 0:
+			uncheckedIDs = append(uncheckedIDs, item.ID)
+		case item.ID%readmeRefreshGroups == todaysGroup:
+			todaysIDs = append(todaysIDs, item.ID)
+		}
+	}
+	// Shuffled, so a run that can't check them all leaves different items for the next run
+	rand.Shuffle(len(uncheckedIDs), func(i int, j int) { uncheckedIDs[i], uncheckedIDs[j] = uncheckedIDs[j], uncheckedIDs[i] })
+	rand.Shuffle(len(todaysIDs), func(i int, j int) { todaysIDs[i], todaysIDs[j] = todaysIDs[j], todaysIDs[i] })
+	queue := append(uncheckedIDs, todaysIDs...)
+
+	fetchDeadline := deadline.Add(-readmeCommitReserve)
+	checked := 0
+	for {
+		batch := queue[:min(maxReadmesPerCommit, len(queue))] // Can be empty: the commit still deletes the snapshots of removed items
+		fetched, stopErr := fetchReadmesInParallel(cfg, batch, fetchDeadline)
+		// A request can end right at `fetchDeadline`, so the time left can be a little under `readmeCommitReserve`.
+		// Half of it is still enough for the commit, and the READMEs fetched aren't thrown away
+		if time.Until(deadline) < readmeCommitReserve/2 {
+			log.Printf("readmes: no time left to commit %d fetched READMEs", len(fetched))
+			return checked, nil
+		}
+		if err := writeFetchedReadmesInSingleCommit(cfg, fetched); err != nil {
+			return checked, err
+		}
+		checked += len(fetched)
+		queue = queue[len(batch):]
+		if stopErr != nil {
+			log.Printf("readmes: stopped with %d READMEs left for the next sync: %v", len(queue)+len(batch)-len(fetched), stopErr)
+			return checked, nil
+		}
+		if len(queue) == 0 {
+			return checked, nil
+		}
+	}
+}
+
+// Error for README requests that weren't sent because the time ran out
+var errReadmesOutOfTime = errors.New("out of time")
+
+// Fetches the READMEs of the items `itemIDs`, `readmeFetchParallel` at a time.
+// A request starts only if it can end by `fetchDeadline` even when it waits the longest (`githubTimeout`).
+//
+// Returns:
+//   - The READMEs fetched: item ID -> README. An item whose request failed isn't in it, and is asked again later
+//   - Why it stopped before asking every item: `errReadmesOutOfTime`, or an error that wraps `errGitHubRateLimited`.
+//     `nil` if every item was asked
+func fetchReadmesInParallel(cfg *Config, itemIDs []int64, fetchDeadline time.Time) (map[int64]FetchedReadme, error) {
+	// Several goroutines (lightweight threads) take items one by one. Shared values are read and written while holding `mu`
+	var mu sync.Mutex
+	next := 0
+	fetched := map[int64]FetchedReadme{}
+	failed := 0
+	var stopErr error
+	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
+	for w := 0; w < readmeFetchParallel; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				if stopErr == nil && next < len(itemIDs) && time.Now().Add(githubTimeout).After(fetchDeadline) {
+					stopErr = errReadmesOutOfTime
+				}
+				if stopErr != nil || next >= len(itemIDs) {
+					mu.Unlock()
+					return
+				}
+				id := itemIDs[next]
+				next++
+				mu.Unlock()
+
+				readme, err := FetchReadmeByRepoID(cfg, id, fetchDeadline)
+				mu.Lock()
+				switch {
+				case errors.Is(err, errGitHubRateLimited):
+					if stopErr == nil {
+						stopErr = err
+					}
+				case err != nil:
+					failed++
+				default:
+					fetched[id] = readme
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if failed > 0 {
+		log.Printf("readmes: %d requests failed, asked again later", failed)
+	}
+	return fetched, stopErr
+}
+
+// Writes the READMEs `fetched` in one commit, and deletes in it the snapshots of items no longer in the archive.
+// It reads the archive and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
+// Nothing is committed if nothing changes.
+func writeFetchedReadmesInSingleCommit(cfg *Config, fetched map[int64]FetchedReadme) error {
+	return UpdateFiles(cfg, []string{StarItemsDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+		starItems, err := decodeItems[StarItem](filesRead[StarItemsDBPath])
+		if err != nil {
+			return FileChangesCommit{}, err
+		}
+		isArchived := make(map[int64]bool, len(starItems)) // Item ID -> `true`, for the items in the archive
+		for _, item := range starItems {
+			isArchived[item.ID] = true
+		}
+		snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, ReadmesDBDir)
+		if err != nil {
+			return FileChangesCommit{}, err
+		}
+
+		changes := FileChangesCommit{FilesToWrite: map[string][]byte{}}
+		changedCount := 0         // Number of items whose files change, including ones that only lose an old file
+		savedNames := []string{}  // Items whose README is written
+		absentNames := []string{} // Items that get the absent marker
+		for _, item := range starItems {
+			readme, ok := fetched[item.ID]
+			if !ok {
+				continue
+			}
+			changesBefore := len(changes.FilesToWrite) + len(changes.FilesToDelete)
+			planReadmeSnapshotUpdate(item.ID, readme, snapshotsByID[item.ID], &changes)
+			if len(changes.FilesToWrite)+len(changes.FilesToDelete) > changesBefore {
+				changedCount++
+			}
+			if _, isWritten := changes.FilesToWrite[readme.buildPath(item.ID)]; isWritten {
+				if readme.isAbsent {
+					absentNames = append(absentNames, item.Name)
+				} else {
+					savedNames = append(savedNames, item.Name)
+				}
+			}
+		}
+		removedCount := 0 // Number of items no longer in the archive whose snapshots are deleted
+		for id, snapshots := range snapshotsByID {
+			if isArchived[id] {
+				continue
+			}
+			removedCount++
+			for _, snapshot := range snapshots {
+				changes.FilesToDelete = append(changes.FilesToDelete, snapshot.path)
+			}
+		}
+
+		summary := "update readmes of " + FormatCount(changedCount, "repo")
+		removedLine := ""
+		switch {
+		case changedCount == 0:
+			summary = "remove readmes of " + FormatCount(removedCount, "repo") + " no longer in the archive"
+		case removedCount > 0:
+			removedLine = "Removed for " + FormatCount(removedCount, "repo") + " no longer in the archive"
+		}
+		changes.Message = NewCommitMessage("sync(readmes)", summary, formatCommitList("Saved", savedNames), formatCommitList("No README", absentNames), removedLine)
+		return changes, nil
+	})
 }
