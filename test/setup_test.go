@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -182,5 +183,19 @@ func TestSaveGitHubApp(t *testing.T) {
 	gh.mu.Unlock()
 	if err := core.SaveGitHubApp(ctx, openTestDBRepo(t), newApp); !errors.Is(err, core.ErrGitHubAppExists) || gh.readFile(core.ConfigDBPath) != first {
 		t.Errorf("app that appeared meanwhile: %v, file %q", err, gh.readFile(core.ConfigDBPath))
+	}
+}
+
+// Tests that the sign-in callback deletes the state cookie even when it fails before it reads anything,
+// here because the environment variable is broken (`api.handleLoginSessionCallback`).
+// So opening the same callback address again never works
+func TestGitHubLoginCallbackDeletesStateCookieOnError(t *testing.T) {
+	setup(t, sampleStarItems, sampleStarLists)
+	state, stateCookie := startGitHubLogin(t)
+	t.Setenv(core.DBRepoAccessKeyEnv, "broken")
+	rec := callGitHubLoginCallback(fmt.Sprintf("code=user-%d&state=%s", testUserID, state), stateCookie)
+	deletesStateCookie := slices.ContainsFunc(rec.Header().Values("Set-Cookie"), func(h string) bool { return strings.HasPrefix(h, "github_login_state=;") })
+	if rec.Code != http.StatusInternalServerError || !deletesStateCookie {
+		t.Errorf("broken environment variable: %d %q", rec.Code, rec.Header().Values("Set-Cookie"))
 	}
 }
