@@ -298,7 +298,7 @@ func CheckGitHubResponse(res *http.Response) error {
 		message = body.Message
 	}
 
-	// If the token lacks a permission, GitHub puts the permission this request needs in a header (e.g. "contents=write", docs).
+	// If the token lacks a permission, GitHub puts the permission this request needs in a header (docs, e.g. "contents=write").
 	// It is a clue for fixing the token, so it is added to the message
 	if needed := res.Header.Get("X-Accepted-GitHub-Permissions"); needed != "" {
 		message += " (token needs: " + needed + ")"

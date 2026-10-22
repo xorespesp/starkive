@@ -101,8 +101,7 @@ jobs:
 `
 
 // Checks, without a commit, that the token has the Workflows write permission (the permission to write files under `.github/workflows/`).
-// Without the permission, it returns GitHub's 403 error, with the needed permission added to its message (`core.CheckGitHubResponse`).
-// (`core.CheckGitHubResponse` adds the needed permission `workflows=write` to the message.)
+// Without the permission, it returns GitHub's 403 error, with the needed permission (`workflows=write`) added to its message (`core.CheckGitHubResponse`).
 //
 // NOTE: It only tries to create a tree that holds the workflow file.
 // Without the permission, GitHub rejects it with 403 at the tree creation step (measured).

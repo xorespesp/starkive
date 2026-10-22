@@ -323,7 +323,7 @@ const readmeCommitReserve = 2 * githubTimeout
 //     it is logged, and the next sync goes on
 //
 // NOTE: Snapshots of items no longer in the archive are deleted in every commit it makes.
-// With nothing to check, it still builds one commit for them, which is made only if there is something to delete.
+// With nothing to check, it still runs the commit step for them, and a commit is made only if there is something to delete.
 // So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
 func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time) (int, error) {
 	commitSHA, err := readBranchCommit(ctx, repo)

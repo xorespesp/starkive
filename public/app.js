@@ -84,7 +84,7 @@ class ApiError extends Error {
 // `null` on the sign-in screen.
 // `api` puts its signal on every request except the sign-in API (`login-session`).
 // So closing the session (reload, sign-out, session expiry) cancels those requests in flight at once.
-// So async work that awaits `api` stops at the cancel error, without its own "is this still the same session?" check.
+// Async work that awaits `api` then stops at the cancel error, without its own "is this still the same session?" check.
 // A loop that swallows errors must still rethrow cancel errors (`api`)
 let sessionScope = null;
 

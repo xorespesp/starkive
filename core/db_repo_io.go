@@ -303,7 +303,7 @@ type branchHead struct {
 // Reads the commit sha that the default branch points to.
 //
 // Returns:
-//   - The commit sha. For an empty repository, GitHub refuses with 409 (measured) (`GitHubAPIError`)
+//   - The commit sha. For an empty repository, GitHub refuses with 409 (`GitHubAPIError`, measured)
 func readBranchCommit(ctx context.Context, repo *DBRepo) (string, error) {
 	var ref struct {
 		Object struct {
