@@ -122,11 +122,11 @@ func syncDayNumber(now time.Time) int64 {
 // So the run is found in the run list (`isCallFromManualWorkflowRun`).
 // The workflow's `concurrency` runs one run at a time, so syncs don't overlap (docs, measured).
 func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.Time, now time.Time) (string, error) {
-	isManual, err := isCallFromManualWorkflowRun(ctx, repo, now)
+	runList, err := readRecentSyncWorkflowRuns(ctx, repo, now)
 	if err != nil {
 		return "", err
 	}
-	if !isManual {
+	if !isCallFromManualWorkflowRun(runList.pickRecentRuns(now)) {
 		settings, err := readSyncConfig(ctx, repo)
 		if err != nil {
 			return "", err
@@ -135,11 +135,11 @@ func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.T
 		if intervalDays == manualOnlyIntervalDays {
 			return "not_due", nil
 		}
-		last, err := readLastScheduledWorkflowRun(ctx, repo, now)
+		last, err := findLastFinishedScheduledWorkflowRun(ctx, runList)
 		if err != nil {
 			return "", err
 		}
-		retry := last != nil && last.Conclusion != workflowRunSucceeded // A cancelled run is never `last` (`readLastScheduledWorkflowRunOnPage`)
+		retry := last != nil && last.Conclusion != workflowRunSucceeded // A cancelled run is never `last` (`findLastFinishedScheduledWorkflowRun`)
 		if !retry && !isAutoSyncDay(intervalDays, now) {
 			return "not_due", nil
 		}
@@ -249,10 +249,14 @@ func UpdateSyncSettings(ctx context.Context, repo *DBRepo, enabled *bool, interv
 
 	status := SyncStatus{IntervalDays: written.intervalDays(), EnabledSince: written.EnabledSince, Workflow: state}
 	if workflow != nil {
-		if status.LastScheduledRun, err = readLastScheduledWorkflowRun(ctx, repo, time.Now()); err != nil {
+		now := time.Now()
+		runList, err := readRecentSyncWorkflowRuns(ctx, repo, now)
+		if err != nil {
 			return SyncStatus{}, err
 		}
-		if status.ActiveRun, status.LastRun, err = readRecentSyncWorkflowRuns(ctx, repo, time.Now()); err != nil {
+		recentRuns := runList.pickRecentRuns(now)
+		status.ActiveRun, status.LastRun = findActiveWorkflowRun(recentRuns), findLastFinishedWorkflowRun(recentRuns)
+		if status.LastScheduledRun, err = findLastFinishedScheduledWorkflowRun(ctx, runList); err != nil {
 			return SyncStatus{}, err
 		}
 	}
@@ -287,7 +291,7 @@ type SyncStatus struct {
 	EnabledSince     *time.Time       `json:"enabled_since"`      // Time a person turned sync on. The base for the stall check. Pointer: `nil` if the setting is off
 	Workflow         string           `json:"workflow"`           // Actual workflow state: `missing` (none) or GitHub's `state` value (`active`, `disabled_manually`, `disabled_inactivity`, and so on)
 	LastScheduledRun *SyncWorkflowRun `json:"last_scheduled_run"` // Last finished scheduled run that wasn't cancelled. Pointer: `nil` if there has never been one
-	ActiveRun        *SyncWorkflowRun `json:"active_run"`         // Run of any kind that hasn't finished (`readRecentSyncWorkflowRuns`). Pointer: `nil` if no sync is running
+	ActiveRun        *SyncWorkflowRun `json:"active_run"`         // Run of any kind that hasn't finished (`findActiveWorkflowRun`). Pointer: `nil` if no sync is running
 	LastRun          *SyncWorkflowRun `json:"last_run"`           // Finished run of any kind that started last, since yesterday. Pointer: `nil` if there is none
 }
 
@@ -297,30 +301,37 @@ type SyncStatus struct {
 // Returns:
 //   - The setting (interval, turn-on time) and the actual state (workflow state, last scheduled run, running and last runs).
 //     If there is no workflow, `Workflow` is `missing` and the runs are empty
-//   - An error if any of the four reads fails
+//   - An error if any read fails
 //
-// NOTE: The four questions to GitHub (config file, workflow state, two run lists) are sent at the same time, not one after another.
-// So the answer takes as long as the slowest question, not the sum of all four.
-// If there is no workflow, the run list requests are wasted, but that is rare.
+// NOTE: The three questions to GitHub (config file, workflow state, recent runs) are sent at the same time, not one after another.
+// So the answer takes as long as the slowest question, not the sum of all three.
+// The recent runs usually take one page of the run list (`readRecentSyncWorkflowRuns`).
+// More pages are read only if they have no finished scheduled run (`findLastFinishedScheduledWorkflowRun`).
+// If there is no workflow, the run list request is wasted, but that is rare.
 func ReadSyncStatus(ctx context.Context, repo *DBRepo) (SyncStatus, error) {
 	var settings syncConfig
 	var workflow *syncWorkflow
-	var lastScheduled, active, last *SyncWorkflowRun
-	errs := make([]error, 4)
+	var runList *syncWorkflowRunList
+	errs := make([]error, 3)
 	now := time.Now()
 	var wg sync.WaitGroup // Counter that waits until all started goroutines end (like `std::thread::join`)
-	wg.Add(4)
+	wg.Add(3)
 	go func() { defer wg.Done(); settings, errs[0] = readSyncConfig(ctx, repo) }() // Each goroutine writes different variables, so writing without a lock doesn't overlap
 	go func() { defer wg.Done(); workflow, errs[1] = readSyncWorkflow(ctx, repo) }()
-	go func() { defer wg.Done(); lastScheduled, errs[2] = readLastScheduledWorkflowRun(ctx, repo, now) }()
-	go func() { defer wg.Done(); active, last, errs[3] = readRecentSyncWorkflowRuns(ctx, repo, now) }()
+	go func() { defer wg.Done(); runList, errs[2] = readRecentSyncWorkflowRuns(ctx, repo, now) }()
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: joins several errors into one. `nil` if all are `nil`
 		return SyncStatus{}, err
 	}
 	status := SyncStatus{IntervalDays: settings.intervalDays(), EnabledSince: settings.EnabledSince, Workflow: syncWorkflowMissing}
 	if workflow != nil {
-		status.Workflow, status.LastScheduledRun, status.ActiveRun, status.LastRun = workflow.State, lastScheduled, active, last
+		recentRuns := runList.pickRecentRuns(now)
+		status.ActiveRun, status.LastRun = findActiveWorkflowRun(recentRuns), findLastFinishedWorkflowRun(recentRuns)
+		lastScheduled, err := findLastFinishedScheduledWorkflowRun(ctx, runList)
+		if err != nil {
+			return SyncStatus{}, err
+		}
+		status.Workflow, status.LastScheduledRun = workflow.State, lastScheduled
 	}
 	return status, nil
 }

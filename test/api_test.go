@@ -25,7 +25,6 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -418,23 +417,28 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"workflow_run_id":%d,"run_url":"https://api.github.com/repos/me/archive/actions/runs/%d","html_url":"https://github.com/me/archive/actions/runs/%d"}`, id, id, id)
 
 	case r.URL.Path == workflow+"/runs" && r.Method == http.MethodGet:
-		// Workflow run list. Filtered by `event`, `status` and `created` (`>=<date>` only) in the query,
-		// in the order of `runs` (GitHub doesn't promise an order), and cut to `per_page`
+		// Workflow run list, newest first, one page of `per_page` (`page` starts at 1), as GitHub answers (measured).
+		// GitHub now and then answers an empty list to a query with an `event`, `status` or `created` filter (measured).
+		// Here such a query always gets an empty list, so code that relies on a filter fails the tests
 		query := r.URL.Query()
-		createdFrom, hasCreated := strings.CutPrefix(query.Get("created"), ">=")
 		runs := []map[string]any{}
-		for i, run := range f.runs {
-			if (query.Has("event") && run.event != query.Get("event")) || (query.Has("status") && run.status != query.Get("status")) ||
-				(hasCreated && run.started.UTC().Format("2006-01-02") < createdFrom) {
-				continue
+		if !query.Has("event") && !query.Has("status") && !query.Has("created") {
+			order := make([]int, len(f.runs))
+			for i := range order {
+				order[i] = i
 			}
-			runs = append(runs, map[string]any{"id": i + 1, "event": run.event, "status": run.status, "conclusion": run.conclusion,
-				"run_started_at": run.started, "html_url": fmt.Sprintf("https://github.com/me/archive/actions/runs/%d", i+1)})
+			slices.SortStableFunc(order, func(a int, b int) int { return f.runs[b].started.Compare(f.runs[a].started) })
+			for _, i := range order {
+				run := f.runs[i]
+				runs = append(runs, map[string]any{"id": i + 1, "event": run.event, "status": run.status, "conclusion": run.conclusion,
+					"run_started_at": run.started, "html_url": fmt.Sprintf("https://github.com/me/archive/actions/runs/%d", i+1)})
+			}
 		}
 		total := len(runs)
-		if perPage, err := strconv.Atoi(query.Get("per_page")); err == nil && perPage < len(runs) {
-			runs = runs[:perPage]
-		}
+		perPage, page := 30, 1 // GitHub's defaults (docs)
+		fmt.Sscan(query.Get("per_page"), &perPage)
+		fmt.Sscan(query.Get("page"), &page)
+		runs = runs[min((page-1)*perPage, len(runs)):min(page*perPage, len(runs))]
 		json.NewEncoder(w).Encode(map[string]any{"total_count": total, "workflow_runs": runs})
 
 	case strings.HasPrefix(r.URL.Path, contents) && r.Method == http.MethodGet:

@@ -166,8 +166,9 @@ func TestScheduledSync(t *testing.T) {
 //   - If the last finished scheduled run failed, it syncs again even on a day that doesn't match the interval
 //   - Only finished scheduled runs count for that check.
 //     It leaves out the run in progress (the run that sent the call) and manual runs (`workflow_dispatch`),
-//     and looks at the one that started last, whatever the order of the list.
-//     It still finds it when it isn't on the first page of the list, and when it is older than a week.
+//     and looks at the one that started last.
+//     It still finds it on a later page when many manual runs came after it, and when it is older than a week.
+//     Past `maxScheduledRunPages` pages it counts as never run
 //     A cancelled run doesn't count, and the run before it does
 //   - A call from a run started by hand (Sync now) whose job is running syncs on any day.
 //     A manual run that only waits behind the calling run doesn't make it sync.
@@ -192,12 +193,26 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	run := func(event string, status string, conclusion string, hoursAgo int) fakeRun {
 		return fakeRun{event: event, status: status, conclusion: conclusion, started: notDue.Add(-time.Duration(hoursAgo) * time.Hour)}
 	}
-	// 25 older successes come first in the list, so the newest run (a failure) isn't on the first page of 20
-	pastFirstPage := []fakeRun{}
-	for day := 8; day < 33; day++ {
-		pastFirstPage = append(pastFirstPage, run("schedule", "completed", "success", day*24))
+	// 25 manual runs came after the last scheduled run (a failure), so it is on the second page of 20
+	pastFirstPage := []fakeRun{run("schedule", "completed", "failure", 48)}
+	for hoursAgo := 1; hoursAgo <= 25; hoursAgo++ {
+		pastFirstPage = append(pastFirstPage, run("workflow_dispatch", "completed", "success", hoursAgo))
 	}
-	pastFirstPage = append(pastFirstPage, run("schedule", "completed", "failure", 24))
+	// The calling manual run is running behind 25 newer manual runs that were cancelled, so it is on the second page
+	callerPastFirstPage := []fakeRun{run("schedule", "completed", "success", 24), run("workflow_dispatch", "in_progress", "", 1)}
+	for minutesAgo := 1; minutesAgo <= 25; minutesAgo++ {
+		callerPastFirstPage = append(callerPastFirstPage, fakeRun{event: "workflow_dispatch", status: "completed", conclusion: "cancelled", started: notDue.Add(-time.Duration(minutesAgo) * time.Minute)})
+	}
+	// 25 old manual runs came after it, so the recent runs end on the first page and it is on the second
+	pastRecentRuns := []fakeRun{run("schedule", "completed", "failure", 200)}
+	for hoursAgo := 60; hoursAgo < 85; hoursAgo++ {
+		pastRecentRuns = append(pastRecentRuns, run("workflow_dispatch", "completed", "success", hoursAgo))
+	}
+	// 100 manual runs came after it, so it is past the pages read
+	pastPagesRead := []fakeRun{run("schedule", "completed", "failure", 200)}
+	for hoursAgo := 1; hoursAgo <= 100; hoursAgo++ {
+		pastPagesRead = append(pastPagesRead, run("workflow_dispatch", "completed", "success", hoursAgo))
+	}
 	// On a day that doesn't match the interval, checks the result while changing only the run list
 	for _, c := range []struct {
 		name string
@@ -209,12 +224,15 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		{"failed, then succeeded", []fakeRun{run("schedule", "completed", "success", 24), run("schedule", "completed", "failure", 48)}, "not_due"},
 		{"only the running call itself is newer", []fakeRun{run("schedule", "in_progress", "", 0), run("schedule", "completed", "success", 24)}, "not_due"},
 		{"a manual run failed", []fakeRun{run("workflow_dispatch", "completed", "failure", 1), run("schedule", "completed", "success", 24)}, "not_due"},
-		{"the newest run isn't on the first page", pastFirstPage, "synced"},
+		{"the last scheduled run is on the second page", pastFirstPage, "synced"},
+		{"the last scheduled run is on a page after the recent runs", pastRecentRuns, "synced"},
+		{"the last scheduled run is past the pages read", pastPagesRead, "not_due"},
 		{"the last run failed 10 days ago", []fakeRun{run("schedule", "completed", "failure", 240)}, "synced"},
 		{"the last run was cancelled", []fakeRun{run("schedule", "completed", "success", 48), run("schedule", "completed", "cancelled", 24)}, "not_due"},
 		{"a manual run is going", []fakeRun{run("workflow_dispatch", "in_progress", "", 0), run("schedule", "completed", "success", 24)}, "synced"},
 		{"a manual run waits behind this one", []fakeRun{run("schedule", "in_progress", "", 0), run("workflow_dispatch", "pending", "", 0), run("schedule", "completed", "success", 24)}, "not_due"},
 		{"the calling manual run is still listed as queued", []fakeRun{run("workflow_dispatch", "queued", "", 0), run("schedule", "completed", "success", 24)}, "synced"},
+		{"the calling manual run is past the first page", callerPastFirstPage, "synced"},
 	} {
 		gh.mu.Lock()
 		gh.runs = c.runs

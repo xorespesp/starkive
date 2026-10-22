@@ -6,6 +6,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path"
 	"time"
@@ -57,85 +58,46 @@ type SyncWorkflowRun struct {
 
 // Values of `SyncWorkflowRun` fields
 const (
-	workflowRunSucceeded   = "success"           // `Conclusion` of a run that succeeded
-	workflowRunCancelled   = "cancelled"         // `Conclusion` of a run that GitHub or a person cancelled
-	workflowRunCompleted   = "completed"         // `Status` of a finished run. Every other status means it hasn't finished
-	workflowRunInProgress  = "in_progress"       // `Status` of a run whose job is running
-	workflowRunQueued      = "queued"            // `Status` of a run waiting for a runner
-	workflowRunManualEvent = "workflow_dispatch" // `Event` of a run started by hand (`TriggerSyncWorkflow`, or a person in the Actions tab)
+	workflowRunSucceeded      = "success"           // `Conclusion` of a run that succeeded
+	workflowRunCancelled      = "cancelled"         // `Conclusion` of a run that GitHub or a person cancelled
+	workflowRunCompleted      = "completed"         // `Status` of a finished run. Every other status means it hasn't finished
+	workflowRunInProgress     = "in_progress"       // `Status` of a run whose job is running
+	workflowRunQueued         = "queued"            // `Status` of a run waiting for a runner
+	workflowRunManualEvent    = "workflow_dispatch" // `Event` of a run started by hand (`TriggerSyncWorkflow`, or a person in the Actions tab)
+	workflowRunScheduledEvent = "schedule"          // `Event` of a scheduled run
 )
 
-// Number of recent days whose scheduled runs are read first when looking for the last run.
-// A scheduled run comes once a day, so the scheduled runs of these days fit in one page of the list (20)
-const lastScheduledRunWindowDays = 7
+// Runs in one page of the run list.
+// One run takes about 13KB in the answer (measured), so a page is about 260KB.
+// With the scheduled run once a day, the first page usually reaches past the recent runs (`isRecentWorkflowRun`),
+// so reading them takes one request
+const syncWorkflowRunsPerPage = 20
 
-// Reads the last finished scheduled run that wasn't cancelled from GitHub.
-// It reads the runs of the last `lastScheduledRunWindowDays` days first (the list's `created` filter, docs).
-// Only if no such run is in those days, it reads the list without that filter.
+// Pages of the run list, counted from page 1, that looking for the last scheduled run reads up to (100 runs).
+// If reading the recent runs already took more pages, it reads no more.
+// A scheduled run comes once a day, so it is on the first page unless many manual runs came after it
+const maxScheduledRunPages = 5
+
+// Reads one page of the sync workflow's run list, newest first (measured).
 //
 // Args:
-//   - `now`: Current time, which the window counts back from
+//   - `page`: Page number, starting at 1
 //
 // Returns:
-//   - The finished scheduled run that started last.
-//     `nil` if there has never been one, or if there is no workflow (GitHub answers 404)
+//   - The runs on the page. Empty if there is no workflow (GitHub answers 404)
 //
-// NOTE: While a call from the workflow is handled, the run that sent it is in the list, still in progress.
-// If that run were picked as "the previous run", its result would be empty and yesterday's failure would be missed.
-// So it is filtered out with `status=completed` (measured).
-// Manual runs are filtered out with `event=schedule`.
-// The docs don't promise a sort order for the list, so a page may not hold the newest run.
-// The window keeps every recent run on one page, so the last one is found whatever the order.
-// Without a run in the window, the result is the latest of the first page, which may not be the newest.
-// That only happens when no scheduled run has finished without being cancelled for a week, and the dashboard warns about it anyway.
-func readLastScheduledWorkflowRun(ctx context.Context, repo *DBRepo, now time.Time) (*SyncWorkflowRun, error) {
-	since := now.UTC().AddDate(0, 0, -lastScheduledRunWindowDays).Format("2006-01-02")  // Go writes a layout as one fixed example time (2006-01-02 15:04:05), so this is YYYY-MM-DD
-	last, err := readLastScheduledWorkflowRunOnPage(ctx, repo, "&created=%3E%3D"+since) // `created=>=<date>`, encoded
-	if err != nil || last != nil {
-		return last, err
-	}
-	return readLastScheduledWorkflowRunOnPage(ctx, repo, "")
-}
-
-// Reads one page (20) of the finished scheduled runs that match `filter`, and returns the one that started last.
-// A cancelled run is skipped.
-//
-// Args:
-//   - `filter`: More query parameters for the run list, starting with `&`. Empty for none
-//
-// Returns:
-//   - The run. `nil` if the page has no run that wasn't cancelled, or if there is no workflow (GitHub answers 404)
-func readLastScheduledWorkflowRunOnPage(ctx context.Context, repo *DBRepo, filter string) (*SyncWorkflowRun, error) {
-	runs, err := readSyncWorkflowRuns(ctx, repo, "event=schedule&status=completed&per_page=20"+filter)
-	if err != nil {
-		return nil, err
-	}
-	var last *SyncWorkflowRun
-	for i := range runs {
-		// A cancelled run isn't a failed sync, so it says nothing about the sync and the run before it counts.
-		// For example, `concurrency` cancels a run that waits behind another when a third one comes (docs)
-		if runs[i].Conclusion == workflowRunCancelled {
-			continue
-		}
-		if last == nil || runs[i].StartedAt.After(last.StartedAt) {
-			last = &runs[i]
-		}
-	}
-	return last, nil
-}
-
-// Reads one page of the sync workflow's run list.
-//
-// Args:
-//   - `query`: Query parameters of the run list (e.g. `event=schedule&per_page=20`)
-//
-// Returns:
-//   - The runs on the page, in GitHub's order. Empty if there is no workflow (GitHub answers 404)
-func readSyncWorkflowRuns(ctx context.Context, repo *DBRepo, query string) ([]SyncWorkflowRun, error) {
+// NOTE: The list is read without filters, so the page holds runs of every kind and state, and the runs needed must be picked from it.
+// GitHub answers a query with a filter such as `event`, `status` or `created` by a search, which has its own limit of 1,000 results (docs).
+// GitHub also says that such searches often time out, and then report only what they found before the timeout (docs).
+// With an `event`, `status` or `created` filter, GitHub now and then answered an empty list although the runs exist
+// (2026-10-22, about 1 in 4 answers, measured).
+// Without filters, every answer had the same runs (measured).
+func readSyncWorkflowRunPage(ctx context.Context, repo *DBRepo, page int) ([]SyncWorkflowRun, error) {
 	var list struct {
 		Runs []SyncWorkflowRun `json:"workflow_runs"`
 	}
-	err := callDBRepoAPI(ctx, repo, http.MethodGet, syncWorkflowAPIPath+"/runs?"+query, nil, &list)
+	query := fmt.Sprintf("?per_page=%d&page=%d", syncWorkflowRunsPerPage, page)
+	err := callDBRepoAPI(ctx, repo, http.MethodGet, syncWorkflowAPIPath+"/runs"+query, nil, &list)
 	if hasGitHubStatus(err, http.StatusNotFound) { // If there is no workflow, its run list is 404 too
 		return []SyncWorkflowRun{}, nil
 	}
@@ -145,41 +107,157 @@ func readSyncWorkflowRuns(ctx context.Context, repo *DBRepo, query string) ([]Sy
 	return list.Runs, nil
 }
 
-// Reads the sync workflow runs of any kind created since the day before `now` (UTC), with one request.
-//
-// Returns:
-//   - The run that hasn't finished, preferring one whose job is running. `nil` if every run has finished
-//   - The finished run that started last. `nil` if none finished since yesterday
-//
-// NOTE: The workflow's `concurrency` lets one run go at a time, and keeps one more waiting (docs, measured).
-// With the scheduled run once a day and Sync now locked while a run goes, the runs since yesterday normally fit in one page (20).
-// So both are found whatever the order of the list.
-func readRecentSyncWorkflowRuns(ctx context.Context, repo *DBRepo, now time.Time) (*SyncWorkflowRun, *SyncWorkflowRun, error) {
-	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                        // YYYY-MM-DD (the layout is Go's example time)
-	runs, err := readSyncWorkflowRuns(ctx, repo, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
-	if err != nil {
-		return nil, nil, err
+// Runs of the sync workflow read from the start of the run list, page by page.
+// It keeps how far it has read, so reading more goes on from the next page
+type syncWorkflowRunList struct {
+	repo      *DBRepo           // DB repository whose workflow runs are read
+	runs      []SyncWorkflowRun // Every run read so far, newest first, from the first run of the list with none left out
+	pagesRead int               // Pages read so far, from page 1
+	// `true` once a page had fewer runs than a full page, so the last run of the list has been read.
+	// `false` only means the end hasn't been seen yet.
+	// (When the last page is full, the read after it gets an empty page.)
+	reachedEnd bool
+}
+
+// Reads the next page of the run list and adds its runs to `list.runs`.
+// Once the end of the list has been read (`reachedEnd`), it reads nothing.
+// `(list *syncWorkflowRunList)` is a pointer receiver, so the caller's list changes
+func (list *syncWorkflowRunList) readNextPage(ctx context.Context) error {
+	if list.reachedEnd {
+		return nil
 	}
-	var unfinished *SyncWorkflowRun
-	var lastFinished *SyncWorkflowRun
-	for i := range runs {
-		run := &runs[i]
-		switch {
-		case run.Status != workflowRunCompleted:
-			if unfinished == nil || run.Status == workflowRunInProgress {
-				unfinished = run
-			}
-		case lastFinished == nil || run.StartedAt.After(lastFinished.StartedAt):
-			lastFinished = run
+	pageRuns, err := readSyncWorkflowRunPage(ctx, list.repo, list.pagesRead+1)
+	if err != nil {
+		return err
+	}
+	list.runs = append(list.runs, pageRuns...) // `append` adds the runs of the page after the runs read before
+	list.pagesRead++
+	list.reachedEnd = len(pageRuns) < syncWorkflowRunsPerPage
+	return nil
+}
+
+// Returns the recent runs among the runs read (`isRecentWorkflowRun`), in a new slice.
+// Reading more pages into `list` later doesn't change it
+func (list *syncWorkflowRunList) pickRecentRuns(now time.Time) []SyncWorkflowRun {
+	recentRuns := []SyncWorkflowRun{}
+	for _, run := range list.runs {
+		if isRecentWorkflowRun(run, now) {
+			recentRuns = append(recentRuns, run)
 		}
 	}
-	return unfinished, lastFinished, nil
+	return recentRuns
+}
+
+// Reports whether `run` started on the day before `now` (UTC) or later.
+// Only such runs are used to tell which run is going now, so a run left unfinished long ago isn't taken for one
+func isRecentWorkflowRun(run SyncWorkflowRun, now time.Time) bool {
+	year, month, day := now.UTC().AddDate(0, 0, -1).Date()
+	return !run.StartedAt.Before(time.Date(year, month, day, 0, 0, 0, 0, time.UTC))
+}
+
+// Reads the run list of the sync workflow from page 1 until it has every recent run (`isRecentWorkflowRun`).
+// It stops after the first page that ends with an older run, or at the end of the list.
+//
+// Returns:
+//   - The runs read, with every recent run (`syncWorkflowRunList.pickRecentRuns`).
+//     The older runs of the last page are in it too. Empty if there is no workflow
+//
+// NOTE: The list is newest first (measured), so every run after an older run is older too.
+// There is no limit on the pages.
+// Every recent run is needed to tell the run going now, and the request deadline bounds the reads.
+func readRecentSyncWorkflowRuns(ctx context.Context, repo *DBRepo, now time.Time) (*syncWorkflowRunList, error) {
+	list := &syncWorkflowRunList{repo: repo, runs: []SyncWorkflowRun{}}
+	for !list.reachedEnd {
+		if err := list.readNextPage(ctx); err != nil {
+			return nil, err
+		}
+		if len(list.runs) > 0 && !isRecentWorkflowRun(list.runs[len(list.runs)-1], now) {
+			break
+		}
+	}
+	return list, nil
+}
+
+// Finds the finished scheduled run that started last, leaving out cancelled runs.
+// It looks in the runs read first, and reads more pages into `list` only if no such run is there, up to `maxScheduledRunPages` pages in all.
+// The list is newest first (measured), so the first page that has one holds the last one.
+//
+// Returns:
+//   - The run. `nil` if the pages read have none, or if there is no workflow
+//
+// NOTE: While a call from the workflow is handled, the run that sent it is in the list, still in progress.
+// If that run were picked as "the previous run", its result would be empty and yesterday's failure would be missed.
+// So only finished runs count.
+// A cancelled run isn't a failed sync, so it says nothing about the sync and the run before it counts.
+// For example, `concurrency` cancels a run that waits behind another when a third one comes (docs).
+// Manual runs don't count.
+func findLastFinishedScheduledWorkflowRun(ctx context.Context, list *syncWorkflowRunList) (*SyncWorkflowRun, error) {
+	for {
+		var last *SyncWorkflowRun
+		for i := range list.runs {
+			run := &list.runs[i]
+			if run.Event != workflowRunScheduledEvent || run.Status != workflowRunCompleted || run.Conclusion == workflowRunCancelled {
+				continue
+			}
+			if last == nil || run.StartedAt.After(last.StartedAt) {
+				last = run
+			}
+		}
+		if last != nil || list.reachedEnd || list.pagesRead >= maxScheduledRunPages {
+			return last, nil
+		}
+		if err := list.readNextPage(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Finds in `recentRuns` the active run (one of any kind that hasn't finished), preferring one whose job is running.
+//
+// Args:
+//   - `recentRuns`: Every recent run (`syncWorkflowRunList.pickRecentRuns`)
+//
+// Returns:
+//   - The run. `nil` if none is active
+func findActiveWorkflowRun(recentRuns []SyncWorkflowRun) *SyncWorkflowRun {
+	var active *SyncWorkflowRun
+	for i := range recentRuns {
+		run := &recentRuns[i]
+		if run.Status == workflowRunCompleted {
+			continue
+		}
+		if active == nil || run.Status == workflowRunInProgress {
+			active = run
+		}
+	}
+	return active
+}
+
+// Finds in `recentRuns` the finished run of any kind that started last.
+//
+// Args:
+//   - `recentRuns`: Every recent run (`syncWorkflowRunList.pickRecentRuns`)
+//
+// Returns:
+//   - The run. `nil` if none finished since yesterday
+func findLastFinishedWorkflowRun(recentRuns []SyncWorkflowRun) *SyncWorkflowRun {
+	var last *SyncWorkflowRun
+	for i := range recentRuns {
+		run := &recentRuns[i]
+		if run.Status != workflowRunCompleted {
+			continue
+		}
+		if last == nil || run.StartedAt.After(last.StartedAt) {
+			last = run
+		}
+	}
+	return last
 }
 
 // Reports whether the run that sent the current call was started by hand (`workflow_dispatch`).
 //
 // Args:
-//   - `now`: Current time, for the runs since yesterday (`readRecentSyncWorkflowRuns`)
+//   - `recentRuns`: Every recent run (`syncWorkflowRunList.pickRecentRuns`)
 //
 // NOTE: The call doesn't say which run sent it, and the installed workflow can't be changed to say it.
 // While a call from the workflow is handled, the run that sent it is in the list as `in_progress` (measured).
@@ -187,23 +265,18 @@ func readRecentSyncWorkflowRuns(ctx context.Context, repo *DBRepo, now time.Time
 // So the run that is `in_progress` is the run that sent the call.
 // If the list doesn't show any run as `in_progress` yet, a manual run that hasn't finished counts.
 // Then a Sync now isn't taken for a scheduled run that isn't due, and the worst case is one extra sync.
-func isCallFromManualWorkflowRun(ctx context.Context, repo *DBRepo, now time.Time) (bool, error) {
-	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                        // YYYY-MM-DD (the layout is Go's example time)
-	runs, err := readSyncWorkflowRuns(ctx, repo, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
-	if err != nil {
-		return false, err
-	}
-	for _, run := range runs {
+func isCallFromManualWorkflowRun(recentRuns []SyncWorkflowRun) bool {
+	for _, run := range recentRuns {
 		if run.Status == workflowRunInProgress {
-			return run.Event == workflowRunManualEvent, nil
+			return run.Event == workflowRunManualEvent
 		}
 	}
-	for _, run := range runs {
+	for _, run := range recentRuns {
 		if run.Status != workflowRunCompleted && run.Event == workflowRunManualEvent {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // Starts a run of the sync workflow now (Sync now), and returns it.

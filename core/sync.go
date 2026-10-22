@@ -47,7 +47,8 @@ type ArchiveSyncResult struct {
 func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy time.Time) (ArchiveSyncResult, error) {
 	result := ArchiveSyncResult{}
 	var errs []error
-	stepStart := time.Now() // Start of the current step, for the step times in the log
+	syncStart := time.Now() // For the total time in the log
+	stepStart := syncStart  // Start of the current step, for the step times in the log
 
 	starredRepos, err := FetchAllStarredRepos(ctx, repo.cfg)
 	if err == nil {
@@ -77,8 +78,8 @@ func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy tim
 	readmesTime := time.Since(stepStart)
 
 	round := func(d time.Duration) time.Duration { return d.Round(100 * time.Millisecond) } // Printed like `1.2s`
-	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, readmes checked: %d, errors: %v, took: stars %v, meta %v, readmes %v",
+	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, readmes checked: %d, errors: %v, took: total %v (stars %v, meta %v, readmes %v)",
 		result.NumStarredRepos, result.NumAddedRepos, result.NumMetaCheckedRepos, result.NumUnavailableRepos, result.NumCheckedReadmes, errs,
-		round(starsTime), round(metaTime), round(readmesTime))
+		round(time.Since(syncStart)), round(starsTime), round(metaTime), round(readmesTime))
 	return result, errors.Join(errs...)
 }
