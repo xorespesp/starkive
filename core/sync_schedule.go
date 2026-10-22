@@ -110,7 +110,16 @@ type SyncRun struct {
 // `conclusion` value meaning the scheduled run succeeded
 const syncRunSucceeded = "success"
 
+// Number of recent days whose scheduled runs are read first when looking for the last run.
+// The workflow runs once a day, so the runs of these days fit in one page of the list (20)
+const lastRunWindowDays = 7
+
 // Reads the last finished scheduled run from GitHub.
+// It reads the runs of the last `lastRunWindowDays` days first (the list's `created` filter, docs).
+// Only if no run is in those days, it reads the list without that filter.
+//
+// Args:
+//   - `now`: Current time, which the window counts back from
 //
 // Returns:
 //   - The finished scheduled run that started last.
@@ -120,13 +129,31 @@ const syncRunSucceeded = "success"
 // If that run were picked as "the previous run", its result would be empty and yesterday's failure would be missed.
 // So it is filtered out with `status=completed` (measured).
 // Manual runs are filtered out with `event=schedule`.
-// The docs don't promise a sort order for the list.
-// So several runs are read, and the one with the latest start time is picked here.
-func readLastScheduledRun(cfg *Config) (*SyncRun, error) {
+// The docs don't promise a sort order for the list, so a page may not hold the newest run.
+// The window keeps every recent run on one page, so the last one is found whatever the order.
+// Without a run in the window, the result is the latest of the first page, which may not be the newest.
+// That only happens when no scheduled run has finished for a week, and the dashboard warns about it anyway.
+func readLastScheduledRun(cfg *Config, now time.Time) (*SyncRun, error) {
+	since := now.UTC().AddDate(0, 0, -lastRunWindowDays).Format("2006-01-02")
+	last, err := readLatestScheduledRunOnPage(cfg, "&created=%3E%3D"+since) // `created=>=<date>`, encoded
+	if err != nil || last != nil {
+		return last, err
+	}
+	return readLatestScheduledRunOnPage(cfg, "")
+}
+
+// Reads one page (20) of the finished scheduled runs that match `filter`, and returns the one that started last.
+//
+// Args:
+//   - `filter`: More query parameters for the run list, starting with `&`. Empty for none
+//
+// Returns:
+//   - The run. `nil` if the page is empty, or if there is no workflow (GitHub answers 404)
+func readLatestScheduledRunOnPage(cfg *Config, filter string) (*SyncRun, error) {
 	var list struct {
 		Runs []SyncRun `json:"workflow_runs"`
 	}
-	err := callRepoAPI(cfg, http.MethodGet, syncWorkflowAPIPath+"/runs?event=schedule&status=completed&per_page=20", nil, &list)
+	err := callRepoAPI(cfg, http.MethodGet, syncWorkflowAPIPath+"/runs?event=schedule&status=completed&per_page=20"+filter, nil, &list)
 	if hasGitHubStatus(err, http.StatusNotFound) { // If there is no workflow, its run list is 404 too
 		return nil, nil
 	}
@@ -194,7 +221,7 @@ func RunScheduledSync(cfg *Config, deadline time.Time, now time.Time) (string, e
 	if err != nil {
 		return "", err
 	}
-	last, err := readLastScheduledRun(cfg)
+	last, err := readLastScheduledRun(cfg, now)
 	if err != nil {
 		return "", err
 	}
@@ -302,7 +329,7 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 
 	status := SyncStatus{IntervalDays: written.intervalDays(), EnabledSince: written.EnabledSince, Workflow: state}
 	if workflow != nil {
-		if status.LastScheduledRun, err = readLastScheduledRun(cfg); err != nil {
+		if status.LastScheduledRun, err = readLastScheduledRun(cfg, time.Now()); err != nil {
 			return SyncStatus{}, err
 		}
 	}
@@ -360,7 +387,7 @@ func ReadSyncStatus(cfg *Config) (SyncStatus, error) {
 	wg.Add(3)
 	go func() { defer wg.Done(); settings, errs[0] = readSyncConfig(cfg) }() // Each goroutine writes a different variable, so writing without a lock doesn't overlap
 	go func() { defer wg.Done(); workflow, errs[1] = readSyncWorkflow(cfg) }()
-	go func() { defer wg.Done(); last, errs[2] = readLastScheduledRun(cfg) }()
+	go func() { defer wg.Done(); last, errs[2] = readLastScheduledRun(cfg, time.Now()) }()
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: joins several errors into one. `nil` if all are `nil`
 		return SyncStatus{}, err

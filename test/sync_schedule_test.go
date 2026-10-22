@@ -143,7 +143,8 @@ func TestScheduledSync(t *testing.T) {
 //   - If the last finished scheduled run failed, it syncs again even on a day that doesn't match the interval
 //   - Only finished scheduled runs count for that check.
 //     It leaves out the run in progress (the run that sent the scheduled call) and manual runs (`workflow_dispatch`),
-//     and looks at the one that started last, whatever the order of the list
+//     and looks at the one that started last, whatever the order of the list.
+//     It still finds it when it isn't on the first page of the list, and when it is older than a week
 func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starringDenied = true
@@ -163,6 +164,12 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	run := func(event string, status string, conclusion string, hoursAgo int) fakeRun {
 		return fakeRun{event: event, status: status, conclusion: conclusion, started: notDue.Add(-time.Duration(hoursAgo) * time.Hour)}
 	}
+	// 25 older successes come first in the list, so the newest run (a failure) isn't on the first page of 20
+	pastFirstPage := []fakeRun{}
+	for day := 8; day < 33; day++ {
+		pastFirstPage = append(pastFirstPage, run("schedule", "completed", "success", day*24))
+	}
+	pastFirstPage = append(pastFirstPage, run("schedule", "completed", "failure", 24))
 	// On a day that doesn't match the interval, checks the result while changing only the run list
 	for _, c := range []struct {
 		name string
@@ -174,6 +181,8 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		{"failed, then succeeded", []fakeRun{run("schedule", "completed", "success", 24), run("schedule", "completed", "failure", 48)}, "not_due"},
 		{"only the running call itself is newer", []fakeRun{run("schedule", "in_progress", "", 0), run("schedule", "completed", "success", 24)}, "not_due"},
 		{"a manual run failed", []fakeRun{run("workflow_dispatch", "completed", "failure", 1), run("schedule", "completed", "success", 24)}, "not_due"},
+		{"the newest run isn't on the first page", pastFirstPage, "synced"},
+		{"the last run failed 10 days ago", []fakeRun{run("schedule", "completed", "failure", 240)}, "synced"},
 	} {
 		gh.mu.Lock()
 		gh.runs = c.runs
