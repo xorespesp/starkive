@@ -285,7 +285,7 @@ func ReadReadmeSnapshot(ctx context.Context, repo *DBRepo, itemID int64) (Readme
 // Number of groups that items with a snapshot are checked in, one group per sync day.
 // A sync checks the items whose `ID % readmeRefreshGroups` equals the day number (`syncDayNumber`) modulo it.
 // It is a prime, so it shares no factor with the sync intervals (1, 2, 3, 7 days).
-// So the groups come up in turn at any interval, and each item with a snapshot is checked again once in 61 syncs (61 days when syncing daily)
+// So the groups come up in turn at any interval, and each item with a snapshot is checked again at least once in 61 syncs (61 days when syncing daily)
 const readmeRefreshGroups = 61
 
 // Most READMEs written in one commit.
@@ -305,7 +305,8 @@ const readmeFetchParallel = 3
 const readmeCommitReserve = 2 * githubTimeout
 
 // Brings the README snapshots of the archive in line with the READMEs on GitHub, until `endBy`.
-//  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`), each in random order.
+//  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`),
+//     then every other item with only the absent marker, each in random order.
 //     Items in `skippedIDs` aren't asked
 //  2. Fetches up to `maxReadmesPerCommit` READMEs (`fetchReadmesInParallel`), and writes them in one commit (`writeFetchedReadmesInSingleCommit`)
 //  3. Goes on with the next batch while time is left
@@ -322,7 +323,12 @@ const readmeCommitReserve = 2 * githubTimeout
 //     Running out of time, reaching the rate limit or every call of a batch failing isn't an error: what was fetched is committed if time is left for the commit,
 //     it is logged, and the next sync goes on
 //
-// NOTE: Snapshots of items no longer in the archive are deleted in every commit it makes.
+// NOTE: Absent markers are asked again in every sync, because a missing record is worse than an old one.
+// A README added later, or one that an older rule failed to find, is then saved by the next sync.
+// They come after today's group, so they only use the time left.
+// However many there are, each item is still checked at least once in `readmeRefreshGroups` syncs.
+//
+// Snapshots of items no longer in the archive are deleted in every commit it makes.
 // With nothing to check, it still runs the commit step for them, and a commit is made only if there is something to delete.
 // So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
 func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time) (int, error) {
@@ -345,20 +351,25 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 	todaysGroup := syncDayNumber(now) % readmeRefreshGroups
 	uncheckedItems := []StarItem{}
 	todaysItems := []StarItem{}
+	absentItems := []StarItem{}
 	for _, item := range starItems {
+		snapshots := snapshotsByID[item.ID]
 		switch {
 		case isSkipped[item.ID]:
 		case item.NodeID == "": // An item without `node_id` can't be asked about with GraphQL
-		case len(snapshotsByID[item.ID]) == 0:
+		case len(snapshots) == 0:
 			uncheckedItems = append(uncheckedItems, item)
 		case item.ID%readmeRefreshGroups == todaysGroup:
 			todaysItems = append(todaysItems, item)
+		case !slices.ContainsFunc(snapshots, func(snapshot readmeSnapshot) bool { return !snapshot.isAbsent }): // No saved README
+			absentItems = append(absentItems, item)
 		}
 	}
 	// Shuffled, so a run that can't check them all leaves different items for the next run
 	rand.Shuffle(len(uncheckedItems), func(i int, j int) { uncheckedItems[i], uncheckedItems[j] = uncheckedItems[j], uncheckedItems[i] })
 	rand.Shuffle(len(todaysItems), func(i int, j int) { todaysItems[i], todaysItems[j] = todaysItems[j], todaysItems[i] })
-	queue := append(uncheckedItems, todaysItems...)
+	rand.Shuffle(len(absentItems), func(i int, j int) { absentItems[i], absentItems[j] = absentItems[j], absentItems[i] })
+	queue := slices.Concat(uncheckedItems, todaysItems, absentItems)
 
 	fetchEndBy := endBy.Add(-readmeCommitReserve) // Time by which the README calls of a batch end, so the commit has time left
 	checked := 0

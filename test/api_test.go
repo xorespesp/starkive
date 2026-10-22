@@ -1595,7 +1595,7 @@ func TestSync(t *testing.T) {
 	}
 
 	// Running it again has nothing to add, no changed metadata and no changed README, so no commit is made.
-	// The READMEs of today's group are asked again, and which items are in it depends on the date, so that count isn't compared
+	// The absent markers and the READMEs of today's group are asked again, and which items are in the group depends on the date, so that count isn't compared
 	result, err = core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy())
 	result.NumCheckedReadmes = 0
 	if err != nil || result != (core.ArchiveSyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {

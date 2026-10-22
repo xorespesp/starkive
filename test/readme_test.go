@@ -322,6 +322,47 @@ func TestSyncReadmeSnapshotsWithGitHubAsksUncheckedItemsFirst(t *testing.T) {
 	}
 }
 
+// Tests that items with only the absent marker are asked in every sync, after today's group.
+// 31 items (1 to 31) have the absent marker and aren't in today's group, and item 5 has a README on GitHub now.
+// Item 61 has a saved README and is in today's group (`61 % 61 == 0`), and item 62 has a saved README and isn't.
+// So item 61 goes in the first call of 30, the absent markers fill the rest, and item 62 isn't asked
+func TestSyncReadmeSnapshotsWithGitHubAsksAbsentMarkersAfterTodaysGroup(t *testing.T) {
+	ctx := context.Background()
+	items := []string{}
+	for id := 1; id <= 31; id++ {
+		items = append(items, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	for _, id := range []int{61, 62} {
+		items = append(items, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	gh := setup(t, "[\n"+strings.Join(items, ",\n")+"\n]\n", sampleStarLists)
+	repo := openTestDBRepo(t)
+	for id := 1; id <= 31; id++ {
+		gh.files[fmt.Sprintf("%s/%02d/%d.no-readme", core.ReadmesDBDir, id, id)] = ""
+	}
+	gh.files[core.ReadmesDBDir+"/61/61.md"] = "# Old\n"
+	gh.files[core.ReadmesDBDir+"/62/62.md"] = "# Old\n"
+	gh.readmes[5] = fakeReadme{name: "README.md", content: "# Added later\n"}
+	gh.readmes[61] = fakeReadme{name: "README.md", content: "# Old\n"}
+	gh.readmes[62] = fakeReadme{name: "README.md", content: "# Changed\n"}
+
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 32 {
+		t.Fatalf("sync: %d %v", checked, err)
+	}
+	_, markerLeft := gh.files[core.ReadmesDBDir+"/05/5.no-readme"]
+	if gh.readFile(core.ReadmesDBDir+"/05/5.md") != "# Added later\n" || markerLeft || gh.readFile(core.ReadmesDBDir+"/62/62.md") != "# Old\n" {
+		t.Errorf("files %q", gh.files)
+	}
+	for _, listedIDs := range gh.readmeListedIDs {
+		if slices.Contains(listedIDs, "R_62") {
+			t.Errorf("item 62 isn't in today's group but was asked: %v", listedIDs)
+		}
+		if slices.Contains(listedIDs, "R_61") && len(listedIDs) != 30 {
+			t.Errorf("item 61 was asked with %d items, not in the first call: %v", len(listedIDs), listedIDs)
+		}
+	}
+}
+
 // Tests that the sync doesn't ask the README of a repository that the metadata step found missing.
 // It would only get an absent marker
 func TestSyncDoesNotAskReadmesOfMissingRepos(t *testing.T) {
@@ -360,8 +401,8 @@ func TestSyncReadmeSnapshotsWithGitHubDeletesSnapshotsOfRemovedItems(t *testing.
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	repo := openTestDBRepo(t)
-	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
-	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
+	gh.files[core.ReadmesDBDir+"/01/1.md"] = "# One\n" // Saved READMEs, as absent markers are asked in every sync
+	gh.files[core.ReadmesDBDir+"/02/2.md"] = "# Two\n"
 	gh.files[core.ReadmesDBDir+"/03/3.md"] = "# Removed item\n" // Item 3 isn't in the archive
 
 	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(3)) // Group 3: neither item 1 nor item 2
