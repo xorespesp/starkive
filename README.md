@@ -1,8 +1,10 @@
 # starkive
 
-A private archive for the GitHub repositories you want to remember. Save repositories without starring them, sort them into lists, write notes, and keep them even after they disappear from GitHub.
+A private archive for the GitHub repositories you want to remember. It keeps their details and README even after they are deleted from GitHub. Save repositories without starring them, sort them into lists, and write notes.
 
 ![starkive dashboard preview](docs/preview.png)
+
+![The saved README of a deleted repository](docs/readme-snapshot.png)
 
 ## Why
 
@@ -14,21 +16,18 @@ GitHub stars are a public bookmark list:
 
 Keeping a private list in a notes app instead means copying links by hand, writing descriptions yourself, and finding out too late that a link is dead. starkive does that bookkeeping for you, in a repository you own.
 
-starkive is developed with a focus on keeping a private, lasting record of the repositories you care about, rather than on extras like AI tagging or smart search.
+starkive focuses on keeping a private, lasting record of the repositories you care about, not on extras like AI tagging or smart search.
 
 ## What you get
 
 - **Save without starring.** Add any repository from the dashboard, or from any GitHub repository page with the **Add to starkive** bookmarklet. Nothing shows up on your public profile.
-- **Entries outlive the repository.** starkive keeps each repository's description, language, topics and license, and a copy of its README (the first 8 KB). When a repository is deleted or made private, its entry and saved README stay readable, and the entry is marked as unavailable, so you still know what it was. Renames are followed, and unstarring on GitHub doesn't remove anything.
+- **Entries outlive the repository.** starkive keeps each repository's description, language, topics and license. Once a repository is in your archive (right away when you add it, at the next sync for a new star), unstarring it, or having it deleted or made private, doesn't take it away: the entry stays readable, and a repository that is gone is marked as unavailable. Renames are followed.
+- **README included.** starkive also saves the first 8 KB of each repository's README, when you add it or at the next sync, so you can still read what a repository was about after it is gone.
 - **Yours, in your own repository.** The archive is plain JSON and text files in a repository on your GitHub account (private by default), and every change is a commit, so you have the full history and can take it anywhere. Lists and notes are yours alone, and only your GitHub account can sign in.
 - **No server to run, no bill.** It runs on Vercel's free plan and GitHub, with no database to host or maintain.
 - **One place on every device.** A web dashboard you can open from your laptop or phone, with search, lists and notes.
 - **Bring your stars along.** Import the stars you already have, with their GitHub star lists, and let starkive pick up new stars automatically (every day by default).
 - **Read-only toward your stars.** starkive never stars or unstars anything. Its token can write only to your archive repository, and otherwise just reads your stars.
-
-The saved README of a repository, still readable in the dashboard after the repository was deleted from GitHub:
-
-![The saved README of a deleted repository](docs/readme-snapshot.png)
 
 ## Quickstart
 
