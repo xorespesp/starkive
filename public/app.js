@@ -564,6 +564,7 @@ const ICONS = {
     'M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z',
   list:
     'M5.75 2.5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5Zm0 5h8.5a.75.75 0 0 1 0 1.5h-8.5a.75.75 0 0 1 0-1.5ZM2 14a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm1-6a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM2 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z',
+  book: 'M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.06 0l-.622-.621A2.25 2.25 0 0 0 5.258 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574ZM8.755 4.75l-.004 7.322a3.752 3.752 0 0 1 1.992-.572H14.5v-9h-3.495a2.25 2.25 0 0 0-2.25 2.25Z',
   repo: 'M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.249.249 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z',
   linkExternal:
     'M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.854-1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z',
@@ -975,6 +976,77 @@ async function openDeleteStarList(starList) {
 }
 
 /**
+ * Opens the dialog that shows the README snapshot of `item`, as plain text.
+ * It fetches the snapshot when it opens (`GET /api/archive-repo-meta?id=`), and shows a loading line until then.
+ *
+ * @param {object} item Archive item
+ *
+ * NOTE: The README is someone else's text, so it goes in with `textContent` only, never as HTML.
+ * A README cut at 8 KB ends with a line that says so.
+ * Copy puts only the README text on the clipboard, without that line.
+ * Sync doesn't ask for the README of a repository that is gone, so one gone before its first check never gets one.
+ * The message for a README not checked yet says so for those, instead of promising the next sync.
+ */
+function openReadme(item) {
+  const v = view(item);
+  const content = el('div', {}, el('p', { className: 'muted' }, spinner(), ' Loading…'));
+  const copy = el('button', { type: 'button', className: 'ghost', textContent: 'Copy', hidden: true }); // Shown once a saved README is in
+  const close = el('button', { type: 'button', className: 'ghost', textContent: 'Close' });
+  const panel = el(
+    'div',
+    { className: 'dialog-body' },
+    el('h2', { textContent: 'Saved README' }),
+    el('p', { className: 'muted', textContent: v.name }),
+    content,
+    el('div', { className: 'actions' }, copy, close),
+  );
+  const modal = openModal({ panel, className: 'readme-dialog' });
+  close.onclick = modal.close;
+  (async () => {
+    try {
+      const { readme } = await api(`archive-repo-meta?id=${item.id}`);
+      if (readme.state === 'saved') {
+        const text = readme.text ?? '';
+        // One element per line, so CSS numbers the lines (`.readme-line`).
+        // The numbers aren't text, so selecting and copying leave them out.
+        // Each line keeps its line break, so text selected across lines keeps its empty lines (an empty element adds no line break to it)
+        const lines = text.replace(/\r?\n$/, '').split(/\r?\n/);
+        const pre = el('pre', { className: 'readme-text' }, ...lines.map((line) => el('span', { className: 'readme-line', textContent: `${line}\n` })));
+        // The number column is as wide as the largest number.
+        // CSP blocks inline `style` attributes, so it is set through CSSOM
+        pre.style.setProperty('--line-digits', String(String(lines.length).length));
+        content.replaceChildren(pre);
+        if (readme.truncated) content.append(el('p', { className: 'readme-cut', textContent: '(Truncated at 8 KB)' }));
+        copy.hidden = false;
+        // Timer that puts back the "Copy" label.
+        // A new click restarts it, so the label stays 1.5 seconds after the last click
+        let copyLabelTimer = null;
+        copy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            copy.textContent = 'Copied';
+          } catch {
+            copy.textContent = 'Copy failed'; // The browser refused, or has no clipboard here (only HTTPS pages and localhost have one)
+          }
+          clearTimeout(copyLabelTimer);
+          copyLabelTimer = setTimeout(() => (copy.textContent = 'Copy'), 1500);
+        };
+      } else if (readme.state === 'absent') {
+        content.replaceChildren(el('p', { className: 'muted', textContent: 'This repository had no README when it was last checked.' }));
+      } else if (readme.state === 'unchecked') {
+        const message = v.available ? 'Not saved yet. The next sync saves it.' : 'No README was saved before this repository became unavailable.';
+        content.replaceChildren(el('p', { className: 'muted', textContent: message }));
+      } else {
+        content.replaceChildren(el('p', { className: 'dialog-error', textContent: "The server's answer about this README isn't one this page knows." }));
+      }
+    } catch (err) {
+      if (isCancelled(err)) return; // The session closed, so the dialog is already closed too
+      content.replaceChildren(el('p', { className: 'dialog-error', textContent: err.message }));
+    }
+  })();
+}
+
+/**
  * Opens a dialog for choosing an item's star lists with checkboxes.
  * It does the same job as the star list menu next to GitHub's Star button.
  * A star list created inside the dialog is added to the list right away, already checked.
@@ -1283,7 +1355,7 @@ function noteEditor(item, note) {
 /**
  * Draws one archive item.
  * Like GitHub's Stars tab, it stacks the name, description, topics, note and meta details.
- * The star list, note and remove icons go at the top right.
+ * The saved README, star list, note and remove icons go at the top right.
  * `view` decides the repository details.
  *
  * @param {object} item Archive item
@@ -1331,6 +1403,7 @@ function renderItem(item) {
       el(
         'div',
         { className: 'item-actions' },
+        withFocusKey(iconButton('book', 'Saved README', () => openReadme(item)), `item:${item.id}:readme`),
         withFocusKey(iconButton('list', 'Lists', () => openMembership(item)), `item:${item.id}:lists`),
         withFocusKey(iconButton('pencil', item.note ? 'Edit note' : 'Add note', () => toggleNoteEditor(item)), `item:${item.id}:note`),
         withFocusKey(iconButton('trash', 'Remove from archive', remove, 'danger'), `item:${item.id}:remove`),

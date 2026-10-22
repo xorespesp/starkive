@@ -944,6 +944,65 @@ dialog.dialog .import-row.archived {
   border-color: var(--border);
 }
 
+/* Saved README dialog: wider than the others, and only the text scrolls */
+
+dialog.readme-dialog {
+  width: min(760px, calc(100% - 32px));
+}
+
+.readme-dialog .dialog-body {
+  display: grid;
+  gap: 12px;
+}
+
+.readme-text {
+  margin: 0;
+  max-height: min(60vh, 560px);
+  overflow: auto;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  counter-reset: readme-line;
+}
+
+/* One line of the README, with its number in a column on the left like GitHub's code view.
+   A long line wraps under its own text, not under the number */
+.readme-line {
+  display: block;
+  position: relative;
+  padding-left: calc(var(--line-digits, 2) * 1ch + 16px);
+}
+
+/* The number is drawn by CSS, so it isn't part of the text when it is selected or copied.
+   Its alternative text is empty (after `/`), so screen readers don't read it either.
+   A browser that doesn't know that form keeps the first `content` */
+.readme-line::before {
+  counter-increment: readme-line;
+  content: counter(readme-line);
+  content: counter(readme-line) / '';
+  position: absolute;
+  left: 0;
+  width: calc(var(--line-digits, 2) * 1ch); /* `--line-digits` is the number of digits of the last line number, set by `openReadme` */
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* The line under a README cut at 8 KB */
+.readme-cut {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: center;
+}
+
 /* Settings dialog */
 
 dialog.settings-dialog {
