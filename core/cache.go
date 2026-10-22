@@ -16,7 +16,8 @@ import (
 // even when they repeat.
 // Serverless instances can start fresh at any time, and they don't share memory.
 // So it only holds values that may be a little stale.
-// Security checks (allowed user, state, sync key) don't rely on this cache.
+// The state and the sync key are checked without this cache.
+// The allowed user (the token owner) is kept in it, but the token is part of the key, and the owner of a token never changes.
 type cache[V any] struct {
 	entries sync.Map // Key -> `cacheEntry[V]`. `sync.Map` is a map that many goroutines can use without a separate lock
 }
@@ -30,7 +31,7 @@ type cacheEntry[V any] struct {
 // Gets a kept value.
 //
 // Args:
-//   - `key`: Cache key (`makeEnvCacheKey`, `makeRepoCacheKey`)
+//   - `key`: Cache key (`buildEnvCacheKey`, `buildDBRepoCacheKey`)
 //
 // Returns:
 //   - The kept value and `true`. The zero value of `V` and `false` if it is missing or expired
@@ -44,7 +45,8 @@ func (c *cache[V]) get(key string) (V, bool) {
 	return zero, false
 }
 
-// Keeps `value` under `key` for `ttl`. Replaces any value with the same key
+// Keeps `value` under `key` for `ttl`.
+// Replaces any value with the same key
 func (c *cache[V]) put(key string, value V, ttl time.Duration) {
 	c.entries.Store(key, cacheEntry[V]{value: value, expires: time.Now().Add(ttl)})
 }
@@ -55,7 +57,7 @@ func (c *cache[V]) put(key string, value V, ttl time.Duration) {
 // NOTE: In production, an instance's environment variables don't change.
 // But tests and the local dev server run in one process while changing the fake GitHub address and the environment variables.
 // All these values go into the key, so a value kept under other settings is never used.
-func makeEnvCacheKey(cfg *Config) string {
+func buildEnvCacheKey(cfg *EnvConfig) string {
 	return cfg.GitHubAPI + "\n" + cfg.DBRepoAccessToken + "\n" + strconv.FormatInt(cfg.DBRepoID, 10)
 }
 
@@ -64,6 +66,6 @@ func makeEnvCacheKey(cfg *Config) string {
 //
 // NOTE: The token is in the key because the App's client secret is decrypted with a key made from the token.
 // When the token changes, the result changes even for the same file.
-func makeRepoCacheKey(cfg *Config) string {
-	return cfg.GitHubAPI + "\n" + cfg.DBRepoFullName + "\n" + cfg.DBRepoBranch + "\n" + cfg.DBRepoAccessToken
+func buildDBRepoCacheKey(repo *DBRepo) string {
+	return repo.cfg.GitHubAPI + "\n" + repo.fullName + "\n" + repo.branch + "\n" + repo.cfg.DBRepoAccessToken
 }

@@ -39,7 +39,8 @@ var webFiles embed.FS
 // Name of the cookie that holds this run's key
 const setupCookieName = "starkive_setup"
 
-// CSP added to the setup page responses. It uses only scripts and styles from this server, and connects only to this server
+// CSP added to the setup page responses.
+// It uses only scripts and styles from this server, and connects only to this server
 const setupPageCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // One line to show on the setup page
@@ -51,7 +52,8 @@ type webLine struct {
 }
 
 // One prompt shown on the page.
-// Usually an input box. If `Waiting` is set, it is a waiting prompt instead of an input box (`waitForValue`)
+// Usually an input box.
+// If `Waiting` is set, it is a waiting prompt instead of an input box (`waitForValue`)
 type webPrompt struct {
 	ID          int           `json:"id"`           // Prompt number. Tells whether an answer or a switch request is for the current prompt
 	Text        string        `json:"text"`         // The prompt. On a waiting prompt, it goes in front of the received value when that value is added as a line
@@ -138,7 +140,8 @@ func (u *webUI) step(n int) {
 // Adds one line of guidance `line`
 func (u *webUI) say(line string) { u.add(webLine{Kind: "say", Text: line}) }
 
-// Adds one line `line` that must not be missed. The page shows it in a box that stands out
+// Adds one line `line` that must not be missed.
+// The page shows it in a box that stands out
 func (u *webUI) note(line string) { u.add(webLine{Kind: "note", Text: line}) }
 
 // Sets the result card content: the last message `text`, and the next link `target` to open with its label `label`.
@@ -224,7 +227,8 @@ func (u *webUI) show(p *webPrompt, received <-chan string) (string, waitResult) 
 	}
 }
 
-// Marks the setup as finished. `failed` is whether it ended with failure
+// Marks the setup as finished.
+// `failed` is whether it ended with failure
 func (u *webUI) finish(failed bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -247,7 +251,8 @@ func (u *webUI) hasSession(r *http.Request) bool {
 }
 
 // Sets the response headers of the setup page.
-// The page and the progress can contain the environment variable value with the token, so these headers keep them from being stored anywhere
+// The page and the progress can contain the environment variable value with the token.
+// `no-store` and `no-referrer` keep it out of caches and other sites, and CSP and `nosniff` keep foreign scripts away from it
 func setSetupPageHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", setupPageCSP)

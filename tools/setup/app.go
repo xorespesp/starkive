@@ -40,7 +40,7 @@ var errDashboardOtherValue = errors.New("the dashboard is deployed with a differ
 //
 // Args:
 //   - `u`: Where to ask and show things
-//   - `cfg`: The DB repository and token being set up. It checks that the deployment uses these values (`checkDashboard`)
+//   - `cfg`: The DB repository ID and token being set up. It checks that the deployment uses these values (`checkDashboard`)
 //   - `defaultSite`: The address where the dashboard is expected. An empty string if unknown, and then it asks for the address from the start
 //   - `registered`: Whether `defaultSite` is the canonical address registered in the sign-in GitHub App. If so, it doesn't accept another address, even one that passes the check
 //
@@ -53,7 +53,7 @@ var errDashboardOtherValue = errors.New("the dashboard is deployed with a differ
 // So when the person chooses that, the check stops.
 // The canonical address doesn't change (the sign-in callback and the workflow use it).
 // So if an address is registered, an address entered by hand must be that address too.
-func askDashboardURL(u ui, cfg *core.Config, defaultSite string, registered bool) (string, error) {
+func askDashboardURL(u ui, cfg *core.EnvConfig, defaultSite string, registered bool) (string, error) {
 	const prompt = "Dashboard address:"
 	const hint = "the production domain under the Vercel project's Domains"
 	const manualEntryLabel = "Or enter the deployed dashboard's Vercel domain manually"
@@ -150,7 +150,7 @@ func normalizeDashboardURL(input string) (string, error) {
 // It doesn't follow redirects, and rejects them.
 // The addresses Vercel gives to each deployment (`*-<hash>.vercel.app`) are behind login protection and redirect to Vercel's sign-in page (measured).
 // If such an address were registered in the App, both GitHub's sign-in callback and the sync workflow's calls would be blocked.
-func checkDashboard(cfg *core.Config, site string) error {
+func checkDashboard(cfg *core.EnvConfig, site string) error {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return err
@@ -208,13 +208,13 @@ func checkDashboard(cfg *core.Config, site string) error {
 // The state is the value that checks that the start page and the returning request belong to this run.
 // These two paths don't look at the setup page's key cookie (terminal mode has no cookie).
 // It adds paths to the server, so call it only once per run.
-func createGitHubApp(ctx context.Context, u ui, server *localServer, cfg *core.Config, site string) (core.GitHubApp, error) {
+func createGitHubApp(ctx context.Context, u ui, server *localServer, dbRepo *core.DBRepo, site string) (core.GitHubApp, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return core.GitHubApp{}, err
 	}
 	state := hex.EncodeToString(random)
-	manifest, err := newGitHubAppManifest(cfg.DBRepoFullName, site, server.base+"/github-app/callback")
+	manifest, err := newGitHubAppManifest(dbRepo.FullName(), site, server.base+"/github-app/callback")
 	if err != nil {
 		return core.GitHubApp{}, err
 	}
@@ -235,7 +235,7 @@ func createGitHubApp(ctx context.Context, u ui, server *localServer, cfg *core.C
 		w.Header().Set("Cache-Control", "no-store")
 		fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>starkive setup</title><p>Opening GitHub…</p>
 <form id="f" method="post" action="%s"><input type="hidden" name="manifest" value="%s"></form>
-<script>document.getElementById('f').submit()</script>`, html.EscapeString(buildGitHubAppCreateURL(cfg, state)), html.EscapeString(manifest))
+<script>document.getElementById('f').submit()</script>`, html.EscapeString(buildGitHubAppCreateURL(dbRepo.EnvConfig(), state)), html.EscapeString(manifest))
 	})
 	// Where GitHub sends the user back after creating the App.
 	// A request with a different state or no code has nothing to do with this run, so it is rejected
@@ -245,7 +245,7 @@ func createGitHubApp(ctx context.Context, u ui, server *localServer, cfg *core.C
 			http.Error(w, "This page wasn't opened by this setup run.", http.StatusBadRequest)
 			return
 		}
-		app, err := createGitHubAppFromCode(ctx, cfg, query.Get("code"))
+		app, err := createGitHubAppFromCode(ctx, dbRepo.EnvConfig(), query.Get("code"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if err != nil {
 			fmt.Fprintln(w, "Creating the app failed. Close this tab and see the setup tool.")

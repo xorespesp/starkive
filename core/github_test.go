@@ -32,7 +32,7 @@ func TestCallGraphQL(t *testing.T) {
 		answer(w)
 	}))
 	t.Cleanup(server.Close)
-	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+	cfg := &EnvConfig{GitHubAPI: server.URL, DBRepoAccessToken: "test-token"}
 	type nodesData struct {
 		Nodes []*struct {
 			Name string `json:"name"`

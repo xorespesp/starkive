@@ -1,4 +1,4 @@
-// Unit tests for the error answers and the request deadline of `Respond` (`http.go`)
+// Unit tests for the error answers and the request deadline of `ServeAPIRequest` (`api_response.go`)
 package core
 
 import (
@@ -13,17 +13,17 @@ import (
 	"time"
 )
 
-// Tests the `ctx` that `Respond` gives the handler.
+// Tests the `ctx` that `ServeAPIRequest` gives the handler.
 // Its deadline is `requestTimeLimit` from now.
 // It isn't cancelled when the request's own `ctx` is (the browser went away), so a write that has started still ends
-func TestRespondGivesRequestDeadline(t *testing.T) {
+func TestServeAPIRequestGivesRequestDeadline(t *testing.T) {
 	browserGone, leave := context.WithCancel(context.Background())
 	leave()
 	req := httptest.NewRequest("GET", "http://example.test/api/archive-star-items", nil).WithContext(browserGone)
 	var deadline time.Time
 	var hasDeadline bool
 	var ctxErr error
-	Respond(httptest.NewRecorder(), req, func(w http.ResponseWriter, r *http.Request) error {
+	ServeAPIRequest(httptest.NewRecorder(), req, func(w http.ResponseWriter, r *http.Request) error {
 		deadline, hasDeadline = r.Context().Deadline()
 		ctxErr = r.Context().Err()
 		return nil
@@ -33,16 +33,16 @@ func TestRespondGivesRequestDeadline(t *testing.T) {
 	}
 }
 
-// Tests that `Respond` writes the cause of a 5xx answer to the server log when the answer leaves it out.
+// Tests that `ServeAPIRequest` writes the cause of a 5xx answer to the server log when the answer leaves it out.
 // The browser gets only the message, and the server log gets the cause (here, why GitHub couldn't be reached)
-func TestRespondLogsTheCauseOf502(t *testing.T) {
+func TestServeAPIRequestLogsTheCauseOf502(t *testing.T) {
 	var logged bytes.Buffer
 	savedOutput := log.Writer()
 	log.SetOutput(&logged)
 	t.Cleanup(func() { log.SetOutput(savedOutput) })
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://example.test/api/archive-star-items", nil)
-	Respond(rec, req, func(w http.ResponseWriter, r *http.Request) error {
+	ServeAPIRequest(rec, req, func(w http.ResponseWriter, r *http.Request) error {
 		return newGitHubUnreachableError(errors.New("dial tcp: connection refused"))
 	})
 	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "dial tcp") || !strings.Contains(logged.String(), "dial tcp: connection refused") {

@@ -150,12 +150,14 @@ func TestBuildVercelDeployURL(t *testing.T) {
 	}
 }
 
-// Guards the background check of the deployment. The dashboard side is the real server code (`api.HandleCheckDeployment`).
+// Guards the background check of the deployment.
+// The dashboard side is the real server code (`api.HandleCheckDeployment`).
 //   - While the dashboard is deployed with another value, it passes on nothing.
 //     Once it is redeployed with this setup's value, it passes on that address
-//   - After it is told to stop, it checks no more and passes on nothing
+//   - Calling the stop function more than once is safe, and a stopped check passes on nothing.
+//     (The address never answers, so this doesn't show that checks stop.)
 func TestWatchVercelDeployment(t *testing.T) {
-	cfg := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_4242"}
+	cfg := &core.EnvConfig{DBRepoID: 5150, DBRepoAccessToken: "token_4242"}
 	dashboard := httptest.NewServer(http.HandlerFunc(api.HandleCheckDeployment))
 	defer dashboard.Close()
 

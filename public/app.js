@@ -17,7 +17,8 @@
 const PAGE_SIZE = 60; // Items to draw each time the list grows. This avoids building thousands of DOM nodes at once
 // Max characters for input fields (`maxLength`).
 // They match the server limits (`core.MaxNoteLength`, `core.MaxStarListNameLength`, `core.MaxStarListDescriptionLength`).
-// The server does the real check. These values only stop typing past the limit
+// The server does the real check.
+// These values only stop typing past the limit
 const TEXT_LIMITS = { note: 2000, starListName: 100, starListDescription: 300 };
 // Repositories to ask about in one live details request.
 // GitHub GraphQL takes longer the more IDs it gets (100 IDs about 4.5 seconds, 25 IDs about 1.7 seconds, measured).
@@ -30,7 +31,8 @@ const ALL = ''; // Everything
 const UNLISTED = ':unlisted'; // Items that are in no star list
 const UNAVAILABLE = ':unavailable'; // Repositories that GitHub can no longer find
 
-// All page state. `render` draws from this alone
+// All page state.
+// `render` draws from this alone
 const state = {
   starItems: [], // All archive items (`db/star-items.json` as is)
   starLists: [], // Star list definitions `{ id, name, description }`
@@ -78,14 +80,17 @@ class ApiError extends Error {
   }
 }
 
-// Cancel handle (`AbortController`) of the open dashboard session. `null` on the sign-in screen.
+// Cancel handle (`AbortController`) of the open dashboard session.
+// `null` on the sign-in screen.
 // `api` puts its signal on every request except the sign-in API (`login-session`).
 // So closing the session (reload, sign-out, session expiry) cancels those requests in flight at once.
-// Because of this, async work doesn't need its own "is this still the same session?" check
+// So async work that awaits `api` stops at the cancel error, without its own "is this still the same session?" check.
+// A loop that swallows errors must still rethrow cancel errors (`api`)
 let sessionScope = null;
 
 /**
- * Opens a new dashboard session. All requests still running in the previous session are cancelled.
+ * Opens a new dashboard session.
+ * All requests still running in the previous session are cancelled.
  *
  * @returns {AbortSignal} This session's cancel signal. Long-running loops check it to see whether the session closed
  */
@@ -127,7 +132,7 @@ const isCancelled = (err) => err?.name === 'AbortError';
  * @param {string} path The path and query after `/api/` (e.g. `archive-star-items?id=3`)
  * @param {{ method?: string, body?: object, beforeSignIn?: boolean }} [options] HTTP method (GET by default) and the body to send as JSON.
  *   `beforeSignIn`: the request is sent before we know whether the user is signed in.
- *   A 401 then doesn't close the session, and is thrown to the caller (the early fetch in `start`)
+ *   A 401 then doesn't close the session, and is thrown to the caller
  * @returns {Promise<any>} The JSON from the server
  * @throws {ApiError} If the server answers with a failure. The message is the server's `error`
  * @throws {DOMException} `AbortError` if the request was cancelled because the session closed (`isCancelled`)
@@ -159,7 +164,8 @@ async function api(path, { method = 'GET', body, beforeSignIn = false } = {}) {
   try {
     errorBody = (await res.json()) ?? {};
   } catch {} // If the body isn't JSON (an error page from a proxy and so on), the status line becomes the message
-  // A 401 on a request inside the session means the session has ended. A 401 from the sign-in API is thrown to the caller as is
+  // A 401 on a request inside the session means the session has ended.
+  // A 401 from the sign-in API is thrown to the caller as is
   if (res.status === 401 && signal && !beforeSignIn) {
     if (!signal.aborted) endSession(SESSION_EXPIRED, { error: true }); // Don't close a session that is already closed
     signal.throwIfAborted();
@@ -224,7 +230,8 @@ function isSyncStatusOutdated(result) {
 
 /**
  * Receives the three archive files and puts them in `state`.
- * It clears the live repository details. `requestLiveMeta` fetches them separately, only for items on screen.
+ * It clears the live repository details.
+ * `requestLiveMeta` fetches them separately, only for items on screen.
  *
  * @param {AbortSignal} signal This session's cancel signal. It ties live details loading (`liveMetaLoader`) to this session
  * @param {Promise<[object[], object[], object[]]>} [archive] A request already sent (`fetchArchiveFiles`). If missing, it is sent now
@@ -255,7 +262,8 @@ async function fetchLiveMeta(nodeIds) {
 
 /**
  * Makes the live details loading state for one session.
- * Each session gets its own state. `signal` is `null` while no session is open.
+ * Each session gets its own state.
+ * `signal` is `null` while no session is open.
  *
  * @param {AbortSignal|null} signal This session's cancel signal
  * @returns {{ signal: AbortSignal|null, requested: Set<string>, queue: string[], workers: number, error: Error|null, reportErrors: boolean, idleWaiters: Function[] }}
@@ -302,7 +310,8 @@ function requestLiveMeta(items) {
  *
  * @param {object} loader Loading state of the session that started this worker (`newLiveMetaLoader`)
  *
- * NOTE: Before each batch, it checks whether the session closed. It stops on a cancel error.
+ * NOTE: Before each batch, it checks whether the session closed.
+ * It stops on a cancel error.
  * `api` uses the session signal of the moment it is called.
  * If a worker of a closed session kept running, its next batch would go out with the session of that time
  * (no session after sign-out, a new session after reload).
@@ -362,7 +371,8 @@ function scheduleRender() {
  *   `stars`, `forks`, `pushedAt` (these three exist only in live details, `null` otherwise), `archived`
  *
  * NOTE: Values come from live details if present (they are right even if they differ from the snapshot).
- * Before live details arrive, or if they can't be fetched, the snapshot is used. If neither exists, the saved name is used.
+ * Before live details arrive, or if they can't be fetched, the snapshot is used.
+ * If neither exists, the saved name is used.
  * "Gone" means only that GitHub clearly answered it can't find the repository.
  * That is either a live check, or, before a live check, the record left by sync.
  * A repository whose request merely failed is not treated as gone.
@@ -390,14 +400,13 @@ function view(item) {
 }
 
 // ---------------------------------------------------------------------------
-// Change requests. They update `state` with the server's result and redraw
+// Change requests.
+// They update `state` with the server's result and redraw
 // ---------------------------------------------------------------------------
 
 /**
  * Adds a repository to the archive directly, without a Star, and puts it at the top of the list.
  * Once the server confirms the add, it goes into the list right away.
- * Live details like description, language and Star count are not awaited.
- * The page redraws as they arrive in the background.
  *
  * @param {string} fullNameOrUrl owner/repo or a GitHub repository address. The server parses it
  * @param {number} starListId ID of the star list to add it to. 0 means no star list
@@ -417,7 +426,8 @@ async function addRepo(fullNameOrUrl, starListId) {
 }
 
 /**
- * Changes an item's note or its star lists. It updates `state` with the item the server returns.
+ * Changes an item's note or its star lists.
+ * It updates `state` with the item the server returns.
  *
  * @param {number} id Archive item ID (GitHub repository ID)
  * @param {{ note?: string, star_list_ids?: number[] }} changes What to change. Missing keys stay as they are
@@ -429,7 +439,8 @@ async function updateStarItem(id, changes) {
 }
 
 /**
- * Removes an item from the archive. The item leaves the page only after the server says it was removed.
+ * Removes an item from the archive.
+ * The item leaves the page only after the server says it was removed.
  *
  * @param {number} id Archive item ID
  */
@@ -441,7 +452,8 @@ async function removeStarItem(id) {
 }
 
 /**
- * Creates a new star list. The server issues the ID.
+ * Creates a new star list.
+ * The server issues the ID.
  *
  * @param {string} name Name. If the same name already exists (ignoring surrounding spaces and case), the server refuses with 409
  * @param {string} description Description. An empty string if there is none
@@ -468,7 +480,8 @@ async function updateStarList(id, name, description) {
 }
 
 /**
- * Deletes a star list. Its repositories stay in the archive, and only their membership is removed.
+ * Deletes a star list.
+ * Its repositories stay in the archive, and only their membership is removed.
  * The server deletes the definition and cleans up membership in one commit.
  * The page updates `state` to match that result.
  *
@@ -506,7 +519,8 @@ function starListIdsOf(item) {
 
 /**
  * Makes the progress indicator: three dots that rise in turn (`.spinner`).
- * It is decoration, so screen readers skip it. The text next to it says what is going on.
+ * It is decoration, so screen readers skip it.
+ * The text next to it says what is going on.
  *
  * @returns {HTMLSpanElement}
  */
@@ -541,7 +555,8 @@ function el(tag, props = {}, ...children) {
  */
 const safeUrl = (url) => (typeof url === 'string' && url.startsWith('https://github.com/') ? url : null);
 
-// SVG paths (16x16) of the icons used on the page. Only the ones we use are taken from GitHub's Octicons (MIT license)
+// SVG paths (16x16) of the icons used on the page.
+// Only the ones we use are taken from GitHub's Octicons (MIT license)
 const ICONS = {
   pencil:
     'M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z',
@@ -604,7 +619,9 @@ function iconButton(name, label, onclick, className = '') {
   return button;
 }
 
-// Top bar menu open now (a `.menu` element). `null` if none. Only one menu is open at a time
+// Top bar menu open now (a `.menu` element).
+// `null` if none.
+// Only one menu is open at a time
 let openMenu = null;
 
 /** Closes the open top bar menu, if any. */
@@ -671,7 +688,8 @@ function bindMenu(menu) {
 const openModals = new Set();
 
 /**
- * Opens a dialog. Every dialog is made with this function, so they all close the same way.
+ * Opens a dialog.
+ * Every dialog is made with this function, so they all close the same way.
  *
  * @param {object} options
  * @param {HTMLElement} options.panel Element that holds all the dialog content. Padding goes on this element (`.dialog-panel`)
@@ -720,7 +738,7 @@ function openModal({ panel, className = '', onClose }) {
 
 const DIALOG_CLOSE_MS = 200; // Time a closed dialog stays in the page before it is removed (milliseconds). Longer than the fade-out in `style.css`
 
-/** Closes all open dialogs. Called when the session closes. */
+/** Closes all open dialogs. */
 function closeAllModals() {
   for (const modal of [...openModals]) modal.close(); // Closing removes it from `openModals`, so loop over a copy
 }
@@ -902,7 +920,8 @@ function starListFields(starList = { name: '', description: '' }) {
 }
 
 /**
- * Opens the dialog for creating a new star list. After it is created, the sidebar opens it.
+ * Opens the dialog for creating a new star list.
+ * After it is created, the sidebar opens it.
  *
  * @returns {Promise<boolean>} `true` if created
  */
@@ -944,7 +963,8 @@ function openEditStarList(starList) {
 }
 
 /**
- * Asks whether to delete a star list, and deletes it if confirmed. Its repositories stay in the archive.
+ * Asks whether to delete a star list, and deletes it if confirmed.
+ * Its repositories stay in the archive.
  *
  * @param {object} starList The star list to delete
  */
@@ -966,7 +986,8 @@ function openMembership(item) {
   const current = new Set(starListIdsOf(item));
   const options = el('div', { className: 'star-list-options' });
   const empty = el('p', { className: 'muted', textContent: 'No lists yet. Create one below.', hidden: state.starLists.length > 0 });
-  // Adds one checkbox row. Once there is at least one, the "none yet" text is hidden
+  // Adds one checkbox row.
+  // Once there is at least one, the "none yet" text is hidden
   const addOption = (starList, checked) => {
     options.append(el('label', { className: 'star-list-option' }, el('input', { type: 'checkbox', value: starList.id, checked }), starList.name));
     empty.hidden = true;
@@ -994,7 +1015,8 @@ function openMembership(item) {
     indicator.remove();
     createButton.disabled = false;
   };
-  // Enter in the name input creates a star list. It doesn't save the dialog (submit the form)
+  // Enter in the name input creates a star list.
+  // It doesn't save the dialog (submit the form)
   newName.onkeydown = (ev) => {
     if (ev.key === 'Enter') {
       ev.preventDefault();
@@ -1092,7 +1114,8 @@ function filteredStarItems() {
 }
 
 /**
- * Refills the language select box from the current data. The most used languages come first.
+ * Refills the language select box from the current data.
+ * The most used languages come first.
  * If the chosen language no longer exists (for example, live details changed the language), it goes back to "all languages".
  */
 function renderLanguageOptions() {
@@ -1126,7 +1149,8 @@ function renderSidebar() {
     for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
   }
 
-  // One sidebar entry button. It has a focus key, so keyboard focus survives a redraw
+  // One sidebar entry button.
+  // It has a focus key, so keyboard focus survives a redraw
   const link = (value, label, count) => {
     const button = el(
       'button',
@@ -1158,7 +1182,7 @@ function renderSidebar() {
 function renderListHeader() {
   const starList = starListById(state.selected);
   const title = starList ? starList.name : { [UNLISTED]: 'Unlisted', [UNAVAILABLE]: 'Unavailable' }[state.selected] ?? 'All stars';
-  // `replaceChildren` inserts `undefined` as text, so the entry left out when there is no description is filtered out
+  // `replaceChildren` inserts `undefined` as text, so the description entry is filtered out when no star list is open or it has no description
   const parts = [
     el(
       'div',
@@ -1181,7 +1205,8 @@ const DATE = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', 
 const COUNT = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }); // Short form of large numbers: 1234 -> 1.2K
 
 /**
- * Makes a date element. On hover, it also shows the time.
+ * Makes a date element.
+ * On hover, it also shows the time.
  *
  * @param {string} prefix Word before the date (e.g. "Starred")
  * @param {string} iso ISO 8601 time
@@ -1194,8 +1219,10 @@ function dateLabel(prefix, iso) {
 
 /**
  * Opens or closes an item's note editor.
- * If closed, it makes a draft from the current note and opens it. If open, it drops the draft and closes it.
- * Editors of other items are not affected. It doesn't close while saving.
+ * If closed, it makes a draft from the current note and opens it.
+ * If open, it drops the draft and closes it.
+ * Editors of other items are not affected.
+ * It doesn't close while saving.
  *
  * @param {object} item Archive item
  */
@@ -1209,7 +1236,8 @@ function toggleNoteEditor(item) {
 
 /**
  * Saves an item's note draft.
- * On success, it closes that editor. On failure, it keeps the text so the user can fix it and try again.
+ * On success, it closes that editor.
+ * On failure, it keeps the text so the user can fix it and try again.
  *
  * @param {number} id Archive item ID
  */
@@ -1219,11 +1247,12 @@ async function saveNote(id) {
   note.saving = true;
   render();
   const ok = await run(() => updateStarItem(id, { note: note.draft }), 'Saving note', 'Note saved');
-  if (state.noteDrafts.get(id) !== note) return; // The session closed or the item was removed in the meantime
+  if (state.noteDrafts.get(id) !== note) return; // Signed out (`clearLoadedData` replaced the map) or the item was removed in the meantime
   if (ok) state.noteDrafts.delete(id);
   else note.saving = false;
   render();
-  // On failure, go back to the input so the user can fix it. Don't take focus from another editor the user is typing in
+  // On failure, go back to the input so the user can fix it.
+  // Don't take focus from another editor the user is typing in
   if (!ok && document.activeElement === document.body) focusByKey(`note:${id}`);
 }
 
@@ -1253,7 +1282,8 @@ function noteEditor(item, note) {
 /**
  * Draws one archive item.
  * Like GitHub's Stars tab, it stacks the name, description, topics, note and meta details.
- * The star list, note and remove icons go at the top right. `view` decides the repository details.
+ * The star list, note and remove icons go at the top right.
+ * `view` decides the repository details.
  *
  * @param {object} item Archive item
  * @returns {HTMLElement}
@@ -1283,7 +1313,8 @@ function renderItem(item) {
   // CSP blocks inline `style` attributes, so the color is set through CSSOM (`style.setProperty`). CSP doesn't apply to this
   if (language && v.languageColor) language.style.setProperty('--lang-color', v.languageColor);
 
-  // Star and fork counts. Not drawn if the value is `null` because there are no live details
+  // Star and fork counts.
+  // Not drawn if the value is `null` because there are no live details
   const stat = (iconName, count, label) =>
     count !== null && el('span', { className: 'stat', title: `${count.toLocaleString('en-US')} ${label}` }, icon(iconName), COUNT.format(count));
 
@@ -1351,7 +1382,8 @@ function withFocusKey(node, key) {
 }
 
 /**
- * Focuses the element with the given focus key. Does nothing if there is no such element.
+ * Focuses the element with the given focus key.
+ * Does nothing if there is no such element.
  *
  * @param {string} key Focus key
  */
@@ -1450,7 +1482,8 @@ const STARRED_PARALLEL = 6; // Pages of GitHub Stars fetched in parallel
  *   The Stars (each repository once), repository ID -> names of the GitHub star lists it is in (for display),
  *   and whether the GitHub star lists couldn't be read
  *
- * NOTE: If the list changes while pages are fetched, the same repository can come on two pages. So they are merged by ID.
+ * NOTE: If the list changes while pages are fetched, the same repository can come on two pages.
+ * So they are merged by ID.
  */
 async function fetchAllStarred(onProgress) {
   const first = await api('github-stars?page=1');
@@ -1470,7 +1503,9 @@ async function fetchAllStarred(onProgress) {
   // Keep only one copy of a repository that came on two pages because the list changed while fetching
   const byId = new Map();
   for (const s of pages.flat()) if (!byId.has(s.repo.id)) byId.set(s.repo.id, s);
-  // GitHub star lists are only for display. If the server can't read them, only `github_star_lists_failed` comes. The Stars are still shown
+  // GitHub star lists are only for display.
+  // If the server can't read them, only `github_star_lists_failed` comes.
+  // The Stars are still shown
   return { starredRepos: [...byId.values()], githubStarLists: first.github_star_lists ?? {}, githubStarListsFailed: first.github_star_lists_failed === true };
 }
 
@@ -1545,7 +1580,8 @@ function archivedImportRow(starredRepo) {
  *      To remove one from the public list of Stars, the user unstars it on GitHub through its link.
  *      After "Refresh" loads the list again, unstarred ones drop out
  *
- * NOTE: The result of the add is not guessed. The archive is fetched again to check it.
+ * NOTE: The result of the add is not guessed.
+ * The archive is fetched again to check it.
  * The commit may have happened even if the request failed (the server committed, but the response was lost).
  * Sending an Import again gives the same result, so if the result can't be checked, the user is asked to press it again.
  */
@@ -1553,7 +1589,8 @@ async function openImport() {
   let closed = false; // Whether the dialog closed (including when the session closed). After it closes, the page is not changed
   let busy = false; // `true` while loading the list or adding. All controls are locked then (`updateControls`)
   const status = el('p', { className: 'muted' });
-  // Shows work in progress in the status line, with the progress indicator in front. Setting `textContent` later removes the indicator
+  // Shows work in progress in the status line, with the progress indicator in front.
+  // Setting `textContent` later removes the indicator
   const showProgress = (text) => {
     status.className = 'muted';
     status.replaceChildren(spinner(), text);
@@ -1610,7 +1647,9 @@ async function openImport() {
     status.className = 'muted';
     status.textContent = `${starredRepos.length} ${starredRepos.length === 1 ? 'star' : 'stars'} on GitHub`;
 
-    // Import may have created star lists, or they may have been deleted elsewhere. So the options are refilled on every draw. The choice is kept
+    // Import may have created star lists, or they may have been deleted elsewhere.
+    // So the options are refilled on every draw.
+    // The choice is kept
     fillStarListOptions(starListPicker, 'No extra list', Number(starListPicker.value));
     rows = fresh.map((s) => importRow(s, isChecked(s), githubStarLists[s.repo.id] ?? []));
     for (const r of rows) r.input.onchange = updateControls;
@@ -1651,7 +1690,8 @@ async function openImport() {
     updateControls();
   };
 
-  // Fetches the GitHub Stars (again). On failure, it shows the error in the status line and returns `false`
+  // Fetches the GitHub Stars (again).
+  // On failure, it shows the error in the status line and returns `false`
   const loadStars = async () => {
     busy = true;
     updateControls();
@@ -1677,7 +1717,8 @@ async function openImport() {
     const before = new Set(starredRepos.map((s) => s.repo.id));
     const checkedIds = new Set(selected().map((s) => s.repo.id));
     if (!(await loadStars()) || closed) return;
-    // New Stars already shown keep their checked state. Stars added in the meantime are shown unchecked
+    // New Stars already shown keep their checked state.
+    // Stars added in the meantime are shown unchecked
     renderContent((s) => checkedIds.has(s.repo.id));
     if (!hadList) return; // There is no earlier list to compare with
     const now = new Set(starredRepos.map((s) => s.repo.id));
@@ -1686,7 +1727,8 @@ async function openImport() {
     status.textContent = `${gone} unstarred since the last load. ${status.textContent}`;
   };
 
-  // Adds the chosen Stars. The result is not guessed from the request's success.
+  // Adds the chosen Stars.
+  // The result is not guessed from the request's success.
   // The archive is fetched again to check it (the commit may have happened even if the request failed)
   confirm.onclick = async () => {
     const toImport = selected();
@@ -1706,7 +1748,6 @@ async function openImport() {
       if (isCancelled(err)) return; // The session closed, so the dialog is already closed too. Don't send the next requests
       importError = err;
     }
-    // Don't guess from the request result whether the add happened. Fetch the archive again to check
     let reloaded = true;
     try {
       [state.starItems, state.starLists] = await Promise.all([api('archive-star-items'), api('archive-star-lists')]); // Importing GitHub star lists may have created new star lists
@@ -1757,7 +1798,8 @@ async function openImport() {
     setStatus(`Imported ${stars(added)}.`);
   };
 
-  // Fetch the list for the first time after all handlers are attached. If it fails, Refresh can fetch it again
+  // Fetch the list for the first time after all handlers are attached.
+  // If it fails, Refresh can fetch it again
   if ((await loadStars()) && !closed) renderContent(() => true);
 }
 
@@ -1798,7 +1840,9 @@ const SYNC_STALL_MS = 3 * DAY_MS;
  * NOTE: A sync that stops silently is the worst failure for this tool, so it gets its own warning.
  * The state the user set (Settings) can differ from GitHub's real state
  * (changed in the Actions tab, or turned off by GitHub for inactivity).
- * Then it only warns. The user fixes it with a button. It never turns anything on or off by itself.
+ * Then it only warns.
+ * The user fixes it with a button.
+ * It never turns anything on or off by itself.
  * While on, it warns when the last scheduled run failed,
  * and when there has been no run for more than three days (Actions blocked, so no failed run and no GitHub notice).
  * Both look only at what happened after the user turned it on (`enabled_since`).
@@ -1807,7 +1851,8 @@ const SYNC_STALL_MS = 3 * DAY_MS;
  */
 function syncProblem(status, readError) {
   if (readError) {
-    // Don't treat "couldn't read" as "no problem". Don't guess the cause, and show the error message as is
+    // Don't treat "couldn't read" as "no problem".
+    // Don't guess the cause, and show the error message as is
     return {
       text: "Couldn't read the sync status",
       hint: `If this keeps happening, check the access token's Actions permission. Details: ${readError}`,
@@ -1817,7 +1862,8 @@ function syncProblem(status, readError) {
   if (!status) return null;
   if (status.workflow === 'missing') {
     // GitHub can answer the same 404 when the workflow file is missing and when the token has no Actions permission.
-    // So the cause is not guessed. The fix for both is the setup tool
+    // So the cause is not guessed.
+    // The fix for both is the setup tool
     return { text: "Couldn't find the sync workflow in your archive repository", hint: 'Run the starkive setup tool again.', fix: null };
   }
   const running = status.workflow === 'active';
@@ -1902,7 +1948,8 @@ function updateSettingsAttention() {
 }
 
 /**
- * Opens the Settings dialog. It has two sections.
+ * Opens the Settings dialog.
+ * It has two sections.
  * Sync: on or off, the auto sync interval (or Manual only), the last scheduled run, a message and fix button when the setting and the real state differ, and Sync now.
  * Quick add: the bookmarklet link (`bookmarkletLink`).
  *
@@ -1965,7 +2012,7 @@ function openSettings() {
     enabled.disabled = busy || !installed;
     select.value = String(status?.interval_days ?? 1);
     select.disabled = busy || !enabled.checked;
-    syncNow.disabled = busy || running || !active; // GitHub refuses to start a workflow that is off (`core.TriggerSyncWorkflow`)
+    syncNow.disabled = busy || running || !active; // GitHub refuses to start a workflow that is off (measured, `core.TriggerSyncWorkflow`)
     syncNow.title = !status ? "Couldn't read the sync status" : active ? '' : 'Sync now needs the sync workflow to be on';
     if (running) syncNow.replaceChildren(spinner(), 'Processing…');
     else syncNow.textContent = 'Sync now';
@@ -1987,7 +2034,8 @@ function openSettings() {
     error.hidden = false;
   };
 
-  // Changes a setting and redraws with the latest status the server returns. `body` is `{ enabled }` or `{ sync_interval_days }`.
+  // Changes a setting and redraws with the latest status the server returns.
+  // `body` is `{ enabled }` or `{ sync_interval_days }`.
   // On failure, it redraws with the previous status, so the checkbox and select box don't drift from the real state
   const change = async (body) => {
     busy = true;
@@ -2100,7 +2148,7 @@ function watchSyncWorkflowRun() {
 
 /**
  * Follows the sync run `watched` until it ends, reading the status every `SYNC_WATCH_MS` (later `SYNC_WATCH_SLOW_MS`).
- * When a run started by hand (Sync now) ends, it loads the archive again and reports the new items, the failure or the cancel.
+ * When a run started by hand (Sync now, or Run workflow in the Actions tab) ends, it loads the archive again and reports the new items, the failure or the cancel.
  *
  * @param {object} watched The run (`core.SyncWorkflowRun`)
  * @param {AbortSignal} signal This session's cancel signal
@@ -2177,7 +2225,8 @@ function wait(ms, signal) {
 let statusTimer; // Timer that clears the status line on its own
 
 /**
- * Shows a message in the status line at the bottom of the page. Errors stay longer, so the user can read them.
+ * Shows a message in the status line at the bottom of the page.
+ * Errors stay longer, so the user can read them.
  *
  * @param {string} message The text to show. An empty string hides the status line
  * @param {{ error?: boolean, sticky?: boolean, busy?: boolean }} [options] `error`: shown as an error for 8 seconds (otherwise 3 seconds).
@@ -2215,7 +2264,10 @@ async function run(task, pending, done) {
   }
 }
 
-/** Shows the sign-in screen. It hides the dashboard and its top bar menus, and focuses the sign-in button. */
+/**
+ * Shows the sign-in screen.
+ * It hides the dashboard and its top bar menus, and focuses the sign-in button.
+ */
 function showLogin() {
   closeMenu();
   $('login').hidden = false;
@@ -2290,7 +2342,7 @@ function rememberAddParam() {
  * Reads the repository to add that was remembered in this tab.
  * If it is past its time limit (`PENDING_ADD_TTL`) or can't be read, it is deleted.
  *
- * @param {boolean} consume If `true`, it is deleted after reading (when opening the dialog). If `false`, it stays (for the sign-in screen message)
+ * @param {boolean} consume If `true`, it is deleted after reading. If `false`, it stays for a later read
  * @returns {string} The repository to add. An empty string if there is none
  */
 function readPendingAdd(consume) {
@@ -2373,12 +2425,14 @@ async function openDashboard(repo, done = '', preloaded = null) {
     // The star list definitions are loaded by now, so the select box gets filled
     const pendingAdd = readPendingAdd(true);
     if (pendingAdd) openAddRepo(pendingAdd);
-    // Wait only for the live details of items drawn on the first screen. After that, workers report failed batches right away
+    // Wait only for the live details of items drawn on the first screen.
+    // After that, workers report failed batches right away
     setStatus('Loading details from GitHub…', { busy: true });
     await waitForLiveMetaIdle(liveMetaLoader);
     const syncResult = await syncRequest;
     signal.throwIfAborted();
-    if (!isSyncStatusOutdated(syncResult)) ({ sync: state.sync, syncError: state.syncError } = syncResult); // A setting changed in Settings while the page loaded is newer than this read
+    // A Sync now pressed or a setting changed in Settings while the page loaded is newer than this read
+    if (!state.syncRequested && !syncWatch && !isSyncStatusOutdated(syncResult)) ({ sync: state.sync, syncError: state.syncError } = syncResult);
     showSyncStatus();
     watchSyncWorkflowRun(); // A sync may be running, started before the page opened or on another device
     const metaError = liveMetaLoader.error;
@@ -2393,7 +2447,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
 }
 
 /**
- * Runs when the page opens. If the session is alive, it opens the dashboard right away. Otherwise, the sign-in screen.
+ * Opens the dashboard if the session is alive, or the sign-in screen otherwise.
  * If the user came back after a failed GitHub sign-in, it shows the reason.
  * A 401 before sign-in is normal, so it is not reported as an error.
  * If the address has a repository to add (`add`), it is remembered.
@@ -2445,7 +2499,10 @@ function showAccount(username) {
   if (url) link.href = url;
 }
 
-/** Fills in the icons (`data-icon`) and attaches handlers to the fixed page elements (top bar menus, search and filters, "Load more"). Called once when the page opens. */
+/**
+ * Fills in the icons (`data-icon`) and attaches handlers to the fixed page elements (top bar menus, search and filters, "Load more").
+ * Call it only once, because a second call attaches every handler twice.
+ */
 function bindEvents() {
   for (const slot of document.querySelectorAll('[data-icon]')) slot.replaceWith(icon(slot.dataset.icon));
   for (const menu of document.querySelectorAll('.menu')) bindMenu(menu);
@@ -2510,7 +2567,8 @@ function bindEvents() {
 
   $('add-button').onclick = () => openAddRepo(); // Wrapped, so the click event doesn't land in the `prefill` argument
 
-  // Search applies after typing stops for 150 ms. This avoids a redraw for every character
+  // Search applies after typing stops for 150 ms.
+  // This avoids a redraw for every character
   let searchTimer;
   $('search').oninput = (ev) => {
     clearTimeout(searchTimer);

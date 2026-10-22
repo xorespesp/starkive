@@ -34,7 +34,7 @@ const maxStarredPageNumber = 1000
 // The details go only to the server log.
 func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
@@ -42,13 +42,13 @@ func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil || page < 1 || page > maxStarredPageNumber {
 		return core.Errorf(http.StatusBadRequest, "Invalid page")
 	}
-	starredRepos, lastPage, err := core.FetchStarredPage(ctx, cfg, page)
+	starredRepos, lastPage, err := core.FetchStarredPage(ctx, dbRepo.EnvConfig(), page)
 	if err != nil {
 		return err
 	}
 	result := map[string]any{"starred_repos": starredRepos, "last_page": lastPage}
 	if page == 1 {
-		githubStarLists, err := core.FetchGitHubStarListsByRepo(ctx, cfg)
+		githubStarLists, err := core.FetchGitHubStarListsByRepo(ctx, dbRepo.EnvConfig())
 		if err != nil {
 			log.Printf("github star lists: %v", err)
 			result["github_star_lists_failed"] = true
@@ -56,7 +56,7 @@ func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
 			result["github_star_lists"] = githubStarLists
 		}
 	}
-	core.WriteJSON(w, http.StatusOK, result)
+	core.WriteAPIJSONResponse(w, http.StatusOK, result)
 	return nil
 }
 
@@ -65,8 +65,8 @@ func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
 // Accepts only GET. Other methods get 405.
 func HandleGitHubStars(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 		return
 	}
-	core.Respond(w, r, handleGitHubStarsGet)
+	core.ServeAPIRequest(w, r, handleGitHubStarsGet)
 }

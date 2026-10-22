@@ -9,7 +9,7 @@
 // Run it from the repository root (it reads `public/`, `vercel.json` and `.env.local` from there).
 // Environment variables come from the real environment or from `.env.local` (KEY=VALUE lines, not committed to git).
 // A variable that is already set wins over the file.
-// Without a fake GitHub (`STARKIVE_GH_API_URL`), it really commits to the DB repository the environment variable points to.
+// Without a fake GitHub (`STARKIVE_GH_API_URL`, and `STARKIVE_GH_WEB_URL` for sign-in), it really commits to the DB repository the environment variable points to.
 // So use a separate empty DB repository, prepared with the setup tool:
 //  1. Run the setup tool with that repository.
 //     In "Deploy dashboard", skip the Vercel project, and put the value it shows in `.env.local` as `STARKIVE_DB_REPO_ACCESS_KEY=<value>`
@@ -92,7 +92,8 @@ func readVercelHeaders(path string) map[string]string {
 	return out
 }
 
-// Starts the development server. `-addr` changes the listen address (default `localhost:3000`).
+// Starts the development server.
+// `-addr` changes the listen address (default `localhost:3000`).
 //
 // NOTE: When you add a new API file to `api/`, register its path here too.
 // Vercel makes a function for each file on its own, but this server keeps its own list.

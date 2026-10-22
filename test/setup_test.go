@@ -1,3 +1,6 @@
+// Tests for the paths that are open before sign-in (starting sign-in, the call from the sync workflow, the deployment check).
+// Also tests for saving the sign-in GitHub App settings (`core.SaveGitHubApp`), which the setup tool calls.
+// Creating the App (manifest, code exchange, owner check) is tested by the unit tests of the setup tool package (`tools/setup`).
 package test
 
 import (
@@ -14,15 +17,11 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Tests for the paths that are open before sign-in (starting sign-in, the call from the sync workflow, the deployment check).
-// Also tests for saving the sign-in GitHub App settings (`core.SaveGitHubApp`), which the setup tool calls.
-// Creating the App (manifest, code exchange, owner check) is tested by the unit tests of the setup tool package (`tools/setup`).
-
 // Tests that API requests without sign-in, and calls from the sync workflow with a missing or wrong sync key, end with 401.
 // They must not send a single request to GitHub.
 //
 // NOTE: Finding the DB repository requires asking GitHub.
-// If these requests weren't refused before that, anyone could use up the server token's rate limit (5,000 per hour) with repeated requests.
+// If these requests weren't refused before that, anyone could use up the server token's rate limit (5,000 per hour, docs) with repeated requests.
 func TestUnauthenticatedRequestsDoNotCallGitHub(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", ""); rec.Code != 401 {
@@ -54,7 +53,7 @@ func TestUnauthenticatedRequestsDoNotCallGitHub(t *testing.T) {
 //   - It doesn't ask GitHub. It is open without sign-in, so repeated calls must not use the server token's rate limit
 func TestCheckDeployment(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
-	cfg := &core.Config{DBRepoID: testRepoID, DBRepoAccessToken: testToken}
+	cfg := &core.EnvConfig{DBRepoID: testRepoID, DBRepoAccessToken: testToken}
 	proofs := map[string]bool{}
 	for _, nonce := range []string{"0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff"} {
 		rec := call(api.HandleCheckDeployment, "GET", "/api/check-deployment?nonce="+nonce, "", "")
@@ -87,7 +86,7 @@ func TestCheckDeployment(t *testing.T) {
 //   - At the canonical address, sign-in works to the end
 //   - An address that differs only in upper case or the default port (`:443`) counts as the same address
 //
-// NOTE: GitHub sends the sign-in result back to the address registered in the App.
+// NOTE: GitHub sends the sign-in result back to the address registered in the App (docs).
 // The browser sends the state cookie only to the address that set it.
 // So a sign-in started at another address (such as another domain from Vercel) always fails.
 func TestSignInStartsOnlyAtDashboardAddress(t *testing.T) {
@@ -120,7 +119,7 @@ func TestSignInStartsOnlyAtDashboardAddress(t *testing.T) {
 // Tests that starting sign-in answers 409, asking to run the setup tool, when the App settings for sign-in can't be used.
 // It checks three cases: no settings (before setup is done),
 // settings encrypted with another token that can't be decrypted (after the token changed), and a broken config file.
-// For a broken file, `core.LoadGitHubApp` reports `core.ErrConfigBroken`, so the setup tool can stop before it creates an App.
+// For a broken file, `core.LoadGitHubApp` reports `core.ErrDBConfigFileBroken`, so the setup tool can stop before it creates an App.
 // (The sign-in response doesn't tell the causes apart.)
 func TestSignInNeedsSetUpApp(t *testing.T) {
 	ctx := context.Background()
@@ -138,7 +137,7 @@ func TestSignInNeedsSetUpApp(t *testing.T) {
 	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("broken config: %d %s", rec.Code, rec.Body)
 	}
-	if _, _, err := core.LoadGitHubApp(ctx, loadTestConfig(t)); !errors.Is(err, core.ErrConfigBroken) {
+	if _, _, err := core.LoadGitHubApp(ctx, openTestDBRepo(t)); !errors.Is(err, core.ErrDBConfigFileBroken) {
 		t.Errorf("broken config: %v", err)
 	}
 }
@@ -156,8 +155,8 @@ func TestSaveGitHubApp(t *testing.T) {
 
 	gh := setupWithoutGitHubApp(t, "", "")
 	gh.files[core.ConfigDBPath] = makeTestConfigFile(testDashboardURL, encodeTestGitHubApp(t, "token-of-last-year", testUserID))
-	cfg := loadTestConfig(t)
-	if err := core.SaveGitHubApp(ctx, cfg, newApp); err != nil {
+	repo := openTestDBRepo(t)
+	if err := core.SaveGitHubApp(ctx, repo, newApp); err != nil {
 		t.Fatal(err)
 	}
 	file := gh.readFile(core.ConfigDBPath)
@@ -171,7 +170,7 @@ func TestSaveGitHubApp(t *testing.T) {
 	login(t) // The saved App can really be used to sign in
 	another := newApp
 	another.Slug = "starkive-user4242-def456"
-	if err := core.SaveGitHubApp(ctx, cfg, another); !errors.Is(err, core.ErrGitHubAppExists) || !strings.Contains(gh.readFile(core.ConfigDBPath), `"slug": "starkive-user4242-abc123"`) {
+	if err := core.SaveGitHubApp(ctx, repo, another); !errors.Is(err, core.ErrGitHubAppExists) || !strings.Contains(gh.readFile(core.ConfigDBPath), `"slug": "starkive-user4242-abc123"`) {
 		t.Errorf("second save: %v", err)
 	}
 
@@ -181,7 +180,7 @@ func TestSaveGitHubApp(t *testing.T) {
 	gh.mu.Lock()
 	gh.interfereOnce = func(files map[string]string) { files[core.ConfigDBPath] = first }
 	gh.mu.Unlock()
-	if err := core.SaveGitHubApp(ctx, loadTestConfig(t), newApp); !errors.Is(err, core.ErrGitHubAppExists) || gh.readFile(core.ConfigDBPath) != first {
+	if err := core.SaveGitHubApp(ctx, openTestDBRepo(t), newApp); !errors.Is(err, core.ErrGitHubAppExists) || gh.readFile(core.ConfigDBPath) != first {
 		t.Errorf("app that appeared meanwhile: %v, file %q", err, gh.readFile(core.ConfigDBPath))
 	}
 }

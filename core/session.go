@@ -3,7 +3,7 @@
 // NOTE: Don't change the format in this file.
 // A session cookie stays in the browser for about 6 months.
 // If the signing method changes, every device is signed out (`core/session_test.go` guards this with fixed values).
-// The sign-in method can change (GitHub sign-in), so it lives in `github_login.go`.
+// The sign-in method can change (GitHub sign-in), so it lives in `sign_in.go`.
 package core
 
 import (
@@ -43,17 +43,17 @@ const ClearSessionCookie = sessionCookie + "=; Max-Age=0; " + cookieAttrs
 // Different purposes give different keys, so a signature or ciphertext for one purpose can't be used for another.
 // If the token leaks, the whole DB repository is already exposed.
 // So making the keys from the token doesn't add to what is lost.
-func deriveKey(cfg *Config, purpose string) []byte {
+func deriveKey(cfg *EnvConfig, purpose string) []byte {
 	mac := hmac.New(sha256.New, []byte(cfg.DBRepoAccessToken))
 	mac.Write([]byte(purpose))
 	return mac.Sum(nil)
 }
 
-// Signs a value: HMAC-SHA256(key = `deriveKey(token, "starkive-session")`, message = value), written in base64url.
+// Signs a value: HMAC-SHA256(key = `deriveKey(cfg, "starkive-session")`, message = value), written in base64url.
 //
 // Args:
 //   - `value`: Value to sign (the expiry time of a session cookie, or a sign-in state with its purpose in front)
-func sign(value string, cfg *Config) string {
+func signWithSessionKey(cfg *EnvConfig, value string) string {
 	mac := hmac.New(sha256.New, deriveKey(cfg, "starkive-session"))
 	mac.Write([]byte(value))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
@@ -63,9 +63,9 @@ func sign(value string, cfg *Config) string {
 //
 // Args:
 //   - `now`: Current time. The cookie expires `SessionTTL` after it
-func NewSessionCookie(cfg *Config, now time.Time) string {
+func NewSessionCookie(cfg *EnvConfig, now time.Time) string {
 	exp := strconv.FormatInt(now.Add(SessionTTL).Unix(), 10)
-	return fmt.Sprintf("%s=%s.%s; Max-Age=%d; %s", sessionCookie, exp, sign(exp, cfg), int(SessionTTL.Seconds()), cookieAttrs)
+	return fmt.Sprintf("%s=%s.%s; Max-Age=%d; %s", sessionCookie, exp, signWithSessionKey(cfg, exp), int(SessionTTL.Seconds()), cookieAttrs)
 }
 
 // Checks that the session cookie of the request is valid.
@@ -77,7 +77,7 @@ func NewSessionCookie(cfg *Config, now time.Time) string {
 //
 // NOTE: It checks with the token in the environment variable only, and doesn't ask GitHub.
 // So requests from people who aren't signed in don't use the server token's rate limit.
-func requireSession(r *http.Request, cfg *Config) error {
+func requireSession(r *http.Request, cfg *EnvConfig) error {
 	unauthorized := Errorf(http.StatusUnauthorized, "Sign-in required").addHeader("Set-Cookie", ClearSessionCookie)
 
 	cookie, err := r.Cookie(sessionCookie)
@@ -85,7 +85,7 @@ func requireSession(r *http.Request, cfg *Config) error {
 		return unauthorized
 	}
 	exp, sig, found := strings.Cut(cookie.Value, ".")
-	if !found || !hmac.Equal([]byte(sig), []byte(sign(exp, cfg))) { // `hmac.Equal`: constant-time compare, so the time taken doesn't tell how many characters match
+	if !found || !hmac.Equal([]byte(sig), []byte(signWithSessionKey(cfg, exp))) { // `hmac.Equal`: constant-time compare, so the time taken doesn't tell how many characters match
 		return unauthorized
 	}
 	expires, err := strconv.ParseInt(exp, 10, 64)

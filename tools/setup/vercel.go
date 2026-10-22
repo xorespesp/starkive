@@ -31,7 +31,7 @@ type commitRef struct {
 //
 // NOTE: The release workflow runs the setup tool with `-version` and looks for this address in the output (`.github/workflows/release.yml`).
 // So if the form changes, change the workflow too.
-// The method has a value receiver `(c commitRef)`: it gets a copy of the struct, like a `const` member function in C++.
+// The method has a value receiver `(c commitRef)`: it gets a copy of the struct, so changes inside don't reach the caller (similar in effect to a `const` member function in C++).
 func (c commitRef) buildTreeURL() string {
 	return c.url + "/tree/" + c.sha
 }
@@ -55,7 +55,8 @@ func isValidCommitSHA(sha string) bool {
 func resolveVercelDeployCommit() (vercelDeployCommit commitRef, hasUncommittedChanges bool, err error) {
 	stampedSHA, stampedHasChanges, _ := readStampedVCS()
 
-	// Release executable: the stamped repository and commit. A broken build stops here instead of reading git
+	// Release executable: the stamped repository and commit.
+	// A broken build stops here instead of reading git
 	if stampedVercelDeployRepoURL != "" {
 		fullName, found := strings.CutPrefix(stampedVercelDeployRepoURL, "https://github.com/")
 		if !found || !core.IsValidRepoFullName(fullName) || stampedSHA == "" {
@@ -105,10 +106,10 @@ func runGit(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// Turns the git remote address `remote` into a GitHub repository name (owner/repo).
+// Turns the git remote address `remote` into a GitHub repository name (`owner/repo`).
 // It accepts `https://[user@]github.com/o/r`, `ssh://git@[ssh.]github.com[:port]/o/r` and `git@github.com:o/r`, with or without a trailing `.git` or `/`.
 // The host is not case sensitive.
-// It is an error if the host isn't GitHub or the path isn't in owner/repo form
+// It is an error if the host isn't GitHub or the path isn't in `owner/repo` form
 func parseGitRemoteURL(remote string) (string, error) {
 	address := strings.TrimSpace(remote)
 	if !strings.Contains(address, "://") { // An SSH address written as `host:path` without a scheme, like `git@github.com:o/r`
@@ -190,7 +191,7 @@ func readPublicGitHubStatus(ctx context.Context, target string) (int, error) {
 	case http.StatusOK, http.StatusNotFound, http.StatusUnprocessableEntity:
 		return res.StatusCode, nil
 	}
-	return 0, core.CheckGitHubAPI(res)
+	return 0, core.CheckGitHubResponse(res)
 }
 
 // Suffix of the dashboard name.
@@ -209,10 +210,10 @@ const maxDashboardNameLength = 63
 //   - Otherwise: `<username>-<archive name>-starkive`. If it is longer than 63 characters, the archive name part is cut
 //
 // Args:
-//   - `owner`: GitHub username of the token owner (letters, digits and `-`, up to 39 characters)
+//   - `owner`: GitHub username of the token owner (letters, digits and `-`, up to 39 characters, docs)
 //   - `archiveName`: The archive name from step 1 (`normalizeArchiveName`)
 //
-// NOTE: A default address is unique across all of Vercel.
+// NOTE: A default address is unique across all of Vercel (measured).
 // If the name is already taken, Vercel gives another address, and the later check (`watchVercelDeployment`) doesn't notice the deployment.
 // The name always starts with the GitHub username (unique across GitHub), so it doesn't clash with other users.
 func buildDashboardName(owner string, archiveName string) string {
@@ -251,7 +252,7 @@ func buildVercelDeployURL(vercelDeployCommit commitRef, name string) string {
 // Checks the dashboard address `site` again and again in the background, until it is confirmed as this setup's dashboard (`checkDashboard`).
 //
 // Args:
-//   - `cfg`: The DB repository and token being set up. It checks that the deployment uses these values
+//   - `cfg`: The DB repository ID and token being set up. It checks that the deployment uses these values
 //   - `site`: The dashboard address to check
 //
 // Returns:
@@ -261,7 +262,7 @@ func buildVercelDeployURL(vercelDeployCommit commitRef, name string) string {
 // NOTE: Before the Vercel deployment is done, the check normally fails: the address doesn't exist yet (404), or it is still deployed with another value.
 // So failures are not shown, and it checks again.
 // How long the person takes to finish the Vercel deployment is unknown, so it checks until told to stop (one request every 5 seconds is no burden).
-func watchVercelDeployment(cfg *core.Config, site string) (<-chan string, func()) {
+func watchVercelDeployment(cfg *core.EnvConfig, site string) (<-chan string, func()) {
 	confirmed := make(chan string, 1) // Buffer of 1: the sender doesn't block even if the receiver isn't waiting yet
 	stop := make(chan struct{})
 	var stopOnce sync.Once // Makes sure `stop` is closed only once (closing a closed channel makes Go panic)

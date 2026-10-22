@@ -30,7 +30,7 @@
 //     If it is a starkive repository, it sets it up again.
 //     If it is a foreign repository or has another major format version, it stops.
 //     Then it adds the initial files that are missing (`addInitialFiles`).
-//     Next it checks the Workflows and Actions permissions (this needs a branch, so it runs after initialization).
+//     Next it checks the Workflows and Actions permissions (the Workflows check reads the branch, so both run after initialization).
 //     Then it writes the sync key (`core.DeriveSyncKey`) to the DB repository's Actions secret (`core.SyncKeySecretName`)
 //  2. Deploy dashboard: Checks that the deployment at the dashboard address is set up with this repository and the current token (`checkDashboard`).
 //     The address is the one registered in the App, or the default address of the dashboard name (`buildDashboardName`) if there is no App.
@@ -62,7 +62,8 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Names of the setup steps. The order is the step number (`ui.step` counts from 1)
+// Names of the setup steps.
+// The order is the step number (`ui.step` counts from 1)
 var setupSteps = []string{"Create archive repository", "Deploy dashboard", "Create sign-in app", "Install workflow"}
 
 // Suffix of the DB repository name.
@@ -70,7 +71,7 @@ var setupSteps = []string{"Create archive repository", "Deploy dashboard", "Crea
 const dbRepoSuffix = "-starkive-db"
 
 // Maximum length of the archive name.
-// It is the limit for GitHub usernames (39 characters), so anyone who enters their username as suggested can use it
+// It is the limit for GitHub usernames (39 characters, docs), so anyone who enters their username as suggested can use it
 const maxArchiveNameLength = 39
 
 // Allowed shape of the archive name: lowercase letters and digits joined by single `-` (no `-` at either end).
@@ -217,7 +218,8 @@ func main() {
 	}
 }
 
-// Runs all the setup steps in order. The steps are the same as in the comment at the top of this file and in `setupSteps`.
+// Runs all the setup steps in order.
+// The steps are the same as in the comment at the top of this file and in `setupSteps`.
 //
 // Args:
 //   - `u`: How to show things to the person and ask them (setup page or terminal)
@@ -259,7 +261,7 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 	if !core.IsValidAccessToken(token) {
 		return errors.New("that doesn't look like a GitHub token")
 	}
-	cfg := &core.Config{
+	cfg := &core.EnvConfig{
 		DBRepoAccessToken: token,
 		GitHubAPI:         readGitHubAPIURL(),
 		GitHubWeb:         strings.TrimRight(readEnv("STARKIVE_GH_WEB_URL", "https://github.com"), "/"),
@@ -273,7 +275,7 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 	if err != nil {
 		return err
 	}
-	state, err := core.ResolveDBRepo(ctx, cfg)
+	dbRepo, err := core.FindDBRepo(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -283,34 +285,34 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 	if err := checkStarring(ctx, cfg); err != nil {
 		return err
 	}
-	publicKey, err := readSecretsPublicKey(ctx, cfg)
+	publicKey, err := readSecretsPublicKey(ctx, dbRepo)
 	if err != nil {
 		return err
 	}
-	switch state { // `core.ResolveDBRepo` already returned an error for a repository whose major format version differs from this code
+	switch dbRepo.State() { // `core.FindDBRepo` already returned an error for a repository whose major format version differs from this code
 	case core.DBRepoForeign:
 		return core.ErrDBRepoNotStarkive
 	case core.DBRepoEmpty:
-		if err := initializeDBRepo(ctx, cfg); err != nil {
+		if err := initializeDBRepo(ctx, dbRepo); err != nil {
 			return err
 		}
 		u.say("Initialized the empty repository.")
 	default:
-		u.say("`" + cfg.DBRepoFullName + "` is already a starkive archive. Setting it up again; your data stays as it is.")
+		u.say("`" + dbRepo.FullName() + "` is already a starkive archive. Setting it up again; your data stays as it is.")
 	}
-	if err := addInitialFiles(ctx, cfg); err != nil {
+	if err := addInitialFiles(ctx, dbRepo); err != nil {
 		return err
 	}
-	if err := checkWorkflowsPermission(ctx, cfg); err != nil { // Check permissions before creating the App
+	if err := checkWorkflowsPermission(ctx, dbRepo); err != nil { // Check permissions before creating the App
 		return err
 	}
-	if err := checkActionsPermission(ctx, cfg); err != nil {
+	if err := checkActionsPermission(ctx, dbRepo); err != nil {
 		return err
 	}
 
 	// Sync key.
 	// A secret value can't be read back and compared, so it is overwritten every time (the same token gives the same value)
-	if err := writeSecret(ctx, cfg, publicKey, core.SyncKeySecretName, core.DeriveSyncKey(cfg)); err != nil {
+	if err := writeSecret(ctx, dbRepo, publicKey, core.SyncKeySecretName, core.DeriveSyncKey(cfg)); err != nil {
 		return err
 	}
 	u.say("Stored the sync key in the repository's secrets.")
@@ -325,13 +327,13 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 	// The tool can't tell them apart, so it explains both ways.
 	// (If it is from an earlier run, creating another one with the same name doesn't get the default address.)
 	u.step(2)
-	app, appStatus, err := core.LoadGitHubApp(ctx, cfg)
-	if err != nil { // If the config file is broken (`core.ErrConfigBroken`), neither the App nor the dashboard address can be used. So stop here, before the person creates anything on GitHub
+	app, appStatus, err := core.LoadGitHubApp(ctx, dbRepo)
+	if err != nil { // If the config file is broken (`core.ErrDBConfigFileBroken`), neither the App nor the dashboard address can be used. So stop here, before the person creates anything on GitHub
 		return err
 	}
 	accessKey := core.FormatDBRepoAccessKey(cfg.DBRepoID, token)
 	dashboardName := buildDashboardName(owner.Login, archiveName)
-	site := app.SiteURL // The canonical address registered in the App. Even an unreadable config keeps its public values (`SiteURL`, `Slug`)
+	site := app.SiteURL // The canonical address registered in the App. Even App settings that can't be used (`core.GitHubAppUnreadable`) keep their public values (`SiteURL`, `Slug`)
 	if site == "" {     // If there is no App, or the saved config has no address, check the default address of the dashboard that the Vercel Deploy link creates
 		site = "https://" + dashboardName + ".vercel.app"
 	}
@@ -372,14 +374,14 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 		previous := app
 		u.say("Next, create a GitHub App that lets you sign in to the dashboard with your GitHub account. It gets no access to your repositories or account data.")
 		u.note("On GitHub's page, review the app and click Create GitHub App. Leave the name and the other settings as they are.")
-		created, err := createGitHubApp(ctx, u, server, cfg, site)
+		created, err := createGitHubApp(ctx, u, server, dbRepo, site)
 		if err != nil {
 			return err
 		}
 		// If it can't be saved (including when another run saved one first), the App just created isn't used.
 		// So tell the person to delete it, and stop.
 		// Running again skips this step, because a saved App exists
-		if err := core.SaveGitHubApp(ctx, cfg, created); err != nil {
+		if err := core.SaveGitHubApp(ctx, dbRepo, created); err != nil {
 			return fmt.Errorf("%w. The app just created isn't used. Delete it: https://github.com/settings/apps/%s", err, created.Slug)
 		}
 		app = created
@@ -393,10 +395,10 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 	// 4. Record the dashboard address and install the workflow if it is missing.
 	// The workflow comes last, so the address to call is already recorded when it first runs
 	u.step(4)
-	if err := finishDBRepo(ctx, cfg, app.SiteURL); err != nil {
+	if err := finishDBRepo(ctx, dbRepo, app.SiteURL); err != nil {
 		return err
 	}
-	u.say("The sync workflow is set up in `" + cfg.DBRepoFullName + "`.")
+	u.say("The sync workflow is set up in `" + dbRepo.FullName() + "`.")
 	u.done("Sign in to the dashboard with GitHub as `"+owner.Login+"`.", "Open the dashboard", app.SiteURL)
 	return nil
 }
@@ -415,18 +417,15 @@ func readGitHubAPIURL() string {
 	return strings.TrimRight(readEnv("STARKIVE_GH_API_URL", "https://api.github.com"), "/")
 }
 
-// Looks up a repository by name and puts its ID in `cfg.DBRepoID`.
+// Looks up the repository `fullName` (`owner/repo`) and puts its ID in `cfg.DBRepoID`.
 // The server refers to the repository by ID, not by name (the ID stays the same after a rename), so it gets the ID.
-//
-// Args:
-//   - `fullName`: owner/repo
 //
 // Returns:
 //   - `public`: `true` if it is a public repository. Anyone can read the archive in a public repository, so the user is told
 //   - If the token can't see it (not created, created with another name, or private and not selected by the token),
 //     an error that explains all these cases together.
 //     GitHub answers 404 for all of them (docs: a private repository without read access is also 404)
-func lookUpRepo(ctx context.Context, cfg *core.Config, fullName string) (public bool, err error) {
+func lookUpRepo(ctx context.Context, cfg *core.EnvConfig, fullName string) (public bool, err error) {
 	var repo struct {
 		ID      int64 `json:"id"`      // Repository ID
 		Private bool  `json:"private"` // Whether it is a private repository
@@ -450,14 +449,14 @@ func lookUpRepo(ctx context.Context, cfg *core.Config, fullName string) (public 
 
 // Checks that the token can read the account's Stars (Starring read permission).
 // The dashboard's Import and sync read Stars with this permission.
-// Without the permission, it returns GitHub's 403 error as is (the needed permission is added to the message)
-func checkStarring(ctx context.Context, cfg *core.Config) error {
+// Without the permission, it returns GitHub's 403 error, with the needed permission added to its message (`core.CheckGitHubResponse`)
+func checkStarring(ctx context.Context, cfg *core.EnvConfig) error {
 	res, err := core.CallGitHubAPI(ctx, cfg, "/user/starred?per_page=1", core.GitHubAPIRequest{})
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	return core.CheckGitHubAPI(res)
+	return core.CheckGitHubResponse(res)
 }
 
 // Opens the link `target` in the operating system's default browser.

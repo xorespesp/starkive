@@ -1,16 +1,13 @@
-// Repository metadata.
-// It asks GitHub for the current info of repositories (`FetchRepoMeta`),
-// and refreshes the snapshots that keep it as a record (`db/repo-meta.json`, `RefreshMeta`).
+// Metadata snapshots in the archive (`db/repo-meta.json`, `RepoMeta`): each repository's info as it last was on GitHub, kept as a record.
+// They are brought up to date by `SyncRepoMetaSnapshotsWithGitHub`.
+// Reading the current values from GitHub is in `github_repo_meta.go`.
 package core
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -18,9 +15,10 @@ import (
 
 // Most time one sync spends refreshing the metadata snapshots.
 // A request for 100 repositories takes about 4.5 seconds (measured), and 6 are sent at once.
-// So this is enough to check thousands at a time. Repositories not checked yet get checked in the next sync.
+// So this is enough to check thousands at a time.
+// Repositories not checked yet get checked in the next sync.
 // It is capped so that a large archive can't use up the time of the whole sync
-const metaRefreshBudget = 40 * time.Second
+const repoMetaSyncBudget = 40 * time.Second
 
 // One repository metadata snapshot (one line of `db/repo-meta.json`).
 // It keeps the last checked values, so "what it was" remains even if the repository is deleted or made private.
@@ -40,129 +38,20 @@ type RepoMeta struct {
 	UnavailableSince string   `json:"unavailable_since"` // Time GitHub first answered that it can't find this repository. Empty string once it is visible again
 }
 
-// Largest number of IDs that one GraphQL `nodes(ids:)` call can ask for (docs)
-const MaxRepoMetaIDs = 100
-
-// Asks GitHub for the current info of many repositories at once by `node_id`.
-//
-// Args:
-//   - `ids`: `node_id`s of the repositories to ask about. At most `MaxRepoMetaIDs`
-//
-// Returns:
-//   - Repository info in the same order and length as `ids` (raw JSON from GraphQL). `nil` where nothing was found
-//   - IDs that GitHub clearly answered as "not found" (`NOT_FOUND`), such as deleted or made private
-//   - An error if the request itself failed. Then no repository may be judged as gone
-//
-// NOTE: If some IDs can't be accessed, GraphQL doesn't fail the whole answer.
-// It puts `null` in their place, and writes the reason and position in its errors (docs).
-// That partial result is used, so "request failed" and "this repository doesn't exist" can be told apart.
-// A temporary outage isn't recorded as a disappearance.
-func FetchRepoMeta(ctx context.Context, cfg *Config, ids []string) ([]json.RawMessage, []string, error) {
-	// Star count, fork count and last push time are read only for display in the dashboard
-	const query = `query($ids: [ID!]!) {
-		nodes(ids: $ids) {
-			... on Repository {
-				id
-				nameWithOwner
-				url
-				description
-				primaryLanguage { name color }
-				repositoryTopics(first: 20) { nodes { topic { name } } }
-				homepageUrl
-				licenseInfo { spdxId }
-				stargazerCount
-				forkCount
-				pushedAt
-				isArchived
-			}
-		}
-	}`
-	var data struct {
-		Nodes []json.RawMessage `json:"nodes"` // Each repository is kept raw, not decoded (it is passed to the dashboard as it is)
-	}
-	err := callGraphQL(ctx, cfg, query, map[string]any{"ids": ids}, &data)
-	var nodeErrs graphQLErrors // Errors about some repositories, when the rest of the answer can be used
-	if err != nil && !errors.As(err, &nodeErrs) {
-		return nil, nil, err
-	}
-	if len(data.Nodes) != len(ids) { // If positions don't line up, we can't tell which result belongs to which repository
-		return nil, nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(data.Nodes), len(ids))
-	}
-
-	nodes := make([]json.RawMessage, len(ids))
-	missing := []string{}
-	for i, node := range data.Nodes {
-		switch {
-		case string(node) != "null" && string(node) != "{}": // `{}` is an ID of another kind, not a repository
-			nodes[i] = node
-		case string(node) == "null" && nodeErrs.isNodeNotFound(i): // Other errors aren't treated as a disappearance
-			missing = append(missing, ids[i])
-		}
-	}
-	return nodes, missing, nil
-}
-
-// Reports whether two snapshots have the same repository info. The ID and the time fields (`UpdatedAt`, `UnavailableSince`) aren't compared
-func isSameSnapshot(a RepoMeta, b RepoMeta) bool {
+// Reports whether two snapshots have the same repository info.
+// The ID and the time fields (`UpdatedAt`, `UnavailableSince`) aren't compared
+func isSameRepoMeta(a RepoMeta, b RepoMeta) bool {
 	return a.Name == b.Name && a.Description == b.Description && a.Language == b.Language && a.LanguageColor == b.LanguageColor &&
 		slices.Equal(a.Topics, b.Topics) && a.Homepage == b.Homepage && a.License == b.License && a.Archived == b.Archived
-}
-
-// Copies raw repository info from GraphQL into the repository info fields of a snapshot.
-//
-// Args:
-//   - `node`: Raw JSON of one repository returned by `FetchRepoMeta`
-//
-// Returns:
-//   - A snapshot with only the repository info filled in. The caller fills in the ID and the time fields
-func makeSnapshot(node json.RawMessage) (RepoMeta, error) {
-	var repo struct {
-		NameWithOwner   string `json:"nameWithOwner"`
-		Description     string `json:"description"`
-		PrimaryLanguage *struct {
-			Name  string `json:"name"`
-			Color string `json:"color"`
-		} `json:"primaryLanguage"` // Pointer: with no language the JSON is `null`, so it becomes `nil`
-		RepositoryTopics struct {
-			Nodes []struct {
-				Topic struct {
-					Name string `json:"name"`
-				} `json:"topic"`
-			} `json:"nodes"`
-		} `json:"repositoryTopics"`
-		HomepageURL string `json:"homepageUrl"`
-		LicenseInfo *struct {
-			SpdxID string `json:"spdxId"`
-		} `json:"licenseInfo"` // Pointer: `nil` if there is no license
-		IsArchived bool `json:"isArchived"`
-	}
-	if err := json.Unmarshal(node, &repo); err != nil {
-		return RepoMeta{}, err
-	}
-	meta := RepoMeta{
-		Name: repo.NameWithOwner, Description: repo.Description, Topics: []string{},
-		Homepage: repo.HomepageURL, Archived: repo.IsArchived,
-	}
-	if repo.PrimaryLanguage != nil {
-		meta.Language = repo.PrimaryLanguage.Name
-		meta.LanguageColor = repo.PrimaryLanguage.Color
-	}
-	for _, n := range repo.RepositoryTopics.Nodes {
-		meta.Topics = append(meta.Topics, n.Topic.Name)
-	}
-	if repo.LicenseInfo != nil {
-		meta.License = repo.LicenseInfo.SpdxID
-	}
-	return meta, nil
 }
 
 // Number of requests sent to GitHub at the same time when refreshing snapshots.
 // One request for 100 repositories takes about 4.5 seconds (measured).
 // Requests must go out in parallel to check thousands in time
-const metaRefreshParallel = 6
+const repoMetaFetchParallel = 6
 
 // Result of one snapshot refresh
-type MetaRefreshResult struct {
+type RepoMetaSyncResult struct {
 	NumCheckedRepos    int     // Number of repositories asked of GitHub this time (batches whose request failed aren't counted)
 	UnavailableRepoIDs []int64 // IDs of the repositories in the "not found" state after the refresh
 }
@@ -170,7 +59,8 @@ type MetaRefreshResult struct {
 // Refreshes the metadata snapshots (`db/repo-meta.json`) of the repositories in the archive with GitHub's current values.
 //   - Shuffles the repositories and asks 100 at a time.
 //     A new request is sent only if it can finish within `budget` even when the answer takes the longest wait (`githubTimeout`)
-//   - Updates the snapshot of each repository found. If the content is the same, `UpdatedAt` stays too.
+//   - Updates the snapshot of each repository found.
+//     If the content is the same, `UpdatedAt` stays too.
 //     If nothing changed, no commit is made
 //   - For a repository that GitHub answered as "not found", the snapshot content stays.
 //     Only the time of the first such answer is kept (`UnavailableSince`)
@@ -191,11 +81,11 @@ type MetaRefreshResult struct {
 // A disappearance is recorded only when GitHub clearly answers `NOT_FOUND`.
 // A temporary outage must not mark hundreds of repositories as gone.
 // Repositories are never deleted automatically.
-func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
+func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget time.Duration) (RepoMetaSyncResult, error) {
 	budgetEndsAt := time.Now().Add(budget)
-	starItems, err := readItems[StarItem](ctx, cfg, StarItemsDBPath)
+	starItems, err := readItems[StarItem](ctx, repo, StarItemsDBPath)
 	if err != nil {
-		return MetaRefreshResult{}, err
+		return RepoMetaSyncResult{}, err
 	}
 	targets := []StarItem{}
 	for _, s := range starItems {
@@ -205,18 +95,19 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 	}
 	rand.Shuffle(len(targets), func(i int, j int) { targets[i], targets[j] = targets[j], targets[i] }) // Shuffled, so each run checks different repositories even if it can't check them all in time
 	batches := [][]StarItem{}
-	for start := 0; start < len(targets); start += MaxRepoMetaIDs {
-		batches = append(batches, targets[start:min(start+MaxRepoMetaIDs, len(targets))])
+	for start := 0; start < len(targets); start += MaxRepoMetaNodeIDs {
+		batches = append(batches, targets[start:min(start+MaxRepoMetaNodeIDs, len(targets))])
 	}
 
-	// Several goroutines (lightweight threads) take batches one by one and process them. Shared values are read and written while holding `mu`
+	// Several goroutines (lightweight threads) take batches one by one and process them.
+	// Shared values are read and written while holding `mu`
 	var mu sync.Mutex
 	next := 0
 	checked := 0
 	fresh := map[int64]RepoMeta{} // New snapshots of the repositories found (repository info only)
 	gone := map[int64]bool{}      // Repositories that GitHub answered it can't find
 	var wg sync.WaitGroup         // Counter that waits until all goroutines end (like `std::thread::join`)
-	for w := 0; w < metaRefreshParallel; w++ {
+	for w := 0; w < repoMetaFetchParallel; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -235,7 +126,7 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 				for i, s := range batch {
 					ids[i] = s.NodeID
 				}
-				nodes, missing, err := FetchRepoMeta(ctx, cfg, ids)
+				nodes, missing, err := FetchRepoMetaByNodeIDs(ctx, repo.cfg, ids)
 				if err != nil {
 					log.Printf("repo details failed (%d repos left unchanged): %v", len(batch), err)
 					continue // A batch whose request failed changes nothing. This keeps a temporary outage from being recorded as a disappearance
@@ -246,7 +137,7 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 					if node == nil {
 						continue
 					}
-					if meta, err := makeSnapshot(node); err == nil {
+					if meta, err := buildRepoMeta(node); err == nil {
 						fresh[batch[i].ID] = meta
 					}
 				}
@@ -260,12 +151,13 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 	wg.Wait()
 
 	now := FormatNow()
-	updated, err := UpdateArchive(ctx, cfg, func(a *Archive) (CommitMessage, error) {
+	updated, err := UpdateArchive(ctx, repo, func(a *Archive) (CommitMessage, error) {
 		byID := make(map[int64]RepoMeta, len(a.RepoMeta))
 		for _, m := range a.RepoMeta {
 			byID[m.ID] = m
 		}
-		// Notable changes for the commit body. If called again after a conflict, count again from zero
+		// Notable changes for the commit body.
+		// If called again after a conflict, count again from zero
 		vanished := []string{}
 		revived := []string{}
 		renamed := []string{}
@@ -280,7 +172,7 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 			m := old
 			if snap, ok := fresh[s.ID]; ok {
 				snap.ID, snap.UnavailableSince, snap.UpdatedAt = s.ID, "", old.UpdatedAt
-				if !known || !isSameSnapshot(old, snap) {
+				if !known || !isSameRepoMeta(old, snap) {
 					snap.UpdatedAt = now // Only a snapshot whose content changed or that is new gets a new time
 				}
 				switch {
@@ -288,7 +180,7 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 					revived = append(revived, snap.Name)
 				case known && old.Name != snap.Name:
 					renamed = append(renamed, old.Name+" -> "+snap.Name)
-				case known && !isSameSnapshot(old, snap):
+				case known && !isSameRepoMeta(old, snap):
 					changed++
 				}
 				m, known = snap, true
@@ -322,9 +214,9 @@ func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRe
 		return commitMessage, nil
 	})
 	if err != nil {
-		return MetaRefreshResult{}, err
+		return RepoMetaSyncResult{}, err
 	}
-	result := MetaRefreshResult{NumCheckedRepos: checked}
+	result := RepoMetaSyncResult{NumCheckedRepos: checked}
 	for _, m := range updated.RepoMeta {
 		if m.UnavailableSince != "" {
 			result.UnavailableRepoIDs = append(result.UnavailableRepoIDs, m.ID)

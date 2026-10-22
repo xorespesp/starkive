@@ -27,7 +27,7 @@ func readStarListBody(r *http.Request) (name string, description string, err err
 		Name        string `json:"name"`        // Star list name. Required
 		Description string `json:"description"` // Description. May be empty
 	}
-	if err := core.ReadJSON(r, &body); err != nil {
+	if err := core.ReadAPIRequestJSON(r, &body); err != nil {
 		return "", "", err
 	}
 	name, description = strings.TrimSpace(body.Name), strings.TrimSpace(body.Description)
@@ -41,7 +41,7 @@ func readStarListBody(r *http.Request) (name string, description string, err err
 }
 
 // Checks whether another star list with the same name already exists.
-// `core.IsSameStarListName` decides whether names are the same (it ignores spaces, normalization and letter case).
+// `core.IsSameStarListName` decides whether names are the same (it ignores leading and trailing spaces, Unicode normalization (NFC) and letter case).
 //
 // Args:
 //   - `starLists`: The star lists in the archive now
@@ -66,18 +66,18 @@ func checkUniqueStarListName(starLists []core.StarList, name string, exceptID in
 // Answers 401 if not signed in.
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 func handleArchiveStarListsGet(w http.ResponseWriter, r *http.Request) error {
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	return core.WriteDBFile(w, r, cfg, core.StarListsDBPath)
+	return core.WriteAPIDBFileResponse(w, r, dbRepo, core.StarListsDBPath)
 }
 
 // Creates a star list and answers with it as JSON.
 // Answers 400 if the name or description is wrong, and 409 if the name is already taken.
 func handleArchiveStarListsPost(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func handleArchiveStarListsPost(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var created core.StarList
-	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
 		if err := checkUniqueStarListName(a.StarLists, name, 0); err != nil {
 			return core.CommitMessage{}, err
 		}
@@ -97,7 +97,7 @@ func handleArchiveStarListsPost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, created)
+	core.WriteAPIJSONResponse(w, http.StatusOK, created)
 	return nil
 }
 
@@ -106,11 +106,11 @@ func handleArchiveStarListsPost(w http.ResponseWriter, r *http.Request) error {
 // Answers 404 if the star list doesn't exist, and 409 if another star list has the same name.
 func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	id, err := core.ParseIDParam(r)
+	id, err := core.ParseAPIRequestID(r)
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var updated core.StarList
-	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
 		i := slices.IndexFunc(a.StarLists, func(l core.StarList) bool { return l.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "List not found")
@@ -134,7 +134,7 @@ func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, updated)
+	core.WriteAPIJSONResponse(w, http.StatusOK, updated)
 	return nil
 }
 
@@ -147,15 +147,15 @@ func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 // So no in-between state, such as "an item that points to a deleted star list", is left in the repository.
 func handleArchiveStarListsDelete(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	id, err := core.ParseIDParam(r)
+	id, err := core.ParseAPIRequestID(r)
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
 		i := slices.IndexFunc(a.StarLists, func(l core.StarList) bool { return l.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "List not found")
@@ -179,25 +179,25 @@ func handleArchiveStarListsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]bool{"ok": true})
 	return nil
 }
 
 // Entry point for `/api/archive-star-lists` requests. It sends each method to its handler.
 // Vercel finds the exported function in this file and deploys it as one function.
-// `core.Respond` turns an error from a handler into a JSON error response.
+// `core.ServeAPIRequest` turns an error from a handler into a JSON error response.
 // Other methods get 405.
 func HandleArchiveStarLists(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		core.Respond(w, r, handleArchiveStarListsGet)
+		core.ServeAPIRequest(w, r, handleArchiveStarListsGet)
 	case http.MethodPost:
-		core.Respond(w, r, handleArchiveStarListsPost)
+		core.ServeAPIRequest(w, r, handleArchiveStarListsPost)
 	case http.MethodPatch:
-		core.Respond(w, r, handleArchiveStarListsPatch)
+		core.ServeAPIRequest(w, r, handleArchiveStarListsPatch)
 	case http.MethodDelete:
-		core.Respond(w, r, handleArchiveStarListsDelete)
+		core.ServeAPIRequest(w, r, handleArchiveStarListsDelete)
 	default:
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 	}
 }

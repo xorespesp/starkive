@@ -1,3 +1,5 @@
+// Integration tests for the scheduled sync, the sync settings and the sync status,
+// and the helpers that call the sync like the workflow and open the DB repository (`callScheduledSync`, `openTestDBRepo`)
 package test
 
 import (
@@ -13,10 +15,8 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Imitates the scheduled sync request that the DB repository's workflow sends (`GET /api/sync-archive` with the correct sync key).
-//
-// Returns:
-//   - The server's response
+// Imitates the scheduled sync request that the DB repository's workflow sends (`GET /api/sync-archive` with the correct sync key),
+// and returns the server's response.
 func callScheduledSync() *httptest.ResponseRecorder {
 	cfg, err := core.LoadEnvConfig()
 	if err != nil {
@@ -25,13 +25,10 @@ func callScheduledSync() *httptest.ResponseRecorder {
 	return callScheduledSyncWithKey(core.DeriveSyncKey(cfg))
 }
 
-// Sends the scheduled sync request (`GET /api/sync-archive`) with the given sync key.
+// Sends the scheduled sync request (`GET /api/sync-archive`) with the given sync key, and returns the server's response.
 //
 // Args:
 //   - `key`: The sync key to put in `Authorization: Bearer`. If empty, the header isn't sent
-//
-// Returns:
-//   - The server's response
 func callScheduledSyncWithKey(key string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("GET", "http://example.test/api/sync-archive", nil)
 	if key != "" {
@@ -42,15 +39,15 @@ func callScheduledSyncWithKey(key string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// Reads the environment variables and makes the server config with the DB repository filled in (`core.LoadConfig`).
+// Reads the environment variables and opens the DB repository on the fake GitHub, as the server does (`core.OpenDBRepoFromEnv`).
 // Stops the test on failure.
-func loadTestConfig(t *testing.T) *core.Config {
+func openTestDBRepo(t *testing.T) *core.DBRepo {
 	ctx := context.Background()
-	cfg, err := core.LoadConfig(ctx)
+	repo, err := core.OpenDBRepoFromEnv(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cfg
+	return repo
 }
 
 // Reads the sync status (`GET /api/sync-status`).
@@ -67,23 +64,25 @@ func readSyncStatus(t *testing.T, cookie string) core.SyncStatus {
 	return status
 }
 
-// Base time for testing the scheduled sync's date math. It matches the workflow's scheduled time (18:17 UTC)
+// Base time for testing the scheduled sync's date math.
+// It matches the workflow's scheduled time (18:17 UTC)
 var scheduledAt = time.Date(2026, 10, 14, 18, 17, 0, 0, time.UTC)
 
 // Runs one scheduled call per day for three days from `scheduledAt`, with a 3-day interval.
 // Checks that exactly one day synced, and returns that day.
-// Stops the test on failure. Set the interval in the config file to 3 days before calling.
+// Stops the test on failure.
+// Set the interval in the config file to 3 days before calling.
 //
 // Returns:
 //   - The index of the day that synced (0, 1 or 2). It is that many days after `scheduledAt`
 //
 // NOTE: The sync day comes from date math (days counted from 1970-01-01), so it isn't known when the test is written.
 // That is why the test finds it this way.
-func findSyncDay(t *testing.T, cfg *core.Config) int {
+func findSyncDay(t *testing.T, repo *core.DBRepo) int {
 	ctx := context.Background()
 	due := -1
 	for day := 0; day < 3; day++ { // Runs each of the three days and finds the day that synced
-		got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), scheduledAt.AddDate(0, 0, day))
+		got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), scheduledAt.AddDate(0, 0, day))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +103,7 @@ func findSyncDay(t *testing.T, cfg *core.Config) int {
 //   - With a daily interval (the default), every call syncs and adds new Stars to the archive.
 //     The README step runs too, so the long steps get time before the deadline of the request (`syncWrapUpTime`)
 //   - Changing the interval to 3 days is saved in `config.json` (App settings stay as they are), and only one day in three syncs
-//   - A scheduled run that is a few hours late and passes midnight UTC still counts as the same day
+//   - A scheduled run that is 10 hours late and passes midnight UTC still counts as the same day
 //   - Manual only (0) is saved as `"interval_days": 0` with the commit `user(config): sync manually only`, and then a scheduled run doesn't sync even on a sync day.
 //     A call from a run started by hand still syncs
 //   - An interval that can't be chosen (5, -1) and an empty request get 400
@@ -129,10 +128,10 @@ func TestScheduledSync(t *testing.T) {
 	}
 
 	// The scheduled run on the sync day is 10 hours late and arrives at 04:17 UTC the next day
-	cfg := loadTestConfig(t)
-	due := findSyncDay(t, cfg)
+	repo := openTestDBRepo(t)
+	due := findSyncDay(t, repo)
 	late := scheduledAt.AddDate(0, 0, due).Add(10 * time.Hour)
-	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "synced" {
+	if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late); err != nil || got != "synced" {
 		t.Errorf("a run delayed past midnight UTC: %q %v", got, err)
 	}
 
@@ -143,13 +142,13 @@ func TestScheduledSync(t *testing.T) {
 	if !strings.Contains(gh.readFile(core.ConfigDBPath), `"interval_days": 0`) || !strings.HasPrefix(gh.commits[len(gh.commits)-1], "user(config): sync manually only") {
 		t.Errorf("manual only config: %s, commit %q", gh.readFile(core.ConfigDBPath), gh.commits[len(gh.commits)-1])
 	}
-	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "not_due" {
+	if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late); err != nil || got != "not_due" {
 		t.Errorf("manual only on a sync day: %q %v", got, err)
 	}
 	gh.mu.Lock()
 	gh.runs = []fakeRun{{event: "workflow_dispatch", status: "in_progress", started: late}}
 	gh.mu.Unlock()
-	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "synced" {
+	if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late); err != nil || got != "synced" {
 		t.Errorf("manual only, a call from Sync now: %q %v", got, err)
 	}
 
@@ -186,8 +185,8 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	gh.files[core.ConfigDBPath] = strings.Replace(gh.files[core.ConfigDBPath], `"interval_days":1`, `"interval_days":3`, 1)
 	gh.mu.Unlock()
 
-	cfg := loadTestConfig(t)
-	due := findSyncDay(t, cfg)
+	repo := openTestDBRepo(t)
+	due := findSyncDay(t, repo)
 	notDue := scheduledAt.AddDate(0, 0, (due+1)%3)
 	// One workflow run that started `hoursAgo` hours before `notDue`
 	run := func(event string, status string, conclusion string, hoursAgo int) fakeRun {
@@ -220,7 +219,7 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		gh.mu.Lock()
 		gh.runs = c.runs
 		gh.mu.Unlock()
-		if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), notDue); err != nil || got != c.want {
+		if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), notDue); err != nil || got != c.want {
 			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
 		}
 	}
@@ -233,7 +232,8 @@ func countCommits(gh *fakeGitHub) int {
 	return len(gh.commits)
 }
 
-// Reads the time sync was turned on (`sync.enabled_since`) from the config file. `nil` if it is off (no key)
+// Reads the time sync was turned on (`sync.enabled_since`) from the config file.
+// `nil` if it is off (no key)
 func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 	var file struct {
 		Sync struct {
@@ -330,7 +330,8 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 		t.Errorf("reading the status made %d commits", countCommits(gh)-commits)
 	}
 
-	// A workflow that GitHub disabled for inactivity only shows in the status. Turning it on again records a new time
+	// A workflow that GitHub disabled for inactivity only shows in the status.
+	// Turning it on again records a new time
 	gh.mu.Lock()
 	gh.workflowState = "disabled_inactivity"
 	gh.mu.Unlock()
@@ -345,7 +346,8 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 		t.Errorf("enabled_since after turning on again: %v, before %v", again, firstOn)
 	}
 
-	// The setting is off but the workflow is on (turned on in the Actions tab). Turning it off disables only the workflow
+	// The setting is off but the workflow is on (turned on in the Actions tab).
+	// Turning it off disables only the workflow
 	gh.mu.Lock()
 	gh.files[core.ConfigDBPath] = "{\n  \"sync\": {\n    \"interval_days\": 1\n  }\n}\n" // Same layout the server writes, so if turning off has nothing to change, there is no commit
 	gh.mu.Unlock()
@@ -437,7 +439,7 @@ func TestSyncNowAndStatus(t *testing.T) {
 }
 
 // Tests that each function that writes the config file changes only its own field.
-// It checks the two functions the setup tool uses (`SetDashboardURL`, `RecordSyncEnabled`).
+// It checks the two functions the setup tool uses (`SaveDashboardURL`, `RecordSyncEnabled`).
 //   - Recording the dashboard address keeps an interval that can't be chosen (5), and adds no time turned on
 //   - Recording that sync is on adds only the time turned on. Calling it again makes no commit
 //   - An interval that can't be chosen reads as the default (1)
@@ -447,9 +449,9 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 	gh.mu.Lock()
 	gh.files[core.ConfigDBPath] = `{"dashboard_url":"https://old.test","sync":{"interval_days":5}}` + "\n"
 	gh.mu.Unlock()
-	cfg := loadTestConfig(t)
+	repo := openTestDBRepo(t)
 
-	if err := core.SetDashboardURL(ctx, cfg, "https://new.test"); err != nil {
+	if err := core.SaveDashboardURL(ctx, repo, "https://new.test"); err != nil {
 		t.Fatal(err)
 	}
 	config := gh.readFile(core.ConfigDBPath)
@@ -457,11 +459,11 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 		t.Errorf("after setting the dashboard address: %s", config)
 	}
 
-	if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
+	if err := core.RecordSyncEnabled(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	commits := countCommits(gh)
-	if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
+	if err := core.RecordSyncEnabled(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	config = gh.readFile(core.ConfigDBPath)
@@ -469,7 +471,7 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 		t.Errorf("after recording sync on twice (%d new commits): %s", countCommits(gh)-commits, config)
 	}
 
-	if status, err := core.ReadSyncStatus(ctx, cfg); err != nil || status.IntervalDays != 1 {
+	if status, err := core.ReadSyncStatus(ctx, repo); err != nil || status.IntervalDays != 1 {
 		t.Errorf("status with an interval that can't be chosen: %+v %v", status, err)
 	}
 }

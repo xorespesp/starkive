@@ -1,10 +1,13 @@
-// Tests for the things that define the DB repository format (`DBRepoFormat`).
+// Tests for the DB repository: the things that define its format (`DBRepoFormat`), and finding it (`FindDBRepo`).
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,12 +22,12 @@ import (
 // If it doesn't need to go up, only update the hash.
 // The contract with the workflow is guarded separately by `TestSyncWorkflowChangeIsReviewed` in the setup tool.
 func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
-	readmePath := FetchedReadme{extension: "md"}.buildPath(12345)
-	absentMarkerPath := FetchedReadme{isAbsent: true}.buildPath(12345)
+	readmePath := FetchedReadme{extension: "md"}.buildSnapshotPath(12345)
+	absentMarkerPath := FetchedReadme{isAbsent: true}.buildSnapshotPath(12345)
 	shape := strings.Join([]string{
 		MarkerDBPath, ConfigDBPath, StarItemsDBPath, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
 		ReadmesDBDir, readmePath, absentMarkerPath, readmeCutLine,
-		string(EncodeMarker()),
+		string(EncodeDBRepoMarker()),
 		describeJSONShape(reflect.TypeOf(dbConfigFile{})),
 		describeJSONShape(reflect.TypeOf(StarItem{})),
 		describeJSONShape(reflect.TypeOf(StarList{})),
@@ -64,4 +67,34 @@ func describeJSONShape(t reflect.Type) string {
 		return "{" + strings.Join(fields, ",") + "}"
 	}
 	return t.Kind().String()
+}
+
+// Tests that `FindDBRepo` gives each caller its own copy, with the caller's own config, also when the result comes from the cache (`dbRepoCache`).
+// The second call shares the cache key with the first (`buildEnvCacheKey`) but has another `GitHubWeb`.
+// Changing the first caller's repository changes neither the kept result nor the second caller's
+func TestFindDBRepoGivesEachCallerItsOwnCopy(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repositories/4242":
+			fmt.Fprint(w, `{"full_name":"me/archive","default_branch":"main"}`)
+		case "/graphql":
+			marker, _ := json.Marshal(string(EncodeDBRepoMarker())) // The marker file content as a JSON string
+			fmt.Fprintf(w, `{"data":{"repository":{"isEmpty":false,"marker":{"text":%s}}}}`, marker)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	first := &EnvConfig{DBRepoID: 4242, DBRepoAccessToken: "test-token", GitHubAPI: server.URL, GitHubWeb: "https://first.example"}
+	second := &EnvConfig{DBRepoID: 4242, DBRepoAccessToken: "test-token", GitHubAPI: server.URL, GitHubWeb: "https://second.example"}
+	firstRepo, err := FindDBRepo(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRepo.branch = "changed"
+	secondRepo, err := FindDBRepo(ctx, second)
+	if err != nil || firstRepo.cfg != first || secondRepo.cfg != second || secondRepo.branch != "main" || secondRepo.state != DBRepoStarkive {
+		t.Errorf("first %+v, second %+v, %v", firstRepo, secondRepo, err)
+	}
 }

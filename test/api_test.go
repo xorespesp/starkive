@@ -1,10 +1,11 @@
-// Integration tests for the APIs and the sync, plus the fake GitHub (`fakeGitHub`) and helpers that the tests share.
+// Integration tests for the APIs and the sync, plus the fake GitHub (`fakeGitHub`) and most helpers that the tests share.
+// The helpers that call the sync like the workflow and open the DB repository are in `sync_schedule_test.go`.
 // The fake GitHub runs as an `httptest` server.
 // The GitHub addresses that the server code calls (`STARKIVE_GH_API_URL`, `STARKIVE_GH_WEB_URL`) point to it, so the real GitHub isn't touched.
 // API entry functions (`api.Handle...`) are called directly without an HTTP server, and their responses are checked.
 //
 // NOTE: These tests can't live in `api/`.
-// Vercel tries to turn every .go file in `api/` into a serverless function.
+// Vercel tries to turn every .go file in `api/` into a serverless function (measured).
 package test
 
 import (
@@ -100,7 +101,8 @@ type fakeGitHub struct {
 
 // Records the message of a commit on the branch.
 // If the subject breaks the format (`commitSubjectRule`), it also goes into `badCommitSubjects`,
-// and is reported when the test ends (`checkCommitSubjects`). Call it while holding `mu`.
+// and is reported when the test ends (`checkCommitSubjects`).
+// Call it while holding `mu`.
 //
 // Args:
 //   - `message`: The whole commit message (subject, blank line, body)
@@ -289,7 +291,8 @@ type fakeCommit struct {
 	message string // Commit message
 }
 
-// Returns the files at a commit. Call it while holding `mu`.
+// Returns the files at a commit.
+// Call it while holding `mu`.
 //
 // Args:
 //   - `commit`: Commit sha. If it is the current `head`, these are the current files
@@ -304,7 +307,8 @@ func (f *fakeGitHub) readFilesAt(commit string) map[string]string {
 }
 
 // Moves the branch to a new commit.
-// The files of the current `head` stay in `snapshots`, so reads at that commit still work. Call it while holding `mu`.
+// The files of the current `head` stay in `snapshots`, so reads at that commit still work.
+// Call it while holding `mu`.
 //
 // Args:
 //   - `next`: New commit sha
@@ -333,7 +337,7 @@ func copyFiles(files map[string]string) map[string]string {
 
 // Returns the git blob sha of file content `content`, the value GitHub gives as the sha of a file.
 // It is the SHA-1 of `blob <size>` and a NUL byte, followed by the content (docs)
-func gitBlobSHA(content string) string {
+func computeGitBlobSHA(content string) string {
 	return fmt.Sprintf("%x", sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content))))
 }
 
@@ -341,10 +345,12 @@ func gitBlobSHA(content string) string {
 // The README step keeps time for its commit before it (`readmeCommitReserve`), so a near time would skip that step
 func testLongStepsEndBy() time.Time { return time.Now().Add(time.Hour) }
 
-// Makes a fake repository ID from the repository name (`owner/repo`). It is the CRC32 of the name, so the same name always gives the same ID
+// Makes a fake repository ID from the repository name (`owner/repo`).
+// It is the CRC32 of the name, so the same name always gives the same ID
 func makeRepoID(name string) int64 { return int64(crc32.ChecksumIEEE([]byte(name))) }
 
-// Answers each request like GitHub, by path and method. Paths it doesn't imitate get 404.
+// Answers each request like GitHub, by path and method.
+// Paths it doesn't imitate get 404.
 // This method makes `fakeGitHub` satisfy the `http.Handler` interface, so it can be passed to `httptest.NewServer`.
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
@@ -371,7 +377,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"state": f.workflowState})
 
 	case (r.URL.Path == workflow+"/enable" || r.URL.Path == workflow+"/disable") && r.Method == http.MethodPut:
-		// Turn the workflow on or off. Turning on a workflow that is already on is harmless (measured)
+		// Turn the workflow on or off.
+		// Turning on a workflow that is already on is harmless (measured)
 		f.workflowToggles++
 		if strings.HasSuffix(r.URL.Path, "/disable") {
 			if f.workflowState != "active" { // Disabling a disabled workflow gives 403 with the same header as a missing permission (measured)
@@ -386,7 +393,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 
 	case r.URL.Path == workflow+"/dispatches" && r.Method == http.MethodPost:
-		// Starting a run by hand. A workflow that is off refuses with 422 (measured), and so does a ref other than the default branch.
+		// Starting a run by hand.
+		// A workflow that is off refuses with 422 (measured), and so does a ref other than the default branch.
 		// With `return_run_details`, the answer has the new run's ID and page (measured)
 		var body struct {
 			Ref              string `json:"ref"`
@@ -430,7 +438,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"total_count": total, "workflow_runs": runs})
 
 	case strings.HasPrefix(r.URL.Path, contents) && r.Method == http.MethodGet:
-		// File read (Contents API). `ref` is a branch name or a commit sha
+		// File read (Contents API).
+		// `ref` is a branch name or a commit sha
 		if f.contentsHangup {
 			conn, _, _ := w.(http.Hijacker).Hijack() // Cuts the connection without a response. `.(http.Hijacker)`: gets the interface value as another interface
 			conn.Close()
@@ -463,7 +472,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, content)
 
 	case strings.HasPrefix(r.URL.Path, contents) && r.Method == http.MethodPut:
-		// Write one file (Contents API). The setup tool uses it for an empty repository's first commit (the marker). In an empty repository, this commit becomes the first commit
+		// Write one file (Contents API).
+		// The setup tool uses it for an empty repository's first commit (the marker).
+		// In an empty repository, this commit becomes the first commit
 		path := strings.TrimPrefix(r.URL.Path, contents)
 		if f.workflowsDenied && strings.HasPrefix(path, ".github/workflows/") {
 			w.Header().Set("X-Accepted-GitHub-Permissions", "contents=write; contents=write,workflows=write")
@@ -497,7 +508,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"id":%d,"full_name":"me/archive","private":true,"default_branch":"main"}`, testRepoID)
 
 	case r.URL.Path == "/repos/me/archive/git/ref/heads/main" && r.Method == http.MethodGet:
-		// Read the branch. An empty repository gives 409 "Git Repository is empty." (measured)
+		// Read the branch.
+		// An empty repository gives 409 "Git Repository is empty." (measured)
 		if f.repoEmpty {
 			http.Error(w, `{"message":"Git Repository is empty."}`, http.StatusConflict)
 			return
@@ -505,7 +517,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"object":{"sha":%q}}`, f.head)
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/commits/") && r.Method == http.MethodGet:
-		// Read a commit. The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
+		// Read a commit.
+		// The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
 		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/") && r.Method == http.MethodGet:
@@ -519,7 +532,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		entries := []string{}
 		for path, content := range f.readFilesAt(commitSHA) {
 			if relativePath, inFolder := strings.CutPrefix(path, folderPath+"/"); inFolder {
-				entries = append(entries, fmt.Sprintf(`{"path":%q,"type":"blob","sha":%q}`, relativePath, gitBlobSHA(content)))
+				entries = append(entries, fmt.Sprintf(`{"path":%q,"type":"blob","sha":%q}`, relativePath, computeGitBlobSHA(content)))
 			}
 		}
 		if len(entries) == 0 || r.URL.Query().Get("recursive") != "1" {
@@ -587,7 +600,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"sha":%q}`, sha)
 
 	case r.URL.Path == "/repos/me/archive/git/blobs" && r.Method == http.MethodPost:
-		// Create a blob from base64 content. Its sha is the git blob sha of the decoded bytes
+		// Create a blob from base64 content.
+		// Its sha is the git blob sha of the decoded bytes
 		var body struct {
 			Content  string `json:"content"`
 			Encoding string `json:"encoding"`
@@ -598,12 +612,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"message":"Invalid blob"}`, http.StatusUnprocessableEntity)
 			return
 		}
-		sha := gitBlobSHA(string(content))
+		sha := computeGitBlobSHA(string(content))
 		f.blobs[sha] = string(content)
 		fmt.Fprintf(w, `{"sha":%q}`, sha)
 
 	case r.URL.Path == "/repos/me/archive/git/commits" && r.Method == http.MethodPost:
-		// Create a commit. It isn't on the branch yet
+		// Create a commit.
+		// It isn't on the branch yet
 		var body struct {
 			Message string   `json:"message"`
 			Tree    string   `json:"tree"`
@@ -615,7 +630,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"sha":%q}`, sha)
 
 	case r.URL.Path == "/repos/me/archive/git/refs/heads/main" && r.Method == http.MethodPatch:
-		// Move the branch (no force). If the commit's parent isn't the current `head`, it gives 422 "Update is not a fast forward"
+		// Move the branch (no force).
+		// If the commit's parent isn't the current `head`, it gives 422 "Update is not a fast forward"
 		var body struct {
 			SHA string `json:"sha"`
 		}
@@ -651,7 +667,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"object":{"sha":%q}}`, body.SHA)
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/compare/") && r.Method == http.MethodGet:
-		// Compare two commits (`base...tip`). If following parents from tip reaches base, tip contains base (`ahead`, or `identical` for the same commit)
+		// Compare two commits (`base...tip`).
+		// If following parents from tip reaches base, tip contains base (`ahead`, or `identical` for the same commit)
 		base, tip, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/repos/me/archive/compare/"), "...")
 		status := "diverged"
 		for c := tip; c != ""; c = f.parents[c] {
@@ -667,7 +684,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"status":%q}`, status)
 
 	case r.URL.Path == "/login/oauth/access_token" && r.Method == http.MethodPost:
-		// Exchange a sign-in code for a user token. Like GitHub, a failure also answers 200 with the reason in `error`.
+		// Exchange a sign-in code for a user token.
+		// Like GitHub, a failure also answers 200 with the reason in `error`.
 		// The code `user-<ID>` becomes that user's token `token_<ID>`
 		r.ParseForm()
 		var id int64
@@ -681,7 +699,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case r.URL.Path == "/user" && r.Method == http.MethodGet:
-		// The token's owner. `token_<ID>` belongs to the user with that ID. Other tokens get 401
+		// The token's owner.
+		// `token_<ID>` belongs to the user with that ID.
+		// Other tokens get 401
 		if r.Header.Get("Authorization") == "Bearer "+testToken {
 			f.ownerCalls++
 			if f.ownerDown {
@@ -746,7 +766,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.Contains(body.Query, "isEmpty") {
-			// DB repository state: `isEmpty` for an empty repository. Otherwise the file at `HEAD:<path>` is answered as `marker`. A missing file is `null`
+			// DB repository state: `isEmpty` for an empty repository.
+			// Otherwise the file at `HEAD:<path>` is answered as `marker`.
+			// A missing file is `null`
 			if body.Variables.Owner+"/"+body.Variables.Name != "me/archive" {
 				io.WriteString(w, `{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository"}]}`)
 				return
@@ -764,7 +786,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
 				return
 			}
-			// GitHub star lists and their repositories. Go's map order changes each time, so the answer is sorted by name to stay the same
+			// GitHub star lists and their repositories.
+			// Go's map order changes each time, so the answer is sorted by name to stay the same
 			names := make([]string, 0, len(f.githubStarLists))
 			for name := range f.githubStarLists {
 				names = append(names, name)
@@ -812,7 +835,8 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Reads one file at the branch tip. Tests use it to check what the server wrote.
+// Reads one file at the branch tip.
+// Tests use it to check what the server wrote.
 //
 // Args:
 //   - `path`: Path in the repository
@@ -827,7 +851,7 @@ func (f *fakeGitHub) readFile(path string) string {
 
 // Dashboard address that test requests arrive at.
 // `call` sends requests to `http://example.test`.
-// The server (`core.ReadSiteURL`) treats any address that isn't localhost as https, so this becomes the address
+// The server (`core.ReadAPIRequestSiteURL`) treats any address that isn't localhost as https, so this becomes the address
 const testDashboardURL = "https://example.test"
 
 // Starts a fake GitHub with a DB repository that finished setup, and sets the environment variables.
@@ -872,7 +896,7 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 	if starLists != "" {
 		gh.files[core.StarListsDBPath] = starLists
 	}
-	gh.files[core.MarkerDBPath] = string(core.EncodeMarker())
+	gh.files[core.MarkerDBPath] = string(core.EncodeDBRepoMarker())
 	gh.files[core.ConfigDBPath] = makeTestConfigFile("", "")
 	gh.files[core.SyncWorkflowPath] = "name: starkive sync\n" // The server doesn't read the workflow content. It only checks the state with the Actions API
 	// The server code caches values by the GitHub address and the token (`core/cache.go`), and every test uses the same token.
@@ -882,7 +906,8 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 	srv := httptest.NewServer(http.StripPrefix(pathPrefix, gh))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { checkCommitSubjects(t, gh) }) // When the test ends, checks the format of the commit subjects made so far
-	// Makes the server code call the fake GitHub. `t.Setenv` restores the original value when the test ends
+	// Makes the server code call the fake GitHub.
+	// `t.Setenv` restores the original value when the test ends
 	t.Setenv("STARKIVE_GH_API_URL", srv.URL+pathPrefix)
 	t.Setenv("STARKIVE_GH_WEB_URL", srv.URL+pathPrefix)
 	t.Setenv(core.DBRepoAccessKeyEnv, core.FormatDBRepoAccessKey(testRepoID, testToken))
@@ -894,11 +919,8 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 // File is the DB repository file that the commit changed, or the folder `readmes` (`core.ReadmesDBDir`)
 var commitSubjectRule = regexp.MustCompile(`^(user|sync)\((star-items|star-lists|repo-meta|readmes|config|workflow)\): \S`)
 
-// Reports a test failure for each commit made on the fake GitHub during the test whose subject breaks the format (`commitSubjectRule`).
+// Reports a test failure for each commit made on the fake GitHub `gh` during the test whose subject breaks the format (`commitSubjectRule`).
 // `setupWithoutGitHubApp` calls it when the test ends.
-//
-// Args:
-//   - `gh`: The fake GitHub to check
 //
 // NOTE: Each write path in the server sets its own commit subject.
 // This check runs in every test, so if any path breaks the format, the tests that go through that path fail.
@@ -934,7 +956,7 @@ func makeTestConfigFile(dashboardURL string, app string) string {
 // Args:
 //   - `siteURL`: Dashboard address registered in the App (`site_url`)
 func encodeTestGitHubAppAt(t *testing.T, siteURL string) string {
-	content, err := core.EncodeGitHubApp(&core.Config{DBRepoAccessToken: testToken},
+	content, err := core.EncodeGitHubAppConfigValue(&core.EnvConfig{DBRepoAccessToken: testToken},
 		core.GitHubApp{AppID: 1, Slug: "starkive-test", OwnerID: testUserID, ClientID: testClientID, ClientSecret: testClientSecret, SiteURL: siteURL})
 	if err != nil {
 		t.Fatal(err)
@@ -942,13 +964,14 @@ func encodeTestGitHubAppAt(t *testing.T, siteURL string) string {
 	return string(content)
 }
 
-// Makes sign-in GitHub App settings (the `sign_in_app` value). The address registered in the App is `testDashboardURL`.
+// Makes sign-in GitHub App settings (the `sign_in_app` value).
+// The address registered in the App is `testDashboardURL`.
 //
 // Args:
 //   - `token`: Token used to encrypt the client secret. If it differs from the server token, the server can't decrypt the settings (as after a token change)
 //   - `ownerID`: GitHub user ID of the App owner
 func encodeTestGitHubApp(t *testing.T, token string, ownerID int64) string {
-	content, err := core.EncodeGitHubApp(&core.Config{DBRepoAccessToken: token},
+	content, err := core.EncodeGitHubAppConfigValue(&core.EnvConfig{DBRepoAccessToken: token},
 		core.GitHubApp{AppID: 1, Slug: "starkive-test", OwnerID: ownerID, ClientID: testClientID, ClientSecret: testClientSecret, SiteURL: testDashboardURL})
 	if err != nil {
 		t.Fatal(err)
@@ -961,7 +984,6 @@ func encodeTestGitHubApp(t *testing.T, token string, ownerID int64) string {
 //
 // Args:
 //   - `h`: API entry function (`api.HandleArchiveStarItems`, etc.)
-//   - `method`: HTTP method
 //   - `target`: Path and query (e.g. `/api/archive-star-items?id=1`)
 //   - `body`: Request body. No body if empty
 //   - `cookie`: Value of the `Cookie` header. Not sent if empty
@@ -994,7 +1016,8 @@ func login(t *testing.T) string {
 	return session
 }
 
-// Starts GitHub sign-in (`POST /api/login-session`). Stops the test on failure.
+// Starts GitHub sign-in (`POST /api/login-session`).
+// Stops the test on failure.
 //
 // Returns:
 //   - The state in the GitHub authorization address
@@ -1024,11 +1047,7 @@ func callGitHubLoginCallback(query string, cookie string) *httptest.ResponseReco
 	return call(api.HandleLoginSession, "GET", "/api/login-session?"+query, "", cookie)
 }
 
-// Finds the cookie named `name` with a value among the `Set-Cookie` headers of a response.
-//
-// Args:
-//   - `rec`: The response
-//   - `name`: Cookie name
+// Finds the cookie named `name` with a value among the `Set-Cookie` headers of the response `rec`.
 //
 // Returns:
 //   - `name=value`. An empty string if the cookie is missing, or if there is only a `Set-Cookie` with an empty value (one that deletes the cookie)
@@ -1078,7 +1097,8 @@ func TestGitHubLogin(t *testing.T) {
 		t.Errorf("authorize url = %s", start.URL)
 	}
 
-	// Allowed user: a session is made and can use the APIs. The state cookie is deleted
+	// Allowed user: a session is made and can use the APIs.
+	// The state cookie is deleted
 	state, stateCookie := startGitHubLogin(t)
 	rec = callGitHubLoginCallback(fmt.Sprintf("code=user-%d&state=%s", testUserID, state), stateCookie)
 	session := readSetCookie(rec, "session")
@@ -1089,18 +1109,16 @@ func TestGitHubLogin(t *testing.T) {
 		t.Errorf("session from GitHub login: %d", rec.Code)
 	}
 
-	// Failing cases: never a session cookie. Redirect to the page with a reason.
+	// Failing cases: never a session cookie.
+	// Redirect to the page with a reason.
 	// Expired state: the state and cookie of a sign-in started 11 minutes ago (the state cookie is valid for only 10 minutes)
 	expiredState, expiredCookie := func() (string, string) {
-		cfg, err := core.LoadConfig(ctx)
+		repo := openTestDBRepo(t)
+		app, _, err := core.LoadGitHubApp(ctx, repo)
 		if err != nil {
 			t.Fatal(err)
 		}
-		app, _, err := core.LoadGitHubApp(ctx, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		authorizeURL, cookie, _ := core.StartGitHubLogin(cfg, app, time.Now().Add(-11*time.Minute))
+		authorizeURL, cookie, _ := core.StartGitHubLogin(repo.EnvConfig(), app, time.Now().Add(-11*time.Minute))
 		u, _ := url.Parse(authorizeURL)
 		return u.Query().Get("state"), strings.SplitN(cookie, ";", 2)[0]
 	}()
@@ -1160,19 +1178,19 @@ func TestGitHubLoginFailsClosedWithoutTokenOwner(t *testing.T) {
 }
 
 // Tests parsing of the environment variable `STARKIVE_DB_REPO_ACCESS_KEY` (`starkive-v1:<repository ID>:<token>`).
-//   - With a valid value, it asks GitHub by ID and fills in the repository name and default branch.
+//   - With a valid value, it asks GitHub by ID and opens the repository with its current name and default branch.
 //     It caches the result, so the next request doesn't ask again
 //   - Leading and trailing spaces and newlines (picked up when copying) are ignored
-//   - If it is missing or malformed, every API gives 500.
+//   - If it is missing or malformed, every API gives 500 (checked on two of them).
 //     (Malformed: empty, only the token by mistake, another format version, a name instead of an ID, a negative number,
 //     characters a token can't have, header injection)
 //   - If the token can't see the repository (the token doesn't select it), it gives 409 and doesn't guess another repository
 func TestDBRepoAccessKey(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
-	cfg, err := core.LoadConfig(ctx)
-	if err != nil || cfg.DBRepoID != testRepoID || cfg.DBRepoAccessToken != testToken || cfg.DBRepoFullName != "me/archive" || cfg.DBRepoBranch != "main" {
-		t.Fatalf("resolved: %+v %v", cfg, err)
+	repo, err := core.OpenDBRepoFromEnv(ctx)
+	if err != nil || repo.EnvConfig().DBRepoID != testRepoID || repo.EnvConfig().DBRepoAccessToken != testToken || repo.FullName() != "me/archive" || repo.Branch() != "main" {
+		t.Fatalf("opened: %+v %v", repo, err)
 	}
 	cookie := login(t)
 	before := gh.repoLookups
@@ -1225,14 +1243,15 @@ func TestDBRepoAccessKey(t *testing.T) {
 	// If the token can't see the repository (the token doesn't select it), it reports 409 and doesn't guess the repository
 	gh = setup(t, sampleStarItems, sampleStarLists)
 	gh.repoMissing = true
-	if _, err := core.LoadConfig(ctx); !errors.Is(err, core.ErrDBRepoNotFound) {
+	if _, err := core.OpenDBRepoFromEnv(ctx); !errors.Is(err, core.ErrDBRepoNotFound) {
 		t.Errorf("repository not visible: %v", err)
 	}
 }
 
 // Tests that the server writes nothing to a repository that isn't a starkive repository
 // (a foreign repository without the marker, or an empty repository not prepared yet).
-// Reading the config, the scheduled sync, Sync now, adding directly and turning off sync must all give 409.
+// Opening the DB repository (`core.OpenDBRepoFromEnv`), the scheduled sync, Sync now, adding directly and turning off sync must all give 409,
+// with the guard's message (`core.OpenDBRepo`), so none of them is refused for another reason.
 // There must be no commits and no requests to turn the workflow on or off.
 //
 // NOTE: The test uses a live session.
@@ -1242,7 +1261,7 @@ func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
 	cases := []struct {
 		name    string
 		prepare func(gh *fakeGitHub)
-		want    error
+		want    *core.HTTPError
 	}{
 		{"another repository", func(gh *fakeGitHub) { gh.files = map[string]string{"README.md": "# my project\n"} }, core.ErrDBRepoNotStarkive},
 		{"empty repository", func(gh *fakeGitHub) { gh.files = map[string]string{}; gh.repoEmpty = true }, core.ErrDBRepoNotSetUp},
@@ -1252,22 +1271,28 @@ func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
 			gh := setupWithoutGitHubApp(t, "", "")
 			gh.starred = []string{"a/one"}
 			c.prepare(gh)
-			// A live session. This repository has no App settings, so sign-in isn't possible. The session cookie is made directly, signed with the server token
-			cookie := strings.SplitN(core.NewSessionCookie(&core.Config{DBRepoAccessToken: testToken}, time.Now()), ";", 2)[0]
+			// A live session.
+			// This repository has no App settings, so sign-in isn't possible.
+			// The session cookie is made directly, signed with the server token
+			cookie := strings.SplitN(core.NewSessionCookie(&core.EnvConfig{DBRepoAccessToken: testToken}, time.Now()), ";", 2)[0]
 
-			if _, err := core.LoadConfig(ctx); !errors.Is(err, c.want) {
-				t.Errorf("config: %v", err)
+			if _, err := core.OpenDBRepoFromEnv(ctx); !errors.Is(err, c.want) {
+				t.Errorf("open: %v", err)
 			}
-			if rec := callScheduledSync(); rec.Code != http.StatusConflict {
+			// Reports whether `rec` is the guard's answer
+			isRefusedByGuard := func(rec *httptest.ResponseRecorder) bool {
+				return rec.Code == http.StatusConflict && strings.Contains(rec.Body.String(), c.want.Message)
+			}
+			if rec := callScheduledSync(); !isRefusedByGuard(rec) {
 				t.Errorf("scheduled sync: %d %s", rec.Code, rec.Body)
 			}
-			if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); rec.Code != http.StatusConflict {
+			if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); !isRefusedByGuard(rec) {
 				t.Errorf("sync now: %d %s", rec.Code, rec.Body)
 			}
-			if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"a/one"}`, cookie); rec.Code != http.StatusConflict {
+			if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"a/one"}`, cookie); !isRefusedByGuard(rec) {
 				t.Errorf("add: %d %s", rec.Code, rec.Body)
 			}
-			if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", `{"enabled":false}`, cookie); rec.Code != http.StatusConflict {
+			if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", `{"enabled":false}`, cookie); !isRefusedByGuard(rec) {
 				t.Errorf("turn off sync: %d %s", rec.Code, rec.Body)
 			}
 			gh.mu.Lock()
@@ -1290,7 +1315,8 @@ func TestGitHubRejectingTheTokenIsNotSignOut(t *testing.T) {
 	gh.mu.Lock()
 	gh.tokenRejected = true
 	gh.mu.Unlock()
-	// The session is live but GitHub refuses the token. It must be 502, with no `Set-Cookie` that deletes the session cookie
+	// The session is live but GitHub refuses the token.
+	// It must be 502, with no `Set-Cookie` that deletes the session cookie
 	rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie)
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "GitHub 401: Bad credentials") || len(rec.Header().Values("Set-Cookie")) != 0 {
 		t.Errorf("token rejected: %d %s %q", rec.Code, rec.Body, rec.Header().Values("Set-Cookie"))
@@ -1314,7 +1340,8 @@ func TestSignInStatusWithoutUsername(t *testing.T) {
 }
 
 // Tests the session and same-site checks.
-// A request without a session cookie gets 401. After sign-in, the sign-in status has the DB repository name and the username.
+// A request without a session cookie gets 401.
+// After sign-in, the sign-in status has the DB repository name and the username.
 // A write request from another site (`Origin`) gets 403
 func TestRequiresSessionAndSameOrigin(t *testing.T) {
 	setup(t, sampleStarItems, sampleStarLists)
@@ -1356,7 +1383,8 @@ func TestArchiveFilesGetReturnsFile(t *testing.T) {
 		}
 	}
 
-	// If the browser says it accepts gzip, the response is compressed, and it equals the original when decompressed. With `q=0` (not accepted), it isn't compressed
+	// If the browser says it accepts gzip, the response is compressed, and it equals the original when decompressed.
+	// With `q=0` (not accepted), it isn't compressed
 	for _, c := range []struct {
 		acceptEncoding string
 		wantGzip       bool
@@ -1430,7 +1458,8 @@ func TestStarItemsPatchAndDelete(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
 
-	// Star lists are sorted by ID (200, 100 -> 100, 200). `<` and Korean text in the note are saved as is
+	// Star lists are sorted by ID (200, 100 -> 100, 200).
+	// `<` and Korean text in the note are saved as is
 	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"메모 <중요>","star_list_ids":[200,100]}`, cookie)
 	if rec.Code != 200 {
 		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
@@ -1489,7 +1518,8 @@ func TestStarLists(t *testing.T) {
 		t.Errorf("rename: %d %s", rec.Code, rec.Body)
 	}
 
-	// Delete: removes the star list and removes it from items. Clears the record to count commits from here
+	// Delete: removes the star list and removes it from items.
+	// Clears the record to count commits from here
 	gh.commits = nil
 	if rec := call(api.HandleArchiveStarLists, "DELETE", "/api/archive-star-lists?id=100", "", cookie); rec.Code != 200 {
 		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
@@ -1520,7 +1550,7 @@ func TestRepoMetaDropsInaccessible(t *testing.T) {
 	}
 }
 
-// Tests the sync (`core.Sync`).
+// Tests the sync (`core.SyncArchiveWithGitHub`).
 //   - New Stars go at the top of the archive in GitHub's order. Existing items (including notes) aren't touched
 //   - Metadata snapshots are made in archive order
 //   - There are three commits: adding, refreshing metadata snapshots, and refreshing README snapshots.
@@ -1534,16 +1564,17 @@ func TestSync(t *testing.T) {
 		`{"id":%d,"node_id":"R_%d","name":"old/archived","note":"memo","star_list_ids":[],"starred_at":"x"}`+
 		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
 
-	cfg := newTestConfig()
-	result, err := core.Sync(ctx, cfg, testLongStepsEndBy())
+	repo := openTestDBRepo(t)
+	result, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result != (core.SyncResult{NumStarredRepos: 4, NumAddedRepos: 3, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0, NumCheckedReadmes: 4}) {
+	if result != (core.ArchiveSyncResult{NumStarredRepos: 4, NumAddedRepos: 3, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0, NumCheckedReadmes: 4}) {
 		t.Errorf("result = %+v", result)
 	}
 	lines := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")
-	// Three new Stars go at the top in GitHub's order. Existing items (including notes) stay as they are
+	// Three new Stars go at the top in GitHub's order.
+	// Existing items (including notes) stay as they are
 	if len(lines) != 7 || !strings.Contains(lines[1], `"name":"new/first"`) || !strings.Contains(lines[4], `"note":"memo"`) {
 		t.Errorf("archive:"+"\n"+"%s", strings.Join(lines, "\n"))
 	}
@@ -1565,9 +1596,9 @@ func TestSync(t *testing.T) {
 
 	// Running it again has nothing to add, no changed metadata and no changed README, so no commit is made.
 	// The READMEs of today's group are asked again, and which items are in it depends on the date, so that count isn't compared
-	result, err = core.Sync(ctx, cfg, testLongStepsEndBy())
+	result, err = core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy())
 	result.NumCheckedReadmes = 0
-	if err != nil || result != (core.SyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {
+	if err != nil || result != (core.ArchiveSyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {
 		t.Errorf("second run: %+v %v", result, err)
 	}
 	if len(gh.commits) != 3 {
@@ -1580,27 +1611,27 @@ func TestSync(t *testing.T) {
 //   - If GitHub says it can't find a repository, the snapshot content stays and only the first time it was seen gone (`unavailable_since`) is added.
 //     The next run keeps that time
 //   - If it shows up again, the mark is removed
-//   - With no time budget, nothing is asked
+//   - With no time budget, nothing is checked
 func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/kept", "a/vanishing"}
-	cfg := newTestConfig()
-	if _, err := core.Sync(ctx, cfg, testLongStepsEndBy()); err != nil {
+	repo := openTestDBRepo(t)
+	if _, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy()); err != nil {
 		t.Fatal(err)
 	}
 	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
 
 	// If the query fails because of a GitHub outage, nothing is recorded as "gone"
 	gh.graphqlDown = true
-	if result, err := core.RefreshMeta(ctx, cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
+	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
 		t.Errorf("outage: %+v %v", result, err)
 	}
 	gh.graphqlDown = false
 
 	// When deleted, the snapshot (description, etc.) stays and only the time is added
 	gh.gone = map[string]bool{vanishingID: true}
-	if result, err := core.RefreshMeta(ctx, cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
+	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Errorf("vanished: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]
@@ -1613,14 +1644,14 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	since := m.UnavailableSince
 
 	// The next run keeps the time it first disappeared
-	core.RefreshMeta(ctx, cfg, time.Minute)
+	core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute)
 	if got := readMeta(t, gh)[1].UnavailableSince; got != since {
 		t.Errorf("unavailable_since changed: %s -> %s", since, got)
 	}
 
 	// If it shows up again (for example, private then public), the mark is removed
 	gh.gone = nil
-	core.RefreshMeta(ctx, cfg, time.Minute)
+	core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute)
 	if got := readMeta(t, gh)[1]; got.UnavailableSince != "" {
 		t.Errorf("revived snapshot = %+v", got)
 	}
@@ -1628,23 +1659,14 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 		t.Errorf("revive commit = %q", last)
 	}
 
-	// With no time, it neither asks nor changes anything
-	if result, err := core.RefreshMeta(ctx, cfg, 0); err != nil || result.NumCheckedRepos != 0 {
+	// With no time, nothing is checked
+	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, 0); err != nil || result.NumCheckedRepos != 0 {
 		t.Errorf("no budget: %+v %v", result, err)
 	}
 }
 
-// Makes a server config that points to the fake GitHub's DB repository (`me/archive`, branch `main`).
-// Use it to call functions like `core.Sync` directly, without the environment variables and the repository check.
-func newTestConfig() *core.Config {
-	return &core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
-		GitHubAPI: os.Getenv("STARKIVE_GH_API_URL")}
-}
-
-// Reads and decodes the fake repository's metadata snapshot file (`db/repo-meta.json`). Stops the test if it can't be read.
-//
-// Args:
-//   - `gh`: The fake GitHub
+// Reads and decodes the metadata snapshot file (`db/repo-meta.json`) of the fake GitHub `gh`.
+// Stops the test if it can't be read.
 func readMeta(t *testing.T, gh *fakeGitHub) []core.RepoMeta {
 	var metas []core.RepoMeta
 	if err := json.Unmarshal([]byte(gh.readFile(core.RepoMetaDBPath)), &metas); err != nil {
@@ -1729,7 +1751,8 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 	cookie := login(t)
 	all := fetchAllStarred(t, cookie)
 
-	// The browser sends only the IDs of the chosen repositories. The server reads the repository info from GitHub itself
+	// The browser sends only the IDs of the chosen repositories.
+	// The server reads the repository info from GitHub itself
 	post := func(ids []int64) map[string]int {
 		body, _ := json.Marshal(map[string]any{"starred_repo_ids": ids, "star_list_id": 200})
 		rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
@@ -1745,7 +1768,8 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 		ids = append(ids, s.Repo.ID)
 	}
 
-	// Even 2500 is one request and one commit. IDs that aren't my Stars (1, 999) are skipped
+	// Even 2500 is one request and one commit.
+	// IDs that aren't my Stars (1, 999) are skipped
 	if r := post(append(ids, 1, 999)); r["added"] != 2500 || r["skipped"] != 2 {
 		t.Errorf("import: %v", r)
 	}
@@ -1795,8 +1819,7 @@ func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
 	all := fetchAllStarred(t, cookie)
 
 	// While the page was open, the daily sync archived the first repository first
-	core.ArchiveStarredRepos(ctx, &core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
-		GitHubAPI: os.Getenv("STARKIVE_GH_API_URL")}, all[:1], []int64{}, "sync(star-items)")
+	core.ArchiveStarredRepos(ctx, openTestDBRepo(t), all[:1], []int64{}, "sync(star-items)")
 
 	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{all[0].Repo.ID, all[1].Repo.ID, all[2].Repo.ID}})
 	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
@@ -1848,8 +1871,9 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 		t.Errorf("import commits = %q", gh.commits)
 	}
 
-	// Sync: adds the other new Stars. For the same GitHub star list, they must go into the same star list as Import
-	if _, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy()); err != nil {
+	// Sync: adds the other new Stars.
+	// For the same GitHub star list, they must go into the same star list as Import
+	if _, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy()); err != nil {
 		t.Fatal(err)
 	}
 	var starLists []core.StarList
@@ -1885,7 +1909,8 @@ func TestCommitAppliedButReplyLostWhileAnotherCommitLands(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.starred = []string{"new/one"}
 	cookie := login(t)
-	// Every branch move is applied and then the response is lost. Right after, one commit from another device lands
+	// Every branch move is applied and then the response is lost.
+	// Right after, one commit from another device lands
 	gh.refLostReply, gh.otherAfterLostReply = true, true
 
 	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, cookie); rec.Code != 200 {
@@ -1904,7 +1929,8 @@ func TestCommitAppliedButReplyLostWhileAnotherCommitLands(t *testing.T) {
 }
 
 // Tests the note length limit (`core.MaxNoteLength`).
-// It counts characters, not bytes. Going over gives 400 and nothing is saved.
+// It counts characters, not bytes.
+// Going over gives 400 and nothing is saved.
 // Leading and trailing spaces are removed before counting
 func TestNoteLengthLimit(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -1913,7 +1939,8 @@ func TestNoteLengthLimit(t *testing.T) {
 		body, _ := json.Marshal(map[string]string{"note": note})
 		return call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", string(body), cookie).Code
 	}
-	// Counts characters. A Korean character is 3 bytes in UTF-8, so counting bytes would go over even at 2,000 characters
+	// Counts characters.
+	// A Korean character is 3 bytes in UTF-8, so counting bytes would go over even at 2,000 characters
 	if code := patch(strings.Repeat("메", core.MaxNoteLength)); code != 200 {
 		t.Errorf("note at the limit: %d", code)
 	}
@@ -1928,7 +1955,8 @@ func TestNoteLengthLimit(t *testing.T) {
 
 // Tests that the sync steps (adding new Stars, refreshing metadata and README snapshots) don't block each other.
 // If adding fails, the snapshot refreshes still run to the end and commit.
-// The error has the name of the failed step. When the outage ends, the next run fills in the missing Stars
+// The error has the name of the failed step.
+// When the outage ends, the next run fills in the missing Stars
 func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -1937,7 +1965,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// Adding new Stars fails, but the unrelated snapshot refreshes run to the end and commit.
 	// The error comes back with the step name
-	result, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy())
+	result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy())
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)
 	}
@@ -1948,7 +1976,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// When the outage ends, the next run fills in the missing Stars
 	gh.githubStarListsDown = false
-	if result, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy()); err != nil || result.NumAddedRepos != 1 {
+	if result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy()); err != nil || result.NumAddedRepos != 1 {
 		t.Errorf("next sync: %+v %v", result, err)
 	}
 }
@@ -2038,7 +2066,8 @@ func TestCleanStarListIDs(t *testing.T) {
 	}
 }
 
-// Tests when a save is retried. It retries only when the branch really moved.
+// Tests when a save is retried.
+// It retries only when the branch really moved.
 //   - A failed tree creation isn't a conflict, so there is no retry. It gives 502 right away (a GitHub failure)
 //   - If another device keeps committing first, it tries up to 5 times in all, then gives 409 "changed while saving"
 //   - If the branch didn't move but the move is refused (no branch, empty repository, etc.), it doesn't retry, whatever the status code.
@@ -2047,7 +2076,8 @@ func TestUpdateRetriesOnlyWhenBranchMoved(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
 
-	// A failed tree creation isn't a conflict, so it returns the error right away without a retry. A GitHub failure is 502
+	// A failed tree creation isn't a conflict, so it returns the error right away without a retry.
+	// A GitHub failure is 502
 	gh.treeStatus = http.StatusUnprocessableEntity
 	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"x"}`, cookie); rec.Code != http.StatusBadGateway || gh.treeCalls != 1 {
 		t.Errorf("tree failure: %d %s, tree calls %d", rec.Code, rec.Body, gh.treeCalls)
@@ -2063,7 +2093,8 @@ func TestUpdateRetriesOnlyWhenBranchMoved(t *testing.T) {
 	}
 
 	// If the branch didn't move but the move is refused (no branch, empty repository, etc.), it isn't a conflict, whatever the status code.
-	// It doesn't retry and returns GitHub's error as 502. GitHub's 409 isn't read as our save conflict (409 "changed while saving")
+	// It doesn't retry and returns GitHub's error as 502.
+	// GitHub's 409 isn't read as our save conflict (409 "changed while saving")
 	gh.interfereAll = false
 	for _, c := range []fakeRefFailure{{http.StatusUnprocessableEntity, "Reference does not exist"}, {http.StatusConflict, "Git Repository is empty."}} {
 		gh.treeCalls = 0
@@ -2104,7 +2135,7 @@ func TestSnapshotOfRepoVanishedBeforeFirstCheck(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.gone = map[string]bool{"R_2": true} // A repository already gone at the first check
-	if result, err := core.RefreshMeta(ctx, newTestConfig(), time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
+	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, openTestDBRepo(t), time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Fatalf("refresh: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]

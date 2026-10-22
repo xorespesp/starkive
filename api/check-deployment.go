@@ -33,7 +33,7 @@ func handleCheckDeploymentGet(w http.ResponseWriter, r *http.Request) error {
 	if !core.IsValidDeploymentNonce(nonce) {
 		return core.Errorf(http.StatusBadRequest, "Invalid nonce")
 	}
-	core.WriteJSON(w, http.StatusOK, checkDeploymentResult{Format: core.DBRepoFormat, Proof: core.SignDeploymentNonce(cfg, nonce)})
+	core.WriteAPIJSONResponse(w, http.StatusOK, checkDeploymentResult{Format: core.DBRepoFormat, Proof: core.SignDeploymentNonce(cfg, nonce)})
 	return nil
 }
 
@@ -42,8 +42,8 @@ func handleCheckDeploymentGet(w http.ResponseWriter, r *http.Request) error {
 // Accepts only GET. Other methods get 405.
 func HandleCheckDeployment(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 		return
 	}
-	core.Respond(w, r, handleCheckDeploymentGet)
+	core.ServeAPIRequest(w, r, handleCheckDeploymentGet)
 }

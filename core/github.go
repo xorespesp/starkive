@@ -1,9 +1,8 @@
 // Shared code for calling the GitHub API.
-// It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubAPI`, `GitHubAPIError`),
-// tells rate limit answers apart (`checkGitHubAPIWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
-// reads GitHub's JSON answers (`DecodeGitHubAnswer`),
-// turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`),
-// and builds Contents API paths.
+// It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubResponse`, `GitHubAPIError`),
+// tells rate limit answers apart (`checkGitHubResponseWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
+// reads GitHub's JSON answers (`DecodeGitHubResponse`),
+// and turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`).
 // Calls for each feature (saving the archive, sync, sign-in) are in their own files.
 package core
 
@@ -16,7 +15,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -25,10 +23,12 @@ import (
 // A request also ends at the deadline of its `ctx`, if that comes first (`CallGitHubAPI`)
 const githubTimeout = 20 * time.Second
 
-// HTTP client for GitHub requests. Go's default client has no time limit, so a separate one is made
+// HTTP client for GitHub requests.
+// Go's default client has no time limit, so a separate one is made
 var httpClient = &http.Client{Timeout: githubTimeout}
 
-// Options of a GitHub API request. Empty fields use the default
+// Options of a GitHub API request.
+// Empty fields use the default
 type GitHubAPIRequest struct {
 	Method string // HTTP method. GET if empty
 	Accept string // `Accept` header. `application/vnd.github+json` if empty
@@ -48,13 +48,13 @@ type GitHubAPIRequest struct {
 //
 // Returns:
 //   - The response. Failure answers (4xx, 5xx) are returned without an error too.
-//     The caller checks it with `CheckGitHubAPI`, and closes it with `res.Body.Close()` after reading
+//     The caller checks it with `CheckGitHubResponse`, and closes it with `res.Body.Close()` after reading
 //   - A 502 `HTTPError` if the request was made but couldn't be sent or no answer came back,
 //     after `githubTimeout` or at the deadline of `ctx`.
 //     It wraps the cause.
 //     To tell whether the deadline of `ctx` cut it, check `ctx.Err()`, not the error.
 //     A request that hit `githubTimeout` can match `context.DeadlineExceeded` too, depending on the Go version (measured)
-func CallGitHubAPI(ctx context.Context, cfg *Config, path string, opt GitHubAPIRequest) (*http.Response, error) {
+func CallGitHubAPI(ctx context.Context, cfg *EnvConfig, path string, opt GitHubAPIRequest) (*http.Response, error) {
 	if opt.Method == "" {
 		opt.Method = http.MethodGet
 	}
@@ -94,7 +94,7 @@ func CallGitHubAPI(ctx context.Context, cfg *Config, path string, opt GitHubAPIR
 	return res, nil
 }
 
-// Wraps `err`, a failure to get an answer from GitHub, as a 502 `HTTPError`, so `Respond` answers 502 as for any GitHub failure.
+// Wraps `err`, a failure to get an answer from GitHub, as a 502 `HTTPError`, so `ServeAPIRequest` answers 502 as for any GitHub failure.
 // The message tells a timeout from other failures.
 // The message, which the browser gets, leaves out the text of `err`, which has the request address.
 // The returned error keeps `err` for the server log.
@@ -110,8 +110,8 @@ func newGitHubUnreachableError(err error) error {
 
 // Reads the JSON body of the GitHub answer `res` into `dst`.
 // A body that can't be read (such as an HTML error page in place of JSON) gives a 502 `HTTPError`,
-// so `Respond` answers 502 as for any GitHub failure, not 500
-func DecodeGitHubAnswer(res *http.Response, dst any) error {
+// so `ServeAPIRequest` answers 502 as for any GitHub failure, not 500
+func DecodeGitHubResponse(res *http.Response, dst any) error {
 	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
 		return newGitHubUnreadableError(err)
 	}
@@ -144,21 +144,21 @@ func newGitHubUnreadableError(err error) error {
 // The error type `RATE_LIMITED` isn't in the docs and wasn't measured, so it is only one of the signs.
 // With no points left, any error counts as the rate limit, even beside usable `data`.
 // That `data` is dropped, because the next request would be refused anyway.
-func callGraphQL(ctx context.Context, cfg *Config, query string, variables map[string]any, dst any) error {
+func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables map[string]any, dst any) error {
 	body := map[string]any{"query": query, "variables": variables}
 	res, err := CallGitHubAPI(ctx, cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: body})
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if err := checkGitHubAPIWithRateLimit(res); err != nil {
+	if err := checkGitHubResponseWithRateLimit(res); err != nil {
 		return err
 	}
 	var result struct {
 		Data   json.RawMessage `json:"data"` // Raw JSON, not decoded yet. Decoded into `dst` at the end
 		Errors graphQLErrors   `json:"errors"`
 	}
-	if err := DecodeGitHubAnswer(res, &result); err != nil {
+	if err := DecodeGitHubResponse(res, &result); err != nil {
 		return err
 	}
 	for _, e := range result.Errors {
@@ -194,10 +194,11 @@ type graphQLError struct {
 // For any other caller it is a failure like any other.
 type graphQLErrors []graphQLError
 
-// Implements Go's `error` interface. The message is the first error's
+// Implements Go's `error` interface.
+// The message is the first error's
 func (errs graphQLErrors) Error() string { return "GitHub GraphQL: " + errs[0].Message }
 
-// Returns the same failure as a 502 `HTTPError`, so `Respond` answers 502 as for any GitHub failure.
+// Returns the same failure as a 502 `HTTPError`, so `ServeAPIRequest` answers 502 as for any GitHub failure.
 // `errors.As` looks through this method (Go's convention for an error that wraps another)
 func (errs graphQLErrors) Unwrap() error { return Errorf(http.StatusBadGateway, "%s", errs.Error()) }
 
@@ -233,10 +234,10 @@ func (errs graphQLErrors) hasErrorInNode(index int) bool {
 // Error for a GitHub answer that says the rate limit was reached
 var errGitHubRateLimited = errors.New("GitHub rate limit reached")
 
-// Checks a GitHub answer like `CheckGitHubAPI`, and wraps a rate limit answer with `errGitHubRateLimited`.
+// Checks a GitHub answer like `CheckGitHubResponse`, and wraps a rate limit answer with `errGitHubRateLimited`.
 // A rate limit answer is 429, or 403 with no requests left, a `Retry-After` header, or "rate limit" in the message (docs).
-func checkGitHubAPIWithRateLimit(res *http.Response) error {
-	err := CheckGitHubAPI(res)
+func checkGitHubResponseWithRateLimit(res *http.Response) error {
+	err := CheckGitHubResponse(res)
 	var apiErr *GitHubAPIError
 	if !errors.As(err, &apiErr) {
 		return err
@@ -250,10 +251,11 @@ func checkGitHubAPIWithRateLimit(res *http.Response) error {
 	return err
 }
 
-// Error for a failure that GitHub answered with an HTTP status code. `CheckGitHubAPI` makes it.
+// Error for a failure that GitHub answered with an HTTP status code.
+// `CheckGitHubResponse` makes it.
 // Failures of the sign-in code exchange endpoint, which answers in JSON, are the same.
 //
-// NOTE: The status code belongs to GitHub, so it isn't used as the status code of our API (`Respond` always answers 502).
+// NOTE: The status code belongs to GitHub, so it isn't used as the status code of our API (`ServeAPIRequest` always answers 502).
 // To decide by GitHub's status code inside the server, use `hasGitHubStatus`.
 // Sometimes GitHub answers success (200) but the content can't be used (GraphQL `errors`, an empty user, and so on).
 // That is not this type.
@@ -263,7 +265,8 @@ type GitHubAPIError struct {
 	Message string // GitHub's message. If the token lacks a permission, the needed permission is added at the end
 }
 
-// Implements Go's `error` interface. The message is `GitHub <status code>: <message>`
+// Implements Go's `error` interface.
+// The message is `GitHub <status code>: <message>`
 func (e *GitHubAPIError) Error() string { return fmt.Sprintf("GitHub %d: %s", e.Status, e.Message) }
 
 // Reports whether error `err` is a failure that GitHub answered with status code `status` (e.g. 404).
@@ -281,7 +284,7 @@ func hasGitHubStatus(err error, status int) bool {
 // Returns:
 //   - `nil` on success (the caller reads and closes the body).
 //     On failure, it closes the body and returns a `GitHubAPIError` with GitHub's message and the needed permission
-func CheckGitHubAPI(res *http.Response) error {
+func CheckGitHubResponse(res *http.Response) error {
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		return nil
 	}
@@ -295,19 +298,10 @@ func CheckGitHubAPI(res *http.Response) error {
 		message = body.Message
 	}
 
-	// If the token lacks a permission, GitHub puts the permission this request needs in a header (e.g. "contents=write").
+	// If the token lacks a permission, GitHub puts the permission this request needs in a header (e.g. "contents=write", docs).
 	// It is a clue for fixing the token, so it is added to the message
 	if needed := res.Header.Get("X-Accepted-GitHub-Permissions"); needed != "" {
 		message += " (token needs: " + needed + ")"
 	}
 	return &GitHubAPIError{Status: res.StatusCode, Message: message}
-}
-
-// Builds the Contents API path of one file in the DB repository (`/repos/<repository>/contents/<path>`).
-//
-// Args:
-//   - `filePath`: File path in the repository. Characters not allowed in a path are encoded
-func BuildContentsPath(cfg *Config, filePath string) string {
-	escaped := (&url.URL{Path: filePath}).EscapedPath()
-	return fmt.Sprintf("/repos/%s/contents/%s", cfg.DBRepoFullName, escaped)
 }

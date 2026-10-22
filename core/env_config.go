@@ -1,8 +1,8 @@
-// Server config (`Config`), the format of its source (the environment variable `STARKIVE_DB_REPO_ACCESS_KEY`),
+// Server config (`EnvConfig`), the format of its source (the environment variable `STARKIVE_DB_REPO_ACCESS_KEY`),
 // and the proof that a deployment is set up with that value (`SignDeploymentNonce`).
-// The `core` package holds code shared by the API functions (`api/*.go`) and the setup tool (`tools/setup`).
+// The `core` package holds code that several API functions (`api/*.go`) or the sync share, and formats that the server and the setup tool must agree on.
 // Finding the DB repository by its ID and judging its state is in `db_repo.go`.
-// Checking the token owner is in `github_login.go`.
+// Checking the token owner is in `sign_in.go`.
 package core
 
 import (
@@ -16,7 +16,8 @@ import (
 	"strings"
 )
 
-// Name of the only environment variable that a person puts in Vercel. The setup tool makes and prints its value (`FormatDBRepoAccessKey`)
+// Name of the only environment variable that a person puts in Vercel.
+// The setup tool makes and prints its value (`FormatDBRepoAccessKey`)
 const DBRepoAccessKeyEnv = "STARKIVE_DB_REPO_ACCESS_KEY"
 
 // Format tag at the start of the environment variable value.
@@ -24,21 +25,20 @@ const DBRepoAccessKeyEnv = "STARKIVE_DB_REPO_ACCESS_KEY"
 const dbRepoAccessKeyPrefix = "starkive-v1"
 
 // Server config.
-// It is made from the environment variable on each request (`LoadEnvConfig`).
-// After the DB repository is checked, its name and branch are filled in (`useDBRepo`).
+// On the server it is made from the environment variable on each request (`LoadEnvConfig`), and doesn't change after that.
+// The setup tool makes one by hand, and sets `DBRepoID` once it has looked the repository up.
+// The DB repository found from it (its name and branch) is a `DBRepo` (`FindDBRepo`).
 // The user allowed to sign in and the secret keys come from the token.
 // The sign-in GitHub App and the sync settings are in `config.json` in the DB repository.
-type Config struct {
+type EnvConfig struct {
 	DBRepoID          int64  // DB repository ID. It stays the same when the repository is renamed, so the repository is referred to by this ID
 	DBRepoAccessToken string // Fine-grained token with read/write access to Contents, Workflows, Secrets and Actions of one DB repository, and read access to the account's Starring
-	DBRepoFullName    string // Current name of the DB repository, `owner/repo`. Empty right after `LoadEnvConfig`. `ResolveDBRepo` fills it in
-	DBRepoBranch      string // Default branch of the DB repository. `ResolveDBRepo` fills it in
 	GitHubAPI         string // GitHub API address (`STARKIVE_GH_API_URL`, default https://api.github.com). Changed only when tests use a fake GitHub
 	GitHubWeb         string // GitHub web address (`STARKIVE_GH_WEB_URL`, default https://github.com). Used for the sign-in page, the sign-in code exchange and App creation
 }
 
 // Makes the proof for a deployment check (`/api/check-deployment`) by signing the `nonce`.
-// The proof is HMAC-SHA256(key = `deriveKey(token, "starkive-check-deployment")`, message = `<repository ID>:<nonce>`), written in base64url.
+// The proof is HMAC-SHA256(key = `deriveKey(cfg, "starkive-check-deployment")`, message = `<repository ID>:<nonce>`), written in base64url.
 // The server answers with it, and the setup tool computes the same value to compare.
 //
 // Args:
@@ -48,13 +48,14 @@ type Config struct {
 // The answer alone reveals neither the token nor the repository, so it is open without sign-in.
 // The server and the setup tool must agree on the format, so it lives in this file.
 // If it lived in two places, one side could change alone and the check would always fail.
-func SignDeploymentNonce(cfg *Config, nonce string) string {
+func SignDeploymentNonce(cfg *EnvConfig, nonce string) string {
 	mac := hmac.New(sha256.New, deriveKey(cfg, "starkive-check-deployment"))
 	mac.Write([]byte(strconv.FormatInt(cfg.DBRepoID, 10) + ":" + nonce))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// Characters accepted in a deployment check `nonce` (characters of base64url and hex, 16 to 128 of them). Other characters are refused
+// Characters accepted in a deployment check `nonce` (characters of base64url and hex, 16 to 128 of them).
+// Other characters are refused
 var deploymentNoncePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 
 // Reports whether a string has a valid shape for a deployment check `nonce`
@@ -106,7 +107,7 @@ func parseDBRepoAccessKey(value string) (repoID int64, token string, err error) 
 }
 
 // Makes the server config from the environment variables only.
-// It doesn't ask GitHub, so `DBRepoFullName` and `DBRepoBranch` are empty.
+// It doesn't ask GitHub.
 //
 // Returns:
 //   - The server config. A 500 `HTTPError` if the environment variable is missing or malformed
@@ -114,13 +115,13 @@ func parseDBRepoAccessKey(value string) (repoID int64, token string, err error) 
 // NOTE: The sign-in cookie and the sync key are checked with this config alone.
 // So a request without sign-in, or a call from the sync workflow without the key, causes no GitHub request.
 // Even if someone calls it again and again, it doesn't use the server token's rate limit.
-// After the check, `useDBRepo` fills in the repository.
-func LoadEnvConfig() (*Config, error) {
+// After the check, `OpenDBRepo` finds the repository.
+func LoadEnvConfig() (*EnvConfig, error) {
 	repoID, token, err := parseDBRepoAccessKey(os.Getenv(DBRepoAccessKeyEnv))
 	if err != nil {
 		return nil, err
 	}
-	return &Config{
+	return &EnvConfig{
 		DBRepoID:          repoID,
 		DBRepoAccessToken: token,
 		GitHubAPI:         strings.TrimRight(readEnv("STARKIVE_GH_API_URL", "https://api.github.com"), "/"),

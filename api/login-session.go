@@ -41,19 +41,19 @@ func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
 	if query.Has("code") || query.Has("error") {
 		return handleLoginSessionCallback(w, r)
 	}
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
 	// Only the token owner can sign in, so this is the account that signed in.
 	// The username is only shown, so failing to read it doesn't keep the dashboard from opening
 	username := ""
-	if owner, err := core.FetchTokenOwner(ctx, cfg); err == nil {
+	if owner, err := core.FetchTokenOwner(ctx, dbRepo.EnvConfig()); err == nil {
 		username = owner.Login
 	} else {
 		log.Printf("token owner: %v", err)
 	}
-	core.WriteJSON(w, http.StatusOK, loginSessionStatus{Repo: cfg.DBRepoFullName, Username: username})
+	core.WriteAPIJSONResponse(w, http.StatusOK, loginSessionStatus{Repo: dbRepo.FullName(), Username: username})
 	return nil
 }
 
@@ -71,12 +71,12 @@ type loginSessionStatus struct {
 //
 // NOTE: It doesn't tell these causes apart.
 // In every case, the fix is to run the setup tool, and the tool reports the exact cause.
-func loadSignInApp(ctx context.Context, cfg *core.Config) (core.GitHubApp, error) {
-	app, status, err := core.LoadGitHubApp(ctx, cfg)
-	if err != nil && !errors.Is(err, core.ErrConfigBroken) {
+func loadSignInApp(ctx context.Context, dbRepo *core.DBRepo) (core.GitHubApp, error) {
+	app, status, err := core.LoadGitHubApp(ctx, dbRepo)
+	if err != nil && !errors.Is(err, core.ErrDBConfigFileBroken) {
 		return core.GitHubApp{}, err
 	}
-	if err != nil || status != core.GitHubAppReady { // A broken config file (`core.ErrConfigBroken`) gets the same answer
+	if err != nil || status != core.GitHubAppReady { // A broken config file (`core.ErrDBConfigFileBroken`) gets the same answer
 		return core.GitHubApp{}, core.Errorf(http.StatusConflict, "Sign-in isn't set up for this deployment. Run the starkive setup tool")
 	}
 	return app, nil
@@ -99,24 +99,24 @@ func handleLoginSessionPost(w http.ResponseWriter, r *http.Request) error {
 	if err := core.RequireSameOrigin(r); err != nil {
 		return err
 	}
-	cfg, err := core.LoadConfig(ctx)
+	dbRepo, err := core.OpenDBRepoFromEnv(ctx)
 	if err != nil {
 		return err
 	}
-	app, err := loadSignInApp(ctx, cfg)
+	app, err := loadSignInApp(ctx, dbRepo)
 	if err != nil {
 		return err
 	}
-	if core.ReadSiteURL(r) != core.NormalizeSiteURL(app.SiteURL) {
-		core.WriteJSON(w, http.StatusConflict, map[string]string{"error": "Sign in at " + app.SiteURL, "dashboard_url": app.SiteURL})
+	if core.ReadAPIRequestSiteURL(r) != core.NormalizeSiteURL(app.SiteURL) {
+		core.WriteAPIJSONResponse(w, http.StatusConflict, map[string]string{"error": "Sign in at " + app.SiteURL, "dashboard_url": app.SiteURL})
 		return nil
 	}
-	authorizeURL, stateCookie, err := core.StartGitHubLogin(cfg, app, time.Now())
+	authorizeURL, stateCookie, err := core.StartGitHubLogin(dbRepo.EnvConfig(), app, time.Now())
 	if err != nil {
 		return err
 	}
 	w.Header().Add("Set-Cookie", stateCookie)
-	core.WriteJSON(w, http.StatusOK, map[string]string{"url": authorizeURL})
+	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]string{"url": authorizeURL})
 	return nil
 }
 
@@ -132,23 +132,23 @@ func handleLoginSessionPost(w http.ResponseWriter, r *http.Request) error {
 // The page gets only the kind of reason.
 func handleLoginSessionCallback(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.LoadConfig(ctx)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Set-Cookie", core.ClearGitHubLoginStateCookie) // Set first, so the error answer below deletes it too
+	dbRepo, err := core.OpenDBRepoFromEnv(ctx)
 	if err != nil {
 		return err
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Add("Set-Cookie", core.ClearGitHubLoginStateCookie)
 	failure := core.GitHubLoginFailed // If the App settings can't be read, it ends with this reason
-	app, detail := loadSignInApp(ctx, cfg)
+	app, detail := loadSignInApp(ctx, dbRepo)
 	if detail == nil {
-		failure, detail = core.FinishGitHubLogin(cfg, app, r, time.Now())
+		failure, detail = core.FinishGitHubLogin(dbRepo.EnvConfig(), app, r, time.Now())
 	}
 	if failure != "" {
 		log.Printf("GitHub login failed (%s): %v", failure, detail)
 		http.Redirect(w, r, "/?login_error="+string(failure), http.StatusFound)
 		return nil
 	}
-	w.Header().Add("Set-Cookie", core.NewSessionCookie(cfg, time.Now()))
+	w.Header().Add("Set-Cookie", core.NewSessionCookie(dbRepo.EnvConfig(), time.Now()))
 	http.Redirect(w, r, "/", http.StatusFound)
 	return nil
 }
@@ -161,23 +161,23 @@ func handleLoginSessionDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	w.Header().Add("Set-Cookie", core.ClearSessionCookie)
-	core.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]bool{"ok": true})
 	return nil
 }
 
 // Entry point for `/api/login-session` requests. It sends each method to its handler.
 // Vercel finds the exported function in this file and deploys it as one function.
-// `core.Respond` turns an error from a handler into a JSON error response.
+// `core.ServeAPIRequest` turns an error from a handler into a JSON error response.
 // Other methods get 405.
 func HandleLoginSession(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		core.Respond(w, r, handleLoginSessionGet)
+		core.ServeAPIRequest(w, r, handleLoginSessionGet)
 	case http.MethodPost:
-		core.Respond(w, r, handleLoginSessionPost)
+		core.ServeAPIRequest(w, r, handleLoginSessionPost)
 	case http.MethodDelete:
-		core.Respond(w, r, handleLoginSessionDelete)
+		core.ServeAPIRequest(w, r, handleLoginSessionDelete)
 	default:
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 	}
 }

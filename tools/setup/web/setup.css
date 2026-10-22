@@ -1,4 +1,5 @@
-/* The setup page. It uses the colors of the GitHub dark theme (Primer), like the dashboard. */
+/* The setup page.
+   It uses the colors of the GitHub dark theme (Primer), like the dashboard. */
 
 :root {
   color-scheme: dark;
@@ -74,7 +75,8 @@ button {
   cursor: pointer;
 }
 
-/* Button style for the main action. Also used on links (`a`) */
+/* Button style for the main action.
+   Also used on links (`a`) */
 .primary {
   display: inline-block;
   padding: 5px 16px;
@@ -86,7 +88,8 @@ button {
   text-decoration: none;
 }
 
-/* A main button that was opened once. It can be clicked again, but it turns gray to show that the task is done */
+/* A main button that was opened once.
+   It can be clicked again, but it turns gray to show that the task is done */
 .primary.opened {
   border-color: var(--border);
   background: var(--surface);
@@ -338,7 +341,8 @@ button {
   font: inherit;
 }
 
-/* Input box of a secret prompt. It hides the characters of a text box */
+/* Input box of a secret prompt.
+   It hides the characters of a text box */
 .prompt input.masked {
   -webkit-text-security: disc;
 }

@@ -23,21 +23,21 @@ import (
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 func handleArchiveRepoMetaGet(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
 	if !r.URL.Query().Has("id") {
-		return core.WriteDBFile(w, r, cfg, core.RepoMetaDBPath)
+		return core.WriteAPIDBFileResponse(w, r, dbRepo, core.RepoMetaDBPath)
 	}
-	id, err := core.ParseIDParam(r)
+	id, err := core.ParseAPIRequestID(r)
 	if err != nil {
 		return err
 	}
 	if id <= 0 {
 		return core.Errorf(http.StatusBadRequest, "Invalid id")
 	}
-	readme, err := core.ReadReadmeSnapshot(ctx, cfg, id)
+	readme, err := core.ReadReadmeSnapshot(ctx, dbRepo, id)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func handleArchiveRepoMetaGet(w http.ResponseWriter, r *http.Request) error {
 		ID     int64                      `json:"id"`     // Item ID that was asked
 		Readme core.ReadmeSnapshotContent `json:"readme"` // Its README snapshot
 	}{ID: id, Readme: readme}
-	core.WriteJSON(w, http.StatusOK, answer)
+	core.WriteAPIJSONResponse(w, http.StatusOK, answer)
 	return nil
 }
 
@@ -54,8 +54,8 @@ func handleArchiveRepoMetaGet(w http.ResponseWriter, r *http.Request) error {
 // Accepts only GET. Other methods get 405.
 func HandleArchiveRepoMeta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 		return
 	}
-	core.Respond(w, r, handleArchiveRepoMetaGet)
+	core.ServeAPIRequest(w, r, handleArchiveRepoMetaGet)
 }

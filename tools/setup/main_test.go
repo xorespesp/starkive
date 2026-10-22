@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,7 +30,7 @@ import (
 // It accepts only https (http only for a local development server).
 // It removes a trailing `/`, makes the host lower case, and drops the default port,
 // so the address has the same shape as what the browser requests.
-// If they differ, the server's comparison with the request address (`core.ReadSiteURL`) at sign-in always fails, and sign-in is blocked
+// If they differ, the server's comparison with the request address (`core.ReadAPIRequestSiteURL`) at sign-in always fails, and sign-in is blocked
 func TestNormalizeDashboardURL(t *testing.T) {
 	for input, want := range map[string]string{
 		"https://starkive.vercel.app":       "https://starkive.vercel.app",
@@ -122,7 +124,7 @@ func TestBuildTokenURL(t *testing.T) {
 //     It rejects a missing environment variable (showing that text as is) and a different major format version with other errors
 //   - It rejects a redirect to the Vercel sign-in page, another page, and an old dashboard without this API
 func TestCheckDashboard(t *testing.T) {
-	cfg := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_4242"} // Repository and token being set up
+	cfg := &core.EnvConfig{DBRepoID: 5150, DBRepoAccessToken: "token_4242"} // Repository and token being set up
 	cases := []struct {
 		name    string
 		env     string           // The deployment's environment variable `STARKIVE_DB_REPO_ACCESS_KEY`. Used only in cases answered by the real server code
@@ -171,7 +173,9 @@ type scriptedUI struct {
 	said    []string // Lines shown
 }
 
-// Methods that only show things. Only `say` lines are kept in `said`. The rest are dropped
+// Methods that only show things.
+// Only `say` lines are kept in `said`.
+// The rest are dropped
 func (s *scriptedUI) step(n int)                                    {}
 func (s *scriptedUI) say(line string)                               { s.said = append(s.said, line) }
 func (s *scriptedUI) note(line string)                              {}
@@ -188,7 +192,8 @@ func (s *scriptedUI) waitForValue(waiting string, prompt string, manualEntryLabe
 	return "", switchedToTyping, nil
 }
 
-// Gives the next answer. An error if the answers ran out
+// Gives the next answer.
+// An error if the answers ran out
 func (s *scriptedUI) ask(prompt string, hint string) (string, error) {
 	if len(s.answers) == 0 {
 		return "", errors.New("no more input")
@@ -205,13 +210,13 @@ func (s *scriptedUI) ask(prompt string, hint string) (string, error) {
 //   - With a registered canonical address, it doesn't accept the typed address even if it confirms, and shows why.
 //     (If it accepted it, an unconfirmed canonical address would be recorded.)
 func TestAskDashboardURLKeepsRegisteredSite(t *testing.T) {
-	cfg := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_4242"}
+	cfg := &core.EnvConfig{DBRepoID: 5150, DBRepoAccessToken: "token_4242"}
 	t.Setenv(core.DBRepoAccessKeyEnv, core.FormatDBRepoAccessKey(5150, "token_4242"))
 	typed := httptest.NewServer(http.HandlerFunc(api.HandleCheckDeployment)) // Another dashboard, deployed with this setup's value
 	defer typed.Close()
-	other := &core.Config{DBRepoID: 5150, DBRepoAccessToken: "token_9999"}
+	other := &core.EnvConfig{DBRepoID: 5150, DBRepoAccessToken: "token_9999"}
 	registered := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // The registered dashboard, deployed with another token
-		core.WriteJSON(w, http.StatusOK, map[string]any{"format": core.DBRepoFormat, "proof": core.SignDeploymentNonce(other, r.URL.Query().Get("nonce"))})
+		core.WriteAPIJSONResponse(w, http.StatusOK, map[string]any{"format": core.DBRepoFormat, "proof": core.SignDeploymentNonce(other, r.URL.Query().Get("nonce"))})
 	}))
 	defer registered.Close()
 
@@ -283,7 +288,8 @@ func TestGitHubAppName(t *testing.T) {
 // Guards the manifest.
 // The homepage is the dashboard address, and the sign-in callback is `/api/login-session` under it.
 // The address to return to after creation is this tool's localhost.
-// It is a private App with no permissions and no webhook. The description has the DB repository
+// It is a private App with no permissions and no webhook.
+// The description has the DB repository
 func TestGitHubAppManifest(t *testing.T) {
 	encoded, err := newGitHubAppManifest("me/me-starkive-db", "https://starkive.example.com", "http://localhost:5000/callback")
 	if err != nil {
@@ -321,7 +327,7 @@ func TestCreateGitHubAppFromCode(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	cfg := &core.Config{DBRepoAccessToken: "token-4242", GitHubAPI: srv.URL, GitHubWeb: srv.URL}
+	cfg := &core.EnvConfig{DBRepoAccessToken: "token-4242", GitHubAPI: srv.URL, GitHubWeb: srv.URL}
 
 	app, err := createGitHubAppFromCode(ctx, cfg, "owner-4242")
 	if err != nil || app.OwnerID != 4242 || app.SiteURL != "https://starkive.example.com" || app.ClientSecret != "s" {
@@ -338,13 +344,14 @@ func TestCreateGitHubAppFromCode(t *testing.T) {
 }
 
 // Guards the Workflows permission check.
-// It only tries to create a tree with the workflow, and sends no request that moves the branch (PATCH). There is no commit.
+// It only tries to create a tree with the workflow, and sends no request that moves the branch (PATCH).
+// There is no commit.
 // Without the permission, it returns GitHub's 403 as an error with the needed permission (`workflows=write`)
 func TestCheckWorkflowsPermission(t *testing.T) {
 	ctx := context.Background()
 	for _, denied := range []bool{false, true} {
 		var methods []string
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(answerDBRepoLookup(func(w http.ResponseWriter, r *http.Request) {
 			methods = append(methods, r.Method+" "+r.URL.Path)
 			switch r.URL.Path {
 			case "/repos/me/archive/git/ref/heads/main":
@@ -363,8 +370,7 @@ func TestCheckWorkflowsPermission(t *testing.T) {
 				http.NotFound(w, r)
 			}
 		}))
-		cfg := &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}
-		err := checkWorkflowsPermission(ctx, cfg)
+		err := checkWorkflowsPermission(ctx, findTestDBRepo(t, srv.URL))
 		srv.Close()
 		if denied != (err != nil) || (denied && !strings.Contains(err.Error(), "workflows=write")) {
 			t.Errorf("denied=%v: %v", denied, err)
@@ -382,17 +388,17 @@ type fakeDBRepoWrites struct {
 	count   int               // Number of write requests (POST, PATCH)
 }
 
-// Starts a fake GitHub with the DB repository `me/archive` (branch `main`) for one `core.UpdateFiles` call, and records the writes.
+// Starts a fake GitHub with the DB repository `me/archive` (branch `main`) for one `core.UpdateDBRepoFiles` call, and records the writes.
 // The server closes when the test ends.
 //
 // Args:
 //   - `existing`: Paths of the files already in the repository. Their content is "existing"
 //
 // Returns:
-//   - The server config that points to the fake, and what it received
-func newFakeDBRepo(t *testing.T, existing []string) (*core.Config, *fakeDBRepoWrites) {
+//   - The DB repository found on the fake (`findTestDBRepo`), and what the fake received
+func newFakeDBRepo(t *testing.T, existing []string) (*core.DBRepo, *fakeDBRepoWrites) {
 	got := &fakeDBRepoWrites{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(answerDBRepoLookup(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			got.count++
 		}
@@ -437,7 +443,43 @@ func newFakeDBRepo(t *testing.T, existing []string) (*core.Config, *fakeDBRepoWr
 		}
 	}))
 	t.Cleanup(srv.Close) // `t.Cleanup`: runs when the test ends, like `defer` in the test function
-	return &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}, got
+	return findTestDBRepo(t, srv.URL), got
+}
+
+// Wraps the fake GitHub handler `handle` so it also answers the two requests that find the DB repository `me/archive` (`core.FindDBRepo`):
+// the repository by ID, and the GraphQL query for its state (not empty, with this version's marker).
+// The wrapped handler never sees them, so they don't count as requests of the step under test
+func answerDBRepoLookup(handle http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repositories/4242":
+			fmt.Fprint(w, `{"full_name":"me/archive","default_branch":"main"}`)
+		case r.URL.Path == "/graphql" && isDBRepoStateQuery(r):
+			marker, _ := json.Marshal(string(core.EncodeDBRepoMarker())) // The marker file content as a JSON string
+			fmt.Fprintf(w, `{"data":{"repository":{"isEmpty":false,"marker":{"text":%s}}}}`, marker)
+		default:
+			handle(w, r)
+		}
+	}
+}
+
+// Reports whether GraphQL request `r` is the query for the state of the DB repository (it asks `isEmpty`).
+// It reads the body and puts it back, so a handler after it can still read it
+func isDBRepoStateQuery(r *http.Request) bool {
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return strings.Contains(string(body), "isEmpty")
+}
+
+// Finds the DB repository `me/archive` on the fake GitHub at `apiURL` the way the setup tool does (`core.FindDBRepo`).
+// Stops the test on failure
+func findTestDBRepo(t *testing.T, apiURL string) *core.DBRepo {
+	cfg := &core.EnvConfig{DBRepoID: 4242, DBRepoAccessToken: "token_4242", GitHubAPI: apiURL}
+	dbRepo, err := core.FindDBRepo(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dbRepo
 }
 
 // Guards the initial files of the DB repository (fake GitHub).
@@ -456,8 +498,8 @@ func TestAddInitialFiles(t *testing.T) {
 		{"nothing missing", []string{dbRepoReadmePath, dbFolderKeepPath}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			cfg, got := newFakeDBRepo(t, c.existing)
-			if err := addInitialFiles(ctx, cfg); err != nil {
+			dbRepo, got := newFakeDBRepo(t, c.existing)
+			if err := addInitialFiles(ctx, dbRepo); err != nil {
 				t.Fatal(err)
 			}
 			if c.want == nil {
@@ -478,16 +520,16 @@ func TestAddInitialFiles(t *testing.T) {
 //   - A workflow that is already there isn't replaced, even if its content differs
 func TestInstallWorkflowIfAbsent(t *testing.T) {
 	ctx := context.Background()
-	cfg, got := newFakeDBRepo(t, nil)
-	if err := installWorkflowIfAbsent(ctx, cfg); err != nil {
+	dbRepo, got := newFakeDBRepo(t, nil)
+	if err := installWorkflowIfAbsent(ctx, dbRepo); err != nil {
 		t.Fatal(err)
 	}
 	if got.written[core.SyncWorkflowPath] != syncWorkflowContent || len(got.written) != 1 || got.message != "user(workflow): install sync workflow" {
 		t.Errorf("missing workflow: wrote %d files with message %q", len(got.written), got.message)
 	}
 
-	cfg, got = newFakeDBRepo(t, []string{core.SyncWorkflowPath})
-	if err := installWorkflowIfAbsent(ctx, cfg); err != nil {
+	dbRepo, got = newFakeDBRepo(t, []string{core.SyncWorkflowPath})
+	if err := installWorkflowIfAbsent(ctx, dbRepo); err != nil {
 		t.Fatal(err)
 	}
 	if got.count != 0 {

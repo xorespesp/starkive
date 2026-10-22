@@ -1,5 +1,6 @@
 // HTTP server that the setup tool opens only on this computer (`localServer`).
-// Only one runs per run of the tool. The code that uses it adds its own paths (`handle`).
+// Only one runs per run of the tool.
+// The code that uses it adds its own paths (`handle`).
 package main
 
 import (
@@ -80,7 +81,8 @@ func (s *localServer) handle(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, handler)
 }
 
-// Stops the server. Waits up to 3 seconds for requests in progress
+// Stops the server.
+// Waits up to 3 seconds for requests in progress
 func (s *localServer) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel() // `defer`: runs when this function ends (like a C++ destructor, so the cleanup isn't forgotten)

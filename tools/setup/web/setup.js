@@ -3,7 +3,8 @@
 // When a prompt comes, it shows an input box and sends the answer.
 // It expands only the step in progress and collapses finished steps.
 // When the setup ends, it shows a result card below the step list.
-// The tool does all the step work. This page only shows things and sends answers.
+// The tool does all the step work.
+// This page only shows things and sends answers.
 //
 // Security: all text from the tool goes in only through `textContent` (backtick parts in sentences also go in as text of `code` elements).
 // Links are made only for `https://` addresses and addresses of this server.
@@ -85,7 +86,7 @@ function newLinkOrText(label, target, className) {
 
 /**
  * Creates a small button that puts the text `text` on the clipboard.
- * After copying, it shows "Copied" for a moment.
+ * After copying, it shows "Copied" for a moment, or "Copy failed" if the browser refused.
  *
  * @param {string} label Button text
  * @param {string} text Text to copy
@@ -95,8 +96,12 @@ function newLinkOrText(label, target, className) {
 function copyButton(label, text, className) {
   const button = el('button', { type: 'button', className, textContent: label });
   button.onclick = async () => {
-    await navigator.clipboard.writeText(text);
-    button.textContent = 'Copied';
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = 'Copied';
+    } catch {
+      button.textContent = 'Copy failed'; // The browser refused clipboard access
+    }
     setTimeout(() => (button.textContent = label), 1500);
   };
   return button;
@@ -314,7 +319,8 @@ function updatePrompt(prompt) {
  * The link stays, because the person may not need that button at all.
  * If the waiting sentence shows for longer than `SLOW_WAIT_MS`, a small note says so.
  * The wait has no time limit, and some failures don't go away by waiting (for example, the value was pasted wrong).
- * The page can't tell why, so the note only points to the steps above. The link below it is the way out.
+ * The page can't tell why, so the note only points to the steps above.
+ * The link below it is the way out.
  */
 function updateIndicators() {
   const lineShown = waitingShown && !openNotClicked;

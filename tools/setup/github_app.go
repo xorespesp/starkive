@@ -33,8 +33,8 @@ type githubAppManifest struct {
 // Longest GitHub App name (GitHub's limit, docs)
 const maxGitHubAppNameLength = 34
 
-// Builds the name of the sign-in GitHub App for the DB repository `dbFullName` (owner/repo): `<repository name>-<6 random hex characters>`.
-// The token name is the repository name too.
+// Builds the name of the sign-in GitHub App for the DB repository `dbFullName` (`owner/repo`): `<repository name>-<6 random hex characters>`.
+// It starts with the repository name, like the token name (`buildTokenURL`).
 // So even with several archives, the GitHub App list shows which App belongs to which repository.
 //
 // NOTE: A GitHub App name is unique across all of GitHub and can be up to 34 characters (docs).
@@ -53,7 +53,7 @@ func newGitHubAppName(dbFullName string) (string, error) {
 // Builds the GitHub App manifest as a JSON string.
 //
 // Args:
-//   - `dbFullName`: The DB repository (owner/repo) of the dashboard that signs in with this App. Used in the App name and description
+//   - `dbFullName`: The DB repository (`owner/repo`) of the dashboard that signs in with this App. Used in the App name and description
 //   - `site`: The dashboard address. It becomes the App's homepage, and the sign-in callback is `/api/login-session` under it
 //   - `redirectURL`: Address GitHub sends the browser back to with a code after creating the App (this tool's localhost server)
 func newGitHubAppManifest(dbFullName string, site string, redirectURL string) (string, error) {
@@ -77,7 +77,7 @@ func newGitHubAppManifest(dbFullName string, site string, redirectURL string) (s
 // Args:
 //   - `state`: A value GitHub adds back unchanged when it sends the browser back after creating the App.
 //     Used to check that the returning request belongs to this run
-func buildGitHubAppCreateURL(cfg *core.Config, state string) string {
+func buildGitHubAppCreateURL(cfg *core.EnvConfig, state string) string {
 	return cfg.GitHubWeb + "/settings/apps/new?" + url.Values{"state": {state}}.Encode()
 }
 
@@ -87,7 +87,8 @@ var errGitHubAppWrongOwner = errors.New("the GitHub App was created under a diff
 	"Delete it on GitHub, sign in to GitHub as the token owner, and try again")
 
 // HTTP client for the code exchange request.
-// The default client has no timeout, so the tool would hang if GitHub didn't answer. This one has a 20-second limit
+// The default client has no timeout, so the tool would hang if GitHub didn't answer.
+// This one has a 20-second limit
 var conversionClient = &http.Client{Timeout: 20 * time.Second}
 
 // Turns the code GitHub returned after creating the App into App data (`POST /app-manifests/{code}/conversions`).
@@ -103,7 +104,7 @@ var conversionClient = &http.Client{Timeout: 20 * time.Second}
 // That's why it builds the request itself instead of using `core.CallGitHubAPI`, which always adds the token.
 // The private key (`pem`) and webhook secret in the response aren't used, so they aren't read.
 // The homepage (`external_url`) is put in `SiteURL` in the shape the server compares with the request address (`core.NormalizeSiteURL`).
-func createGitHubAppFromCode(ctx context.Context, cfg *core.Config, code string) (core.GitHubApp, error) {
+func createGitHubAppFromCode(ctx context.Context, cfg *core.EnvConfig, code string) (core.GitHubApp, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.GitHubAPI+"/app-manifests/"+url.PathEscape(code)+"/conversions", nil)
 	if err != nil {
 		return core.GitHubApp{}, err
@@ -116,7 +117,7 @@ func createGitHubAppFromCode(ctx context.Context, cfg *core.Config, code string)
 		return core.GitHubApp{}, err
 	}
 	defer res.Body.Close()
-	if err := core.CheckGitHubAPI(res); err != nil {
+	if err := core.CheckGitHubResponse(res); err != nil {
 		return core.GitHubApp{}, err
 	}
 	var created struct {

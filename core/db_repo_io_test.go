@@ -1,4 +1,4 @@
-// Unit tests for the storage engine (`store.go`)
+// Unit tests for the storage engine of the DB repository files (`db_repo_io.go`)
 package core
 
 import (
@@ -18,9 +18,9 @@ import (
 //   - Any other folder: 404
 //
 // Returns:
-//   - A config that sends GitHub requests to the server, and the number of requests it got.
+//   - The DB repository `me/archive` whose GitHub requests go to the server (`newTestDBRepo`), and the number of requests it got.
 //     The server answers in its own goroutine, so the count is an atomic counter, not a plain `int`
-func startFakeTreeAPI(t *testing.T) (*Config, *atomic.Int32) {
+func startFakeTreeAPI(t *testing.T) (*DBRepo, *atomic.Int32) {
 	requests := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -43,19 +43,25 @@ func startFakeTreeAPI(t *testing.T) (*Config, *atomic.Int32) {
 		}
 	}))
 	t.Cleanup(server.Close) // `t.Cleanup`: runs when the test ends, like a destructor
-	return &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}, requests
+	return newTestDBRepo(server.URL), requests
+}
+
+// Makes the starkive DB repository `me/archive` (branch `main`) whose GitHub requests go to `apiURL`, without asking GitHub to find it
+func newTestDBRepo(apiURL string) *DBRepo {
+	return &DBRepo{cfg: &EnvConfig{GitHubAPI: apiURL, DBRepoAccessToken: "test-token"}, fullName: "me/archive", branch: "main", state: DBRepoStarkive}
 }
 
 // Tests how `readBlobSHAsInFolder` reads a folder listing.
-//   - Only files are kept, with the folder path put in front. Files in subfolders are included
+//   - Only files are kept, with the folder path put in front.
+//     Files in subfolders are included
 //   - A folder that doesn't exist gives an empty map, not an error
 //   - A list that GitHub cut short is an error (502)
 //   - A folder path that isn't clean is refused before any request
 func TestReadBlobSHAsInFolder(t *testing.T) {
 	ctx := context.Background()
-	cfg, requests := startFakeTreeAPI(t)
+	repo, requests := startFakeTreeAPI(t)
 
-	got, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/readmes/45")
+	got, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/readmes/45")
 	want := map[string]string{
 		"db/readmes/45/12345.md":      "a",
 		"db/readmes/45/345.no-readme": "b",
@@ -66,17 +72,17 @@ func TestReadBlobSHAsInFolder(t *testing.T) {
 		t.Errorf("folder: %v, %v", got, err)
 	}
 
-	if got, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/missing"); err != nil || got == nil || len(got) != 0 {
+	if got, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/missing"); err != nil || got == nil || len(got) != 0 {
 		t.Errorf("missing folder: %v, %v", got, err)
 	}
 
 	var httpErr *HTTPError
-	if _, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/huge"); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway {
+	if _, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/huge"); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway {
 		t.Errorf("cut short list: %v", err)
 	}
 
 	requestsBefore := requests.Load()
-	if _, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/readmes/"); err == nil || requests.Load() != requestsBefore {
+	if _, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/readmes/"); err == nil || requests.Load() != requestsBefore {
 		t.Errorf("folder path not clean: %v, requests %d -> %d", err, requestsBefore, requests.Load())
 	}
 }
@@ -140,40 +146,38 @@ func TestIsValidRepoPath(t *testing.T) {
 	}
 }
 
-// Tests that `gitBlobSHA` gives the same value as git (`git hash-object`), for an empty file and a short one
-func TestGitBlobSHA(t *testing.T) {
-	if got := gitBlobSHA(nil); got != "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {
+// Tests that `computeGitBlobSHA` gives the same value as git (`git hash-object`), for an empty file and a short one
+func TestComputeGitBlobSHA(t *testing.T) {
+	if got := computeGitBlobSHA(nil); got != "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {
 		t.Errorf("empty: %s", got)
 	}
-	if got := gitBlobSHA([]byte("hello\n")); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
+	if got := computeGitBlobSHA([]byte("hello\n")); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
 		t.Errorf("hello: %s", got)
 	}
 }
 
-// Tests that a file whose body stops partway is a 502, like an answer that never came (`readFileAt`).
+// Tests that a file whose body stops partway is a 502, like an answer that never came (`readDBRepoFileAt`).
 // The server promises more bytes than it sends, so the connection closes in the middle of the body
-func TestReadFileCutInTheBodyIsBadGateway(t *testing.T) {
+func TestReadDBRepoFileCutInTheBodyIsBadGateway(t *testing.T) {
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "100")
 		fmt.Fprint(w, "partial")
 	}))
 	t.Cleanup(server.Close)
-	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoBranch: "main", DBRepoAccessToken: "test-token"}
-	if content, err := ReadFile(ctx, cfg, StarItemsDBPath); content != nil || !isBadGateway(err) {
+	if content, err := ReadDBRepoFile(ctx, newTestDBRepo(server.URL), StarItemsDBPath); content != nil || !isBadGateway(err) {
 		t.Errorf("body cut: %q, %v", content, err)
 	}
 }
 
-// Tests that a REST answer that isn't the expected JSON is a 502, like any GitHub failure (`callRepoAPI`, `DecodeGitHubAnswer`)
+// Tests that a REST answer that isn't the expected JSON is a 502, like any GitHub failure (`callDBRepoAPI`, `DecodeGitHubResponse`)
 func TestUnreadableRESTAnswerIsBadGateway(t *testing.T) {
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "<html>Unicorn!</html>")
 	}))
 	t.Cleanup(server.Close)
-	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoBranch: "main", DBRepoAccessToken: "test-token"}
-	if _, err := readBranchCommit(ctx, cfg); !isBadGateway(err) {
+	if _, err := readBranchCommit(ctx, newTestDBRepo(server.URL)); !isBadGateway(err) {
 		t.Errorf("HTML answer: %v", err)
 	}
 }

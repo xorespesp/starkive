@@ -1,16 +1,15 @@
 // The DB repository: what is where (file layout and format version), which repository it is (found by ID),
-// whether it is safe to write to (state check and `useDBRepo`), and the shape, reading and writing of the config file `config.json`.
-// How files are actually read and committed is in `store.go`.
+// and whether it is safe to write to (state check and `OpenDBRepo`).
+// How files are actually read and committed is in `db_repo_io.go`, and the config file `config.json` is in `db_config.go`.
 package core
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -26,12 +25,17 @@ import (
 //	.github/workflows/starkive-sync.yml   sync workflow (installed by the setup tool)
 //	README.md                             readme (installed by the setup tool)
 const (
-	MarkerDBPath    = ".starkive"          // Content is `{"format":{"major":1,"minor":0}}` (`EncodeMarker`). Only a repository with this file is used by starkive
+	MarkerDBPath    = ".starkive"          // Content is `{"format":{"major":1,"minor":0}}` (`EncodeDBRepoMarker`). Only a repository with this file is used by starkive
 	ConfigDBPath    = "config.json"        // Sync interval, dashboard address, sign-in GitHub App (`dbConfigFile`)
 	StarItemsDBPath = "db/star-items.json" // Archive entries (`StarItem`)
 	StarListsDBPath = "db/star-lists.json" // Star list definitions (`StarList`)
 	RepoMetaDBPath  = "db/repo-meta.json"  // Snapshots of repository metadata (`RepoMeta`)
 )
+
+// Folder of the README snapshots.
+// The files of a repository go in the subfolder named by the last two digits of its ID (`buildReadmeFolderPath`).
+// The last two digits of real IDs spread evenly (measured), so a folder holds about 200 files at 20,000 repositories.
+const ReadmesDBDir = "db/readmes"
 
 // Version of the DB repository format (`format` in the marker file)
 type DBRepoFormatVersion struct {
@@ -65,23 +69,20 @@ func (v DBRepoFormatVersion) String() string {
 	return fmt.Sprintf("%d.%d", v.Major, v.Minor)
 }
 
-// Reads the environment variables, fills in the DB repository, and builds the server config.
+// Reads the environment variables and opens the DB repository (`OpenDBRepo`).
 // Used when the repository is needed without a session.
 // Signed-in requests start with `Authorize`, and calls from the sync workflow with `AuthorizeSyncWorkflowCall`.
 //
 // Returns:
-//   - Server config with the DB repository filled in.
+//   - The opened DB repository.
 //     500 if the environment variables are wrong, 409 `HTTPError` if the DB repository can't be used,
 //     502 if GitHub fails or doesn't answer
-func LoadConfig(ctx context.Context) (*Config, error) {
+func OpenDBRepoFromEnv(ctx context.Context) (*DBRepo, error) {
 	cfg, err := LoadEnvConfig()
 	if err != nil {
 		return nil, err
 	}
-	if err := useDBRepo(ctx, cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return OpenDBRepo(ctx, cfg)
 }
 
 // State of the DB repository
@@ -93,11 +94,41 @@ const (
 	DBRepoForeign                     // Has commits but no marker. starkive doesn't use it
 )
 
-// DB repository found by ID. The first two fields come from the GitHub repository response. The state is decided by looking inside the repository
-type dbRepo struct {
-	FullName string      `json:"full_name"`      // Current name `owner/repo`. If the user renamed the repository, this is the new name
-	Branch   string      `json:"default_branch"` // Default branch. GitHub gives a name even for an empty repository with no commits (measured: "main")
-	State    DBRepoState `json:"-"`              // Set by `inspectDBRepo`. The struct tag `json:"-"` means the field is left out of JSON
+// A DB repository found by its ID, with the config used to reach it.
+// Only this package makes it (`FindDBRepo`), so a value always holds the name and branch that GitHub gave for that ID.
+// The functions that read or write the DB repository take it, so none of them can run before the repository is found.
+//
+// NOTE: The fields are private, so other packages can't fill them in (like a C++ class whose constructor is private).
+// A zero value made elsewhere has a `nil` config, so using it panics before any request is sent.
+type DBRepo struct {
+	cfg      *EnvConfig  // Token and API address
+	fullName string      // Current name `owner/repo`. If the user renamed the repository, this is the new name
+	branch   string      // Default branch. GitHub gives a name even for an empty repository with no commits (measured: "main")
+	state    DBRepoState // State when it was found (`readDBRepoState`)
+}
+
+// Returns the config (token and GitHub address) used to reach the repository.
+// Requests that take it can be about this repository or not (Stars, sign-in)
+func (repo *DBRepo) EnvConfig() *EnvConfig { return repo.cfg }
+
+// Returns the current name `owner/repo`
+func (repo *DBRepo) FullName() string { return repo.fullName }
+
+// Returns the default branch
+func (repo *DBRepo) Branch() string { return repo.branch }
+
+// Returns the state when it was found
+func (repo *DBRepo) State() DBRepoState { return repo.state }
+
+// Builds the path of a GitHub API under this repository, `/repos/<owner/repo>` followed by `suffix` (e.g. `/git/trees`)
+func (repo *DBRepo) BuildAPIPath(suffix string) string { return "/repos/" + repo.fullName + suffix }
+
+// Builds the Contents API path of one file in the repository (`/repos/<owner/repo>/contents/<path>`).
+//
+// Args:
+//   - `filePath`: File path in the repository. Characters not allowed in a path are encoded
+func (repo *DBRepo) BuildContentsAPIPath(filePath string) string {
+	return repo.BuildAPIPath("/contents/" + (&url.URL{Path: filePath}).EscapedPath())
 }
 
 // Errors for a DB repository that can't be used (all 409)
@@ -120,7 +151,8 @@ func newDBRepoFormatError(found *DBRepoFormatVersion) error {
 		"Use the starkive version that set up the repository, or set up a new repository with the setup tool of this version", foundText, DBRepoFormat)
 }
 
-// Cache of the result of finding the DB repository by ID (`ResolveDBRepo`). The key is `makeEnvCacheKey`.
+// Cache of the result of finding the DB repository by ID (`FindDBRepo`).
+// The key is `buildEnvCacheKey`.
 //
 // NOTE: The name and the state are kept as one unit.
 // So a kept name is always used together with the state checked for that name.
@@ -128,7 +160,7 @@ var dbRepoCache cache[dbRepoResult]
 
 // Result kept in the cache: the found repository, or an error
 type dbRepoResult struct {
-	repo dbRepo // The found repository. Zero value if `err` is set
+	repo DBRepo // The found repository, without a config. Zero value if `err` is set. `FindDBRepo` gives each caller a copy with its own config
 	err  error  // Why it wasn't found
 }
 
@@ -138,64 +170,67 @@ const (
 	dbRepoNotReadyTTL = 10 * time.Second // Anything else (empty repository, foreign repository, error). Kept short, so a fix by a person shows up soon
 )
 
-// Asks GitHub for the DB repository by ID, fills its current name and default branch into `cfg`, and returns the repository's state.
+// Finds the DB repository by ID (`cfg.DBRepoID`), with its current name, default branch and state.
 // It also accepts an empty or foreign repository.
 // The server must not call it directly.
-// The server goes through `useDBRepo` instead, which allows only a starkive repository.
+// The server goes through `OpenDBRepo` instead, which allows only a starkive repository.
 //
 // Returns:
-//   - The state of the repository.
+//   - The found repository.
 //     `ErrDBRepoNotFound` if the token can't see it. The error from `newDBRepoFormatError` if the major format version differs
 //
 // NOTE: The name is the current name that GitHub returns, so it follows the user's renames.
 // The result is kept in `dbRepoCache`, unless the deadline of `ctx` cut the request.
-func ResolveDBRepo(ctx context.Context, cfg *Config) (DBRepoState, error) {
-	key := makeEnvCacheKey(cfg)
+func FindDBRepo(ctx context.Context, cfg *EnvConfig) (*DBRepo, error) {
+	key := buildEnvCacheKey(cfg)
 	result, found := dbRepoCache.get(key)
 	if !found {
-		result.repo, result.err = findDBRepo(ctx, cfg)
+		result.repo, result.err = fetchDBRepoByID(ctx, cfg)
 		ttl := dbRepoNotReadyTTL
-		if result.err == nil && result.repo.State == DBRepoStarkive {
+		if result.err == nil && result.repo.state == DBRepoStarkive {
 			ttl = dbRepoReadyTTL
 		}
 		// NOTE: A request cut at its own deadline says nothing about the repository.
 		// Keeping that error would make the other requests fail for a while too
 		if ctx.Err() == nil { // Told by `ctx`, because a single slow request (`githubTimeout`) gives the same error and is worth keeping
-			dbRepoCache.put(key, result, ttl)
+			kept := result
+			kept.repo.cfg = nil // The config holds the token, so it isn't kept longer than the request
+			dbRepoCache.put(key, kept, ttl)
 		}
 	}
 	if result.err != nil {
-		return 0, result.err
+		return nil, result.err
 	}
-	cfg.DBRepoFullName, cfg.DBRepoBranch = result.repo.FullName, result.repo.Branch
-	return result.repo.State, nil
+	repo := result.repo // Struct copy, so the kept value is never changed
+	repo.cfg = cfg
+	return &repo, nil
 }
 
-// Fills the DB repository into `cfg`, but allows it only when it is a repository that starkive uses.
+// Finds the DB repository and allows it only when it is a repository that starkive uses.
 //
 // Returns:
-//   - `nil` if allowed.
+//   - The opened repository.
 //     `ErrDBRepoNotSetUp` for an empty repository, `ErrDBRepoNotStarkive` for a repository with no marker,
-//     otherwise the error from `ResolveDBRepo`
+//     otherwise the error from `FindDBRepo`
 //
-// NOTE: Every path where the server reaches the DB repository (`Authorize`, `LoadConfig`, `AuthorizeSyncWorkflowCall`) passes through this function.
+// NOTE: Every path where the server reaches the DB repository (`Authorize`, `OpenDBRepoFromEnv`, `AuthorizeSyncWorkflowCall`) passes through this function.
 // So there can't be a write path that skips the check.
 // The server writes nothing to a foreign repository or to an empty repository that hasn't been set up.
 // The token has permission to write workflows.
 // This guard keeps starkive files from being committed to the wrong repository (e.g. the user's code repository).
 // Only the setup tool writes to an empty repository for the first time.
-func useDBRepo(ctx context.Context, cfg *Config) error {
-	state, err := ResolveDBRepo(ctx, cfg)
+func OpenDBRepo(ctx context.Context, cfg *EnvConfig) (*DBRepo, error) {
+	repo, err := FindDBRepo(ctx, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	switch state {
+	switch repo.state {
 	case DBRepoEmpty:
-		return ErrDBRepoNotSetUp
+		return nil, ErrDBRepoNotSetUp
 	case DBRepoForeign:
-		return ErrDBRepoNotStarkive
+		return nil, ErrDBRepoNotStarkive
 	}
-	return nil
+	return repo, nil
 }
 
 // Asks GitHub for the DB repository by ID, and decides its state by looking inside it.
@@ -204,36 +239,40 @@ func useDBRepo(ctx context.Context, cfg *Config) error {
 // Returns:
 //   - The found repository.
 //     `ErrDBRepoNotFound` if it can't be seen (404). A 502 `HTTPError` if GitHub returns an unusable name or an empty branch
-func findDBRepo(ctx context.Context, cfg *Config) (dbRepo, error) {
+func fetchDBRepoByID(ctx context.Context, cfg *EnvConfig) (DBRepo, error) {
 	res, err := CallGitHubAPI(ctx, cfg, fmt.Sprintf("/repositories/%d", cfg.DBRepoID), GitHubAPIRequest{})
 	if err != nil {
-		return dbRepo{}, err
+		return DBRepo{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
-		return dbRepo{}, ErrDBRepoNotFound
+		return DBRepo{}, ErrDBRepoNotFound
 	}
-	if err := CheckGitHubAPI(res); err != nil {
-		return dbRepo{}, err
+	if err := CheckGitHubResponse(res); err != nil {
+		return DBRepo{}, err
 	}
-	var found dbRepo
-	if err := DecodeGitHubAnswer(res, &found); err != nil {
-		return dbRepo{}, err
+	var answer struct {
+		FullName string `json:"full_name"`      // Current name `owner/repo`
+		Branch   string `json:"default_branch"` // Default branch
+	}
+	if err := DecodeGitHubResponse(res, &answer); err != nil {
+		return DBRepo{}, err
 	}
 	// The name goes into every API path after this, so its shape is checked even though GitHub returned it
-	if !IsValidRepoFullName(found.FullName) || found.Branch == "" {
-		return dbRepo{}, Errorf(http.StatusBadGateway, "GitHub returned an unusable archive repository")
+	if !IsValidRepoFullName(answer.FullName) || answer.Branch == "" {
+		return DBRepo{}, Errorf(http.StatusBadGateway, "GitHub returned an unusable archive repository")
 	}
-	located := *cfg // Struct copy. The caller's `cfg` is not changed until the result is in the cache. The found repository is inspected through this copy
-	located.DBRepoFullName, located.DBRepoBranch = found.FullName, found.Branch
-	if found.State, err = inspectDBRepo(ctx, &located); err != nil {
-		return dbRepo{}, err
+	repo := DBRepo{cfg: cfg, fullName: answer.FullName, branch: answer.Branch}
+	if repo.state, err = readDBRepoState(ctx, &repo); err != nil {
+		return DBRepo{}, err
 	}
-	return found, nil
+	return repo, nil
 }
 
 // Decides the state of the DB repository by looking inside it.
-// No commits means an empty repository. No marker means a foreign repository. With a marker, the format version is checked.
+// No commits means an empty repository.
+// No marker means a foreign repository.
+// With a marker, the format version is checked.
 //
 // Returns:
 //   - The state of the repository.
@@ -241,11 +280,13 @@ func findDBRepo(ctx context.Context, cfg *Config) (dbRepo, error) {
 //
 // NOTE: Whether it is empty is decided by a value that GitHub defines (GraphQL `Repository.isEmpty`, docs).
 // If this check wrongly said "empty", the setup tool would write a marker into a foreign repository.
-// Emptiness and the marker are read in one query, at the same point. `HEAD` is the default branch.
+// Emptiness and the marker are read in one query, at the same point.
+// `HEAD` is the default branch.
 // A repository with only a README and no marker is also treated as foreign.
-// There is no exception like "allow it if it only has the initial files GitHub made". This keeps the rule simple.
-func inspectDBRepo(ctx context.Context, cfg *Config) (DBRepoState, error) {
-	owner, name, _ := strings.Cut(cfg.DBRepoFullName, "/")
+// There is no exception like "allow it if it only has the initial files GitHub made".
+// This keeps the rule simple.
+func readDBRepoState(ctx context.Context, repo *DBRepo) (DBRepoState, error) {
+	owner, name, _ := strings.Cut(repo.fullName, "/")
 	// Asks, in one go, whether the DB repository is empty and what the marker file at the tip of the default branch is.
 	// `$marker` is `HEAD:<marker path>`
 	const query = `query($owner: String!, $name: String!, $marker: String!) {
@@ -263,7 +304,7 @@ func inspectDBRepo(ctx context.Context, cfg *Config) (DBRepoState, error) {
 		} `json:"repository"` // `nil` if the repository can't be seen
 	}
 	vars := map[string]any{"owner": owner, "name": name, "marker": "HEAD:" + MarkerDBPath}
-	if err := callGraphQL(ctx, cfg, query, vars, &data); err != nil {
+	if err := callGraphQL(ctx, repo.cfg, query, vars, &data); err != nil {
 		return 0, err
 	}
 	switch {
@@ -291,8 +332,8 @@ type dbRepoMarker struct {
 }
 
 // Makes the content of the marker file, `{"format":{"major":1,"minor":0}}`.
-// Only the setup tool writes the marker, but this lives in `core` so its shape matches what `inspectDBRepo` reads.
-func EncodeMarker() []byte {
+// Only the setup tool writes the marker, but this lives in `core` so its shape matches what `readDBRepoState` reads.
+func EncodeDBRepoMarker() []byte {
 	content, _ := json.Marshal(dbRepoMarker{Format: &DBRepoFormat}) // A struct of numbers always encodes, so the error is ignored
 	return append(content, '\n')
 }
@@ -312,150 +353,4 @@ func IsValidRepoFullName(fullName string) bool {
 	}
 	_, name, _ := strings.Cut(fullName, "/")
 	return name != "." && name != ".."
-}
-
-// Shape of the config file `config.json` at the root of the DB repository.
-// One file holds the values a person changes in Settings (whether sync is on, and the auto sync interval),
-// the value the setup tool records (the dashboard address), and the sign-in GitHub App settings.
-// The field order is the key order in the file.
-//
-// NOTE: It is written as indented multi-line JSON (`encodeConfig`), so when one value changes, only that line shows in the diff.
-// The key `dashboard_url` is a contract with the workflow in the DB repository.
-// Renaming it requires raising the major version of `DBRepoFormat`.
-// Each writing function (`UpdateSyncSettings`, `RecordSyncEnabled`, `SetDashboardURL`, `SaveGitHubApp`) changes only its own field.
-// So changing one value never resets another value to a default or changes it.
-type dbConfigFile struct {
-	DashboardURL string         `json:"dashboard_url,omitempty"` // Dashboard address for the workflow to call. The setup tool records the address registered in the GitHub App (`GitHubApp.SiteURL`)
-	Sync         syncConfig     `json:"sync"`                    // Sync settings
-	SignInApp    *githubAppFile `json:"sign_in_app,omitempty"`   // Sign-in GitHub App (the client secret is ciphertext). A pointer, so it is `nil` if there is none yet, and the key is not written
-}
-
-// Sync settings in the config file
-type syncConfig struct {
-	IntervalDays *int       `json:"interval_days,omitempty"` // Auto sync interval (days), or `manualOnlyIntervalDays`. A pointer, so a missing key (`nil`) differs from 0. A missing or invalid value reads as `defaultSyncIntervalDays` (`intervalDays`)
-	EnabledSince *time.Time `json:"enabled_since,omitempty"` // When a person turned sync on (UTC). A pointer: `nil` (no key) means the state set by the person is off
-}
-
-// Auto sync interval value meaning "Manual only": no scheduled sync, and only a run started by hand (Sync now) syncs
-const manualOnlyIntervalDays = 0
-
-// Auto sync intervals that can be chosen (days), and `manualOnlyIntervalDays`.
-// The page's `SYNC_INTERVALS` (`public/app.js`) uses the same values
-var syncIntervalChoices = []int{manualOnlyIntervalDays, 1, 2, 3, 7}
-
-// Auto sync interval when the config file has none.
-// The point of this tool is "keep it before it disappears", so it is daily
-const defaultSyncIntervalDays = 1
-
-// Returns the auto sync interval (days), or `manualOnlyIntervalDays`.
-// If it is missing or not a valid choice, it returns the default (so one broken config value can't stop auto sync)
-func (c syncConfig) intervalDays() int {
-	if c.IntervalDays != nil && slices.Contains(syncIntervalChoices, *c.IntervalDays) {
-		return *c.IntervalDays
-	}
-	return defaultSyncIntervalDays
-}
-
-// 409 error for a config file (`ConfigDBPath`) that can't be decoded as JSON.
-var ErrConfigBroken = Errorf(http.StatusConflict, "%s in the archive repository is broken. Fix or delete it, then run the starkive setup tool", ConfigDBPath)
-
-// Decodes file content into a `dbConfigFile`.
-//
-// Args:
-//   - `content`: The file content. `nil` (no file) gives empty settings
-//
-// Returns:
-//   - The config file. `ErrConfigBroken` if it can't be decoded as JSON
-func decodeConfig(content []byte) (dbConfigFile, error) {
-	var file dbConfigFile
-	if content == nil {
-		return file, nil
-	}
-	if err := json.Unmarshal(content, &file); err != nil {
-		return dbConfigFile{}, ErrConfigBroken
-	}
-	return file, nil
-}
-
-// Turns the config file into file content (JSON indented by two spaces, with a newline at the end)
-func encodeConfig(file dbConfigFile) ([]byte, error) {
-	content, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(content, '\n'), nil
-}
-
-// Reads the config file from one commit, changes it with `change`, and writes it. It works on top of `UpdateFiles`.
-// Every write to the config file goes through this function.
-//
-// Args:
-//   - `change`: Changes only the fields it owns in the given config file, and returns a commit message.
-//     If another commit gets in, it is called again with the new content
-//
-// Returns:
-//   - The 409 error from `decodeConfig` if the file can't be read (nothing is written).
-//     Otherwise an error from `change` or `UpdateFiles`
-//
-// NOTE: The file before and after `change` is written in the same shape (`encodeConfig`) and compared.
-// If they are the same, nothing is committed.
-// It doesn't write to a file it can't read, because writing a new one would erase the App settings inside it.
-// The check and the save happen on the file right before the commit.
-// So even when a settings write and an App write overlap, neither erases the other's values.
-func updateConfig(ctx context.Context, cfg *Config, change func(file *dbConfigFile) (CommitMessage, error)) error {
-	return UpdateFiles(ctx, cfg, []string{ConfigDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
-		file, err := decodeConfig(filesRead[ConfigDBPath])
-		if err != nil {
-			return FileChangesCommit{}, err
-		}
-		before, err := encodeConfig(file)
-		if err != nil {
-			return FileChangesCommit{}, err
-		}
-		message, err := change(&file)
-		if err != nil {
-			return FileChangesCommit{}, err
-		}
-		content, err := encodeConfig(file)
-		if err != nil {
-			return FileChangesCommit{}, err
-		}
-		if bytes.Equal(content, before) {
-			return FileChangesCommit{}, nil
-		}
-		return FileChangesCommit{FilesToWrite: map[string][]byte{ConfigDBPath: content}, Message: message}, nil
-	})
-}
-
-// Reads the sync settings from the config file in the DB repository.
-//
-// Returns:
-//   - The sync settings.
-//     Empty settings (default interval, off) if the config file is missing or can't be read as JSON.
-//     An error if the file can't be fetched
-//
-// NOTE: A file that can't be decoded is read as empty settings with no error, so a broken config file doesn't stop the scheduled sync.
-// `updateConfig` blocks writes to such a file.
-func readSyncConfig(ctx context.Context, cfg *Config) (syncConfig, error) {
-	content, err := ReadFile(ctx, cfg, ConfigDBPath)
-	if err != nil {
-		return syncConfig{}, err
-	}
-	file, err := decodeConfig(content)
-	if err != nil {
-		return syncConfig{}, nil
-	}
-	return file.Sync, nil
-}
-
-// Records the dashboard address for the workflow to call (`dashboard_url`).
-// Other values in the config file are not touched, and nothing is committed if the values stay the same.
-//
-// Args:
-//   - `siteURL`: The canonical address of the dashboard, registered in the GitHub App (`GitHubApp.SiteURL`)
-func SetDashboardURL(ctx context.Context, cfg *Config, siteURL string) error {
-	return updateConfig(ctx, cfg, func(file *dbConfigFile) (CommitMessage, error) {
-		file.DashboardURL = siteURL
-		return NewCommitMessage("user(config)", "set dashboard address to "+siteURL), nil
-	})
 }

@@ -1,4 +1,4 @@
-// Unit tests for encrypting and decoding the sign-in GitHub App settings (`github_login.go`)
+// Unit tests for encrypting and decoding the sign-in GitHub App settings (`sign_in_app.go`)
 package core
 
 import (
@@ -8,14 +8,15 @@ import (
 )
 
 // Tests the encryption of the client secret in the GitHub App settings.
-//   - The client secret is not left as plain text in the file content. Decoding with the same token gives the original App
+//   - The client secret is not left as plain text in the file content.
+//     Decoding with the same token gives the original App
 //   - Another token can't decrypt it, but the public value (`Slug`) is still read
 //   - Settings with the same ciphertext but a changed `client_id` don't decrypt (this blocks swapping in another App's values)
 //   - Settings with an empty `site_url`, no settings, and unreadable JSON are unreadable, missing and unreadable, in that order
 func TestGitHubAppFileEncryption(t *testing.T) {
-	cfg := &Config{DBRepoAccessToken: "token-a"}
+	cfg := &EnvConfig{DBRepoAccessToken: "token-a"}
 	app := GitHubApp{AppID: 7, Slug: "starkive-me-abc123", OwnerID: 42, ClientID: "Iv23client", ClientSecret: "very-secret-value", SiteURL: "https://starkive.example.com"}
-	content, err := EncodeGitHubApp(cfg, app)
+	content, err := EncodeGitHubAppConfigValue(cfg, app)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,7 @@ func TestGitHubAppFileEncryption(t *testing.T) {
 	if got, status := decodeAppJSON(cfg, content); status != GitHubAppReady || got != app {
 		t.Errorf("round trip: %+v %s", got, status)
 	}
-	if got, status := decodeAppJSON(&Config{DBRepoAccessToken: "token-b"}, content); status != GitHubAppUnreadable || got.ClientSecret != "" || got.Slug != app.Slug {
+	if got, status := decodeAppJSON(&EnvConfig{DBRepoAccessToken: "token-b"}, content); status != GitHubAppUnreadable || got.ClientSecret != "" || got.Slug != app.Slug {
 		t.Errorf("other token: %+v %s", got, status)
 	}
 
@@ -58,7 +59,7 @@ func TestGitHubAppFileEncryption(t *testing.T) {
 //
 // Returns:
 //   - The decoded App and its state. Unreadable JSON gives `GitHubAppUnreadable`
-func decodeAppJSON(cfg *Config, content []byte) (GitHubApp, GitHubAppStatus) {
+func decodeAppJSON(cfg *EnvConfig, content []byte) (GitHubApp, GitHubAppStatus) {
 	if content == nil {
 		return decodeGitHubApp(cfg, nil)
 	}

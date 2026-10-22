@@ -19,15 +19,15 @@ import (
 // If GitHub refuses a read (for example, the token lacks the Actions permission), answers 502 with GitHub's message.
 func handleSyncStatusGet(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	status, err := core.ReadSyncStatus(ctx, cfg)
+	status, err := core.ReadSyncStatus(ctx, dbRepo)
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, status)
+	core.WriteAPIJSONResponse(w, http.StatusOK, status)
 	return nil
 }
 
@@ -36,8 +36,8 @@ func handleSyncStatusGet(w http.ResponseWriter, r *http.Request) error {
 // Accepts only GET. Other methods get 405.
 func HandleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 		return
 	}
-	core.Respond(w, r, handleSyncStatusGet)
+	core.ServeAPIRequest(w, r, handleSyncStatusGet)
 }

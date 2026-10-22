@@ -31,11 +31,13 @@ type ui interface {
 	// The setup page shows a result card, and the terminal prints the message and the link
 	done(text string, label string, target string)
 	// Asks for one line and returns the answer with leading and trailing spaces removed.
-	// `hint` is an example of what to enter (empty if none). The setup page shows it faintly inside the input box
+	// `hint` is an example of what to enter (empty if none).
+	// The setup page shows it faintly inside the input box
 	ask(prompt string, hint string) (string, error)
 	askSecret(prompt string) (string, error) // Same as `ask`, but doesn't show the typed characters and keeps the answer nowhere (secrets)
 	// Waits for a value that is checked in the background to arrive on `received`.
-	// The person can also enter it by hand. `waitResult` tells which way it ended.
+	// The person can also enter it by hand.
+	// `waitResult` tells which way it ended.
 	// The setup page shows the `waiting` sentence, a progress indicator and a link labeled `manualEntryLabel` to enter it by hand, instead of an input box.
 	// When that link is clicked, it returns `switchedToTyping`.
 	// The terminal prints the `waiting` sentence and `prompt`, and the person can type a line while waiting (`typedAnswer`)
@@ -51,7 +53,9 @@ const (
 	switchedToTyping                   // The person chose to enter it by hand (link on the setup page). The caller stops the background check and asks with `ask`
 )
 
-// A `ui` that runs in the terminal. It doesn't open a browser. It only prints the links to open
+// A `ui` that runs in the terminal.
+// It doesn't open a browser.
+// It only prints the links to open
 type terminalUI struct {
 	in      *bufio.Reader     // Buffer that reads standard input line by line
 	lines   chan terminalLine // Channel that receives the result of the line being read (`readLine`)
@@ -69,7 +73,8 @@ func newTerminalUI() *terminalUI {
 	return &terminalUI{in: bufio.NewReader(os.Stdin), lines: make(chan terminalLine, 1)}
 }
 
-// Removes backticks from the message `text`. The terminal has no code style, so it shows only the characters
+// Removes backticks from the message `text`.
+// The terminal has no code style, so it shows only the characters
 func stripBackticks(text string) string { return strings.ReplaceAll(text, "`", "") }
 
 // Prints the number and name of step `n` after an empty line

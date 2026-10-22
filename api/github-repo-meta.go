@@ -29,7 +29,7 @@ var nodeIDPattern = regexp.MustCompile(`^[\w=-]{1,100}$`)
 // In that case it doesn't report any repository as gone.
 func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
@@ -37,11 +37,11 @@ func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 	var body struct {
 		IDs []string `json:"ids"` // `node_id`s of the repositories to ask about
 	}
-	if err := core.ReadJSON(r, &body); err != nil {
+	if err := core.ReadAPIRequestJSON(r, &body); err != nil {
 		return err
 	}
-	if len(body.IDs) == 0 || len(body.IDs) > core.MaxRepoMetaIDs {
-		return core.Errorf(http.StatusBadRequest, "Send 1 to %d ids", core.MaxRepoMetaIDs)
+	if len(body.IDs) == 0 || len(body.IDs) > core.MaxRepoMetaNodeIDs {
+		return core.Errorf(http.StatusBadRequest, "Send 1 to %d ids", core.MaxRepoMetaNodeIDs)
 	}
 	for _, id := range body.IDs {
 		if !nodeIDPattern.MatchString(id) {
@@ -49,7 +49,7 @@ func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	nodes, missing, err := core.FetchRepoMeta(ctx, cfg, body.IDs)
+	nodes, missing, err := core.FetchRepoMetaByNodeIDs(ctx, dbRepo.EnvConfig(), body.IDs)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 			repos = append(repos, node)
 		}
 	}
-	core.WriteJSON(w, http.StatusOK, map[string]any{"repos": repos, "missing": missing})
+	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]any{"repos": repos, "missing": missing})
 	return nil
 }
 
@@ -68,8 +68,8 @@ func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 // Accepts only POST. Other methods get 405.
 func HandleGitHubRepoMeta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 		return
 	}
-	core.Respond(w, r, handleGitHubRepoMetaPost)
+	core.ServeAPIRequest(w, r, handleGitHubRepoMetaPost)
 }

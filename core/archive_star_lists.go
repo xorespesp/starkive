@@ -1,7 +1,8 @@
 // Star lists: the unit that groups archive items (`db/star-lists.json`).
 // This file also holds name comparison, ID issuing, and cleanup of the IDs stored in items.
-// Reading and writing star list definitions is done by `UpdateArchive` (`store.go`).
+// Reading and writing star list definitions is done by `UpdateArchive` (`archive.go`).
 // This file holds only the rules used inside it.
+// Reading the star lists on GitHub is in `github_stars.go`.
 package core
 
 import (
@@ -13,7 +14,8 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// One star list. An archive item can belong to several star lists.
+// One star list.
+// An archive item can belong to several star lists.
 // It is the same idea as GitHub's star lists.
 // When code refers to a star list on GitHub, its name always has `GitHub` in it (`FetchGitHubStarListsByRepo`)
 type StarList struct {
@@ -22,11 +24,8 @@ type StarList struct {
 	Description string `json:"description"` // Description. Empty string if there is none
 }
 
-// Reports whether two star list names point to the same star list.
+// Reports whether star list names `a` and `b` point to the same star list.
 // It ignores leading and trailing spaces, Unicode normalization (NFC) differences, and letter case.
-//
-// Args:
-//   - `a`, `b`: The two names to compare
 //
 // NOTE: "Is this the same star list?" is decided only by this function.
 // Both the duplicate name check and the import of GitHub star lists use it.

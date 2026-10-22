@@ -4,7 +4,7 @@
 //	                 and in each run started by hand, with the sync key in `Authorization: Bearer` -> { status }.
 //	                 `status` is `not_due` (not a day to sync, or Manual only) or `synced` (synced). 401 if the key is missing or wrong.
 //	                 A run started by hand syncs whatever the interval.
-//	                 If the sync fails, it answers 502, so the workflow fails and GitHub notifies the user
+//	                 If the sync fails, it answers 502, so the workflow fails and GitHub notifies the user (docs)
 //	POST             Sync now: a signed-in user starts a run of the sync workflow -> { run } (`core.SyncWorkflowRun`, queued).
 //	                 It answers once the run exists, without waiting for the sync. 409 if the workflow is off or missing
 //	PATCH            { enabled?, sync_interval_days? } -> The changed sync status (`core.SyncStatus`).
@@ -12,7 +12,7 @@
 //	                 and writes the state the person chose (`enabled_since`) to `config.json`.
 //	                 `sync_interval_days` changes the auto sync interval in `config.json` (0 is Manual only)
 //
-// Only GET runs `core.Sync`, which does all the real sync work.
+// Only GET runs `core.SyncArchiveWithGitHub`, which does all the real sync work.
 
 package handler
 
@@ -39,23 +39,23 @@ const syncWrapUpTime = 50 * time.Second
 //
 // NOTE: The response has only the status, without counts or error details.
 // The response body ends up in the workflow log, and an error text can contain repository names.
-// If the DB repository is public, anyone can read that log.
+// If the DB repository is public, anyone can read that log (docs).
 // The details go only to the server log.
 // The key is checked before anything is asked of GitHub.
 // So even if someone calls this address over and over, it doesn't use the server token's rate limit.
 func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
-	cfg, err := core.AuthorizeSyncWorkflowCall(r)
+	dbRepo, err := core.AuthorizeSyncWorkflowCall(r)
 	if err != nil {
 		return err
 	}
 	ctx := r.Context()
-	requestDeadline, _ := ctx.Deadline() // `core.Respond` always sets one
-	status, err := core.SyncOnWorkflowCall(ctx, cfg, requestDeadline.Add(-syncWrapUpTime), time.Now())
+	requestDeadline, _ := ctx.Deadline() // `core.ServeAPIRequest` always sets one
+	status, err := core.SyncOnWorkflowCall(ctx, dbRepo, requestDeadline.Add(-syncWrapUpTime), time.Now())
 	if err != nil {
 		log.Printf("sync workflow call: %v", err)
 		return core.Errorf(http.StatusBadGateway, "Sync failed. See the dashboard's server logs for details")
 	}
-	core.WriteJSON(w, http.StatusOK, map[string]string{"status": status})
+	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]string{"status": status})
 	return nil
 }
 
@@ -69,28 +69,29 @@ func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
 // and that stays true after the page is closed or opened elsewhere.
 func handleSyncArchivePost(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	run, err := core.TriggerSyncWorkflow(ctx, cfg)
+	run, err := core.TriggerSyncWorkflow(ctx, dbRepo)
 	if err != nil {
 		return err
 	}
 	answer := struct {
 		Run core.SyncWorkflowRun `json:"run"` // The run that was started
 	}{Run: run}
-	core.WriteJSON(w, http.StatusOK, answer)
+	core.WriteAPIJSONResponse(w, http.StatusOK, answer)
 	return nil
 }
 
 // Turns sync on or off, or changes the auto sync interval, and answers with the new status.
-// Only the fields that were sent change. If both are sent, they are written in one commit (`core.UpdateSyncSettings`).
+// Only the fields that were sent change.
+// If both are sent, they are written in one commit (`core.UpdateSyncSettings`).
 // Answers 400 if neither field is sent or the interval isn't one of the choices.
 // Answers 409 when turning it on or off and the DB repository has no workflow.
 func handleSyncArchivePatch(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	cfg, err := core.Authorize(r)
+	dbRepo, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
@@ -98,33 +99,33 @@ func handleSyncArchivePatch(w http.ResponseWriter, r *http.Request) error {
 		Enabled          *bool `json:"enabled"`            // Turn on (`true`) or off (`false`). A pointer: if the field is missing (`nil`), it doesn't change
 		SyncIntervalDays *int  `json:"sync_interval_days"` // New auto sync interval in days, 0 for Manual only. A pointer: if the field is missing, it doesn't change
 	}
-	if err := core.ReadJSON(r, &body); err != nil {
+	if err := core.ReadAPIRequestJSON(r, &body); err != nil {
 		return err
 	}
 	if body.Enabled == nil && body.SyncIntervalDays == nil {
 		return core.Errorf(http.StatusBadRequest, "Send enabled or sync_interval_days")
 	}
-	status, err := core.UpdateSyncSettings(ctx, cfg, body.Enabled, body.SyncIntervalDays)
+	status, err := core.UpdateSyncSettings(ctx, dbRepo, body.Enabled, body.SyncIntervalDays)
 	if err != nil {
 		return err
 	}
-	core.WriteJSON(w, http.StatusOK, status)
+	core.WriteAPIJSONResponse(w, http.StatusOK, status)
 	return nil
 }
 
 // Entry point for `/api/sync-archive` requests. It sends each method to its handler.
 // Vercel finds the exported function in this file and deploys it as one function.
-// `core.Respond` turns an error from a handler into a JSON error response.
+// `core.ServeAPIRequest` turns an error from a handler into a JSON error response.
 // Other methods get 405.
 func HandleSyncArchive(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		core.Respond(w, r, handleSyncArchiveGet)
+		core.ServeAPIRequest(w, r, handleSyncArchiveGet)
 	case http.MethodPost:
-		core.Respond(w, r, handleSyncArchivePost)
+		core.ServeAPIRequest(w, r, handleSyncArchivePost)
 	case http.MethodPatch:
-		core.Respond(w, r, handleSyncArchivePatch)
+		core.ServeAPIRequest(w, r, handleSyncArchivePatch)
 	default:
-		core.WriteMethodNotAllowed(w)
+		core.WriteAPIMethodNotAllowed(w)
 	}
 }

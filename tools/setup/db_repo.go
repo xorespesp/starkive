@@ -18,7 +18,6 @@ import (
 
 // Writes the marker (`core.MarkerDBPath`, with the format version) to an empty DB repository as the first commit.
 // This makes it a starkive repository.
-// `cfg` must already have the repository name and default branch from `core.ResolveDBRepo`.
 //
 // Returns:
 //   - An error that says "run it again" if the first commit never shows up when reading the branch.
@@ -28,31 +27,34 @@ import (
 // So only this first commit is written with the Contents API.
 // Right after the write, reading the branch may not show the first commit for a short time (read delay after a write, measured).
 // It waits until the commit shows up, so the next request that reads the branch doesn't fail.
-func initializeDBRepo(ctx context.Context, cfg *core.Config) error {
+func initializeDBRepo(ctx context.Context, dbRepo *core.DBRepo) error {
 	body := map[string]string{
 		"message": "first commit",
-		"content": base64.StdEncoding.EncodeToString(core.EncodeMarker()), // The Contents API takes file content as base64
-		"branch":  cfg.DBRepoBranch,
+		"content": base64.StdEncoding.EncodeToString(core.EncodeDBRepoMarker()), // The Contents API takes file content as base64
+		"branch":  dbRepo.Branch(),
 	}
-	res, err := core.CallGitHubAPI(ctx, cfg, core.BuildContentsPath(cfg, core.MarkerDBPath), core.GitHubAPIRequest{Method: http.MethodPut, Body: body})
+	res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), dbRepo.BuildContentsAPIPath(core.MarkerDBPath), core.GitHubAPIRequest{Method: http.MethodPut, Body: body})
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if err := core.CheckGitHubAPI(res); err != nil {
+	if err := core.CheckGitHubResponse(res); err != nil {
 		return err
 	}
 	// Right after the write, reading the branch may not show the first commit yet.
-	// It reads up to 5 times, and waits 0.3, 0.6, ... 1.5 seconds after each failed read
-	for attempt := 1; attempt <= 5; attempt++ {
-		res, err := core.CallGitHubAPI(ctx, cfg, "/repos/"+cfg.DBRepoFullName+"/git/ref/heads/"+cfg.DBRepoBranch, core.GitHubAPIRequest{})
+	// It reads up to 5 times, and waits 0.3, 0.6, ... 1.2 seconds after each failed read but the last
+	const maxReads = 5
+	for attempt := 1; attempt <= maxReads; attempt++ {
+		res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), dbRepo.BuildAPIPath("/git/ref/heads/"+dbRepo.Branch()), core.GitHubAPIRequest{})
 		if err == nil {
 			res.Body.Close()
 			if res.StatusCode == http.StatusOK {
 				return nil
 			}
 		}
-		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		if attempt < maxReads {
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
 	}
 	return errors.New("GitHub hasn't shown the first commit yet. Wait a moment and run the setup tool again")
 }
@@ -84,9 +86,9 @@ var dbFolderKeepPath = path.Dir(core.StarItemsDBPath) + "/.gitkeep"
 // So these files come in the next commit.
 // It runs on every setup, not only right after initialization.
 // So if the setup stopped between the two commits, running it again adds them.
-func addInitialFiles(ctx context.Context, cfg *core.Config) error {
+func addInitialFiles(ctx context.Context, dbRepo *core.DBRepo) error {
 	paths := []string{dbRepoReadmePath, dbFolderKeepPath}
-	return core.UpdateFiles(ctx, cfg, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		filesToWrite := map[string][]byte{} // Path -> content
 		if filesRead[dbRepoReadmePath] == nil {
 			filesToWrite[dbRepoReadmePath] = []byte(dbRepoReadmeContent)
@@ -110,12 +112,12 @@ func addInitialFiles(ctx context.Context, cfg *core.Config) error {
 // This way the workflow has an address to call from its first run.
 // The workflow can then always treat a config file it can't read as a failure, not as "not set up yet".
 // If the workflow already exists, the sync options aren't touched.
-func finishDBRepo(ctx context.Context, cfg *core.Config, site string) error {
-	if err := core.SetDashboardURL(ctx, cfg, site); err != nil {
+func finishDBRepo(ctx context.Context, dbRepo *core.DBRepo, site string) error {
+	if err := core.SaveDashboardURL(ctx, dbRepo, site); err != nil {
 		return err
 	}
 	// Checks whether this is the first install: an existing workflow means the setup ran before
-	workflow, err := core.ReadFile(ctx, cfg, core.SyncWorkflowPath)
+	workflow, err := core.ReadDBRepoFile(ctx, dbRepo, core.SyncWorkflowPath)
 	if err != nil {
 		return err
 	}
@@ -125,25 +127,25 @@ func finishDBRepo(ctx context.Context, cfg *core.Config, site string) error {
 	// Records sync as on in the sync options, because GitHub turns a new workflow on (measured).
 	// This comes before the install.
 	// Otherwise, if this failed after the install, the next run would see the workflow and never record it
-	if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
+	if err := core.RecordSyncEnabled(ctx, dbRepo); err != nil {
 		return err
 	}
-	return installWorkflowIfAbsent(ctx, cfg)
+	return installWorkflowIfAbsent(ctx, dbRepo)
 }
 
 // Sends a GET to the GitHub API and decodes the JSON response into `dst`.
-// For a failure response, it returns the error from `core.CheckGitHubAPI`.
+// For a failure response, it returns the error from `core.CheckGitHubResponse`.
 //
 // Args:
 //   - `path`: API path (e.g. `/repos/owner/repo`)
 //   - `dst`: Pointer to the value to decode the response into
-func getGitHubJSON(ctx context.Context, cfg *core.Config, path string, dst any) error {
+func getGitHubJSON(ctx context.Context, cfg *core.EnvConfig, path string, dst any) error {
 	res, err := core.CallGitHubAPI(ctx, cfg, path, core.GitHubAPIRequest{})
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if err := core.CheckGitHubAPI(res); err != nil {
+	if err := core.CheckGitHubResponse(res); err != nil {
 		return err
 	}
 	return json.NewDecoder(res.Body).Decode(dst)

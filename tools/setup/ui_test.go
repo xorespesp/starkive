@@ -13,7 +13,8 @@ import (
 	"time"
 )
 
-// Starts the setup page. The server stops when the test ends
+// Starts the setup page.
+// The server stops when the test ends
 func startTestWebUI(t *testing.T) (*localServer, *webUI) {
 	server, err := startLocalServer()
 	if err != nil {
@@ -31,11 +32,10 @@ func startTestWebUI(t *testing.T) (*localServer, *webUI) {
 // Used to see the raw response where the first address sets the cookie and moves to `/`
 var noRedirectClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-// Sends a request to the setup page and returns the response. Stops the test on failure.
+// Sends a request to the setup page and returns the response.
+// Stops the test on failure.
 //
 // Args:
-//   - `method`: HTTP method
-//   - `target`: Server address
 //   - `body`: Body. None if empty
 //   - `headers`: Headers to add (`Cookie`, `Origin`, etc.)
 func send(t *testing.T, method string, target string, body string, headers map[string]string) *http.Response {
@@ -54,7 +54,7 @@ func send(t *testing.T, method string, target string, body string, headers map[s
 	return res
 }
 
-// Gets the progress (`GET /state`) from the first line, with the key cookie `session`
+// Gets the progress (`GET /state`) from the first line, with the headers `session` (the key cookie)
 func readState(t *testing.T, server *localServer, session map[string]string) webState {
 	var state webState
 	json.NewDecoder(send(t, "GET", server.base+"/state", "", session).Body).Decode(&state)
@@ -66,7 +66,7 @@ func readState(t *testing.T, server *localServer, session map[string]string) web
 //     Opening with the right key sets a cookie with the key and moves to `/` without the key
 //   - With the cookie, it serves the page, the script and the progress. With a cookie of another value, all give 403
 //   - The page has CSP and `no-store`
-//   - If `Host` isn't this computer's address (DNS rebinding), it rejects the request whatever the path
+//   - If `Host` isn't this computer's address (DNS rebinding), it rejects the request (checked on `/`)
 func TestSetupPageOnlyForThisRun(t *testing.T) {
 	server, u := startTestWebUI(t)
 	if res := send(t, "GET", server.base+"/", "", nil); res.StatusCode != http.StatusForbidden {
