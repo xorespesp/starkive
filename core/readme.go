@@ -382,7 +382,7 @@ const maxReadmeContentQueries = 3
 //     A README is absent (`isAbsent`) when GitHub says the repository isn't found,
 //     when none of the three folders has a README that isn't binary, or when the README is blank (`buildReadmeSnapshotFile`).
 //     `nil` where it can't tell now: an ID that isn't a repository, a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`,
-//     a file gone between the queries, or a repository still left after `maxReadmeContentQueries` or after a later query failed.
+//     a file gone between the queries, or a repository whose next pick is still unread after `maxReadmeContentQueries` content queries or after a later query failed.
 //     Ask those again later
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached (`callGraphQL`).
 //     Any other error means a query failed or wasn't sent (`errDeadlinePassed`), and says nothing about the READMEs
@@ -442,11 +442,10 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 	}
 
 	for contentQueries := 0; contentQueries < maxReadmeContentQueries; contentQueries++ {
-		// Lists `docs` for the repositories whose first two folders have no README left
 		// A query after the first content query is only for repositories whose pick was binary.
 		// If it fails, those stay `nil` and are asked again later, and the READMEs already settled are kept
 		isFirstRound := contentQueries == 0
-		docsIndexes := []int{} // Positions in `nodeIDs` of the repositories whose `docs` folder is listed now
+		docsIndexes := []int{} // Positions in `nodeIDs` of the repositories whose first two folders have no README left, so `docs` is listed now
 		for i, candidates := range candidatesByRepo {
 			if candidates == nil {
 				continue
@@ -506,6 +505,16 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 			default:
 				readmes[i], candidatesByRepo[i] = buildFetchedReadme(pickedPath, *file.Text), nil
 			}
+		}
+	}
+	// A repository whose last pick was binary may have no README left in the three folders.
+	// That is known without another query, so it is absent rather than asked again later
+	for i, candidates := range candidatesByRepo {
+		if candidates == nil {
+			continue
+		}
+		if pickedPath, needsDocs := candidates.pickReadmePath(); pickedPath == "" && !needsDocs {
+			readmes[i] = &FetchedReadme{isAbsent: true}
 		}
 	}
 	return readmes, nil

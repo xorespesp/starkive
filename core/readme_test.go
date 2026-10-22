@@ -201,7 +201,8 @@ type testReadmeRepo struct {
 //   - A repository not found, one with no README anywhere, and a blank README are absent
 //   - A binary README isn't a README, as on GitHub: the next one in the same folder is read,
 //     or one in the next folder (listing `docs` if needed), and with none left the README is absent.
-//     After `maxReadmeContentQueries` content queries, a repository still left gives `nil`.
+//     A repository whose last README is found binary by the last content query is absent.
+//     A repository with a pick still unread after `maxReadmeContentQueries` content queries gives `nil`.
 //     If a later query fails, the READMEs already read are kept and the repositories still left give `nil`
 //   - An ID that isn't a repository, a README whose content query alone failed,
 //     a repository with an error inside it (a folder that failed), a repository gone before the `docs` listing,
@@ -239,10 +240,11 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		"R_binNext":   {root: []string{"README.md", "README.txt"}, texts: map[string]string{"README.txt": "Text next\n"}},
 		"R_binGitHub": {github: []string{"README.md"}, root: []string{"README.md"}, texts: map[string]string{"README.md": "# Root after binary\n"}},
 		"R_binDocs":   {root: []string{"README.md"}, docs: []string{"README.rst"}, texts: map[string]string{"docs/README.rst": "Docs after binary\n"}},
+		"R_binThree":  {root: []string{"README.md", "README.txt"}, docs: []string{"README.md"}},
 		"R_binMany":   {root: []string{"README.md", "README.rst", "README.txt", "README"}},
 	}
 	// Repositories with nothing to read come between the ones with a README, so a position that slips would show
-	ids := []string{"R_md", "R_github", "R_docs", "R_none", "R_empty", "R_gone", "U_user", "R_binary", "R_blank", "R_noext", "R_badext", "R_long", "R_several", "R_denied", "R_rootErr", "R_docsErr", "R_docsGone", "R_fileGone", "R_link", "R_upper", "R_binNext", "R_binGitHub", "R_binDocs", "R_binMany"}
+	ids := []string{"R_md", "R_github", "R_docs", "R_none", "R_empty", "R_gone", "U_user", "R_binary", "R_blank", "R_noext", "R_badext", "R_long", "R_several", "R_denied", "R_rootErr", "R_docsErr", "R_docsGone", "R_fileGone", "R_link", "R_upper", "R_binNext", "R_binGitHub", "R_binDocs", "R_binThree", "R_binMany"}
 
 	var mu sync.Mutex
 	var failWith func(w http.ResponseWriter) // If not `nil`, every query is answered with it
@@ -429,14 +431,15 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		{extension: "txt", content: []byte("Text next\n")},
 		{extension: "md", content: []byte("# Root after binary\n")},
 		{extension: "rst", content: []byte("Docs after binary\n")},
-		nil, // Still binary after `maxReadmeContentQueries` content queries
+		absent, // The third content query reads its last README, which is binary
+		nil,    // A README is still unread after `maxReadmeContentQueries` content queries
 	}
 	if err != nil || fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes(want)) {
 		t.Errorf("READMEs: %v\n got %v", err, derefReadmes(got))
 	}
-	// The second round lists `docs` for repositories whose first two folders had only binary READMEs, and reads the next picks
-	if !slices.Equal(queries, []string{"listing", "docs", "content", "docs", "content", "content"}) ||
-		!slices.Equal(docsAsked, []string{"R_docs", "R_none", "R_empty", "R_docsErr", "R_docsGone", "R_link", "R_binary", "R_binDocs"}) {
+	// A later round lists `docs` for repositories whose first two folders had only binary READMEs, and reads the next picks
+	if !slices.Equal(queries, []string{"listing", "docs", "content", "docs", "content", "docs", "content"}) ||
+		!slices.Equal(docsAsked, []string{"R_docs", "R_none", "R_empty", "R_docsErr", "R_docsGone", "R_link", "R_binary", "R_binDocs", "R_binThree"}) {
 		t.Errorf("queries %v, docs asked for %v", queries, docsAsked)
 	}
 
