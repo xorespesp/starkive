@@ -1202,6 +1202,7 @@ function renderListHeader() {
 }
 
 const DATE = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); // Date format: Oct 14, 2026
+const DATE_TIME = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }); // Date and time format: Oct 14, 2026, 6:43 AM. In the browser's time zone, like `DATE`
 const COUNT = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }); // Short form of large numbers: 1234 -> 1.2K
 
 /**
@@ -1214,7 +1215,7 @@ const COUNT = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFract
  */
 function dateLabel(prefix, iso) {
   const date = new Date(iso);
-  return el('time', { dateTime: iso, title: date.toLocaleString(), textContent: `${prefix} ${DATE.format(date)}` });
+  return el('time', { dateTime: iso, title: DATE_TIME.format(date), textContent: `${prefix} ${DATE.format(date)}` });
 }
 
 /**
@@ -1905,7 +1906,7 @@ function syncProblem(status, readError) {
  */
 function describeLastRun(last) {
   if (!last) return 'Never';
-  return `${last.conclusion === 'success' ? 'Succeeded' : 'Failed'} · ${new Date(last.run_started_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`;
+  return `${last.conclusion === 'success' ? 'Succeeded' : 'Failed'} · ${DATE_TIME.format(new Date(last.run_started_at))}`;
 }
 
 /**
