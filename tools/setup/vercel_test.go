@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -84,7 +85,7 @@ func TestCheckVercelDeployCommit(t *testing.T) {
 				w.Write([]byte(`{"message":"x"}`))
 			}))
 			defer github.Close()
-			err := checkVercelDeployCommit(github.URL, commitRef{url: "https://github.com/me/starkive", sha: sha})
+			err := checkVercelDeployCommit(context.Background(), github.URL, commitRef{url: "https://github.com/me/starkive", sha: sha})
 			switch {
 			case c.wantErr == "" && err != nil:
 				t.Errorf("got %v", err)

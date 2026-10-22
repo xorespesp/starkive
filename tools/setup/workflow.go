@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/xorespesp/starkive/core"
@@ -108,14 +109,14 @@ jobs:
 // The created tree isn't linked to any commit, so it doesn't affect the branch or the schedule.
 // This way the permission is checked before the GitHub App is created,
 // and the workflow itself can be installed last, after the dashboard address is recorded.
-func checkWorkflowsPermission(cfg *core.Config) error {
+func checkWorkflowsPermission(ctx context.Context, cfg *core.Config) error {
 	repo := "/repos/" + cfg.DBRepoFullName
 	var ref struct {
 		Object struct {
 			SHA string `json:"sha"` // Commit at the tip of the default branch
 		} `json:"object"`
 	}
-	if err := getGitHubJSON(cfg, repo+"/git/ref/heads/"+cfg.DBRepoBranch, &ref); err != nil {
+	if err := getGitHubJSON(ctx, cfg, repo+"/git/ref/heads/"+cfg.DBRepoBranch, &ref); err != nil {
 		return err
 	}
 	var commit struct {
@@ -123,13 +124,13 @@ func checkWorkflowsPermission(cfg *core.Config) error {
 			SHA string `json:"sha"` // File tree of that commit. Used as the base of the new tree
 		} `json:"tree"`
 	}
-	if err := getGitHubJSON(cfg, repo+"/git/commits/"+ref.Object.SHA, &commit); err != nil {
+	if err := getGitHubJSON(ctx, cfg, repo+"/git/commits/"+ref.Object.SHA, &commit); err != nil {
 		return err
 	}
 	entries := []map[string]string{{"path": core.SyncWorkflowPath, "mode": "100644", "type": "blob", "content": syncWorkflowContent}}
 	body := map[string]any{"base_tree": commit.Tree.SHA, "tree": entries}
 	// Creates only a tree, not a commit. Without the Workflows permission, GitHub rejects it here with 403
-	res, err := core.CallGitHubAPI(cfg, repo+"/git/trees", core.GitHubAPIRequest{Method: http.MethodPost, Body: body})
+	res, err := core.CallGitHubAPI(ctx, cfg, repo+"/git/trees", core.GitHubAPIRequest{Method: http.MethodPost, Body: body})
 	if err != nil {
 		return err
 	}
@@ -143,9 +144,9 @@ func checkWorkflowsPermission(cfg *core.Config) error {
 //
 // NOTE: There is no way to check the write permission without side effects, so only reading is checked.
 // The token creation link (`buildTokenURL`) asks for read and write (`actions=write`).
-func checkActionsPermission(cfg *core.Config) error {
+func checkActionsPermission(ctx context.Context, cfg *core.Config) error {
 	var list struct{} // The response content isn't used. Only whether the read succeeds matters
-	return getGitHubJSON(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/workflows?per_page=1", &list)
+	return getGitHubJSON(ctx, cfg, "/repos/"+cfg.DBRepoFullName+"/actions/workflows?per_page=1", &list)
 }
 
 // Installs the sync workflow (`syncWorkflowContent`) if the DB repository doesn't have it.
@@ -154,9 +155,9 @@ func checkActionsPermission(cfg *core.Config) error {
 //
 // NOTE: This tool doesn't change the code of a dashboard that is already deployed.
 // The workflow must match that dashboard, so this tool leaves it as it is too.
-func installWorkflowIfAbsent(cfg *core.Config) error {
+func installWorkflowIfAbsent(ctx context.Context, cfg *core.Config) error {
 	paths := []string{core.SyncWorkflowPath}
-	return core.UpdateFiles(cfg, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	return core.UpdateFiles(ctx, cfg, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		if filesRead[core.SyncWorkflowPath] != nil {
 			return core.FileChangesCommit{}, nil // Nothing to write, so no commit
 		}

@@ -8,6 +8,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -52,8 +53,8 @@ const maxUpdateAttempts = 5
 //
 // Returns:
 //   - The file content. `nil` if the file doesn't exist
-func ReadFile(cfg *Config, path string) ([]byte, error) {
-	return readFileAt(cfg, path, cfg.DBRepoBranch)
+func ReadFile(ctx context.Context, cfg *Config, path string) ([]byte, error) {
+	return readFileAt(ctx, cfg, path, cfg.DBRepoBranch)
 }
 
 // Reads one file as it was at a given point.
@@ -67,8 +68,8 @@ func ReadFile(cfg *Config, path string) ([]byte, error) {
 //
 // NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
 // Archive files can grow larger than that, so they are fetched in raw format.
-func readFileAt(cfg *Config, path string, ref string) ([]byte, error) {
-	res, err := CallGitHubAPI(cfg, BuildContentsPath(cfg, path)+"?ref="+url.QueryEscape(ref),
+func readFileAt(ctx context.Context, cfg *Config, path string, ref string) ([]byte, error) {
+	res, err := CallGitHubAPI(ctx, cfg, BuildContentsPath(cfg, path)+"?ref="+url.QueryEscape(ref),
 		GitHubAPIRequest{Accept: "application/vnd.github.raw+json"})
 	if err != nil {
 		return nil, err
@@ -80,7 +81,11 @@ func readFileAt(cfg *Config, path string, ref string) ([]byte, error) {
 	if err := CheckGitHubAPI(res); err != nil {
 		return nil, err
 	}
-	return io.ReadAll(res.Body)
+	content, err := io.ReadAll(res.Body)
+	if err != nil { // The body stopped coming (a dropped connection, `githubTimeout` or the deadline of `ctx`)
+		return nil, newGitHubUnreachableError(err)
+	}
+	return content, nil
 }
 
 // Decodes the content of a data file into a list of items.
@@ -99,8 +104,8 @@ func decodeItems[T any](content []byte) ([]T, error) {
 }
 
 // Reads the data file `path` and decodes it into a list of items. Used when only reading, not writing
-func readItems[T any](cfg *Config, path string) ([]T, error) {
-	content, err := ReadFile(cfg, path)
+func readItems[T any](ctx context.Context, cfg *Config, path string) ([]T, error) {
+	content, err := ReadFile(ctx, cfg, path)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +222,7 @@ func (changes FileChangesCommit) check() error {
 //     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
 //     That one is sent again on every attempt.
 //     This is the price of putting several files in one commit with no in-between state.
-func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error)) error {
+func UpdateFiles(ctx context.Context, cfg *Config, paths []string, buildFileChangesCommit func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error)) error {
 	for _, p := range paths {
 		if !isValidRepoPath(p) {
 			return fmt.Errorf("refusing to read a file path that isn't valid: %q", p)
@@ -226,11 +231,11 @@ func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesR
 	// Compare-and-swap loop: the commit is built on the branch tip that was read, and the branch moves only if it is still there.
 	// If another commit (another device, a sync) got in first, the files are read and the commit is built again on the new tip
 	for attempt := 1; ; attempt++ {
-		head, err := readBranchHead(cfg)
+		head, err := readBranchHead(ctx, cfg)
 		if err != nil {
 			return err
 		}
-		filesRead, err := readFilesAt(cfg, paths, head.commit)
+		filesRead, err := readFilesAt(ctx, cfg, paths, head.commit)
 		if err != nil {
 			return err
 		}
@@ -245,7 +250,7 @@ func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesR
 			return err
 		}
 
-		err = commitFiles(cfg, head, changes)
+		err = commitFiles(ctx, cfg, head, changes)
 		if err == nil {
 			return nil
 		}
@@ -267,7 +272,7 @@ func UpdateFiles(cfg *Config, paths []string, buildFileChangesCommit func(filesR
 //
 // Returns:
 //   - Path -> content (`nil` if the file doesn't exist). An error if any file can't be read
-func readFilesAt(cfg *Config, paths []string, ref string) (map[string][]byte, error) {
+func readFilesAt(ctx context.Context, cfg *Config, paths []string, ref string) (map[string][]byte, error) {
 	contents := make([][]byte, len(paths))
 	errs := make([]error, len(paths))
 	var wg sync.WaitGroup // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
@@ -275,7 +280,7 @@ func readFilesAt(cfg *Config, paths []string, ref string) (map[string][]byte, er
 		wg.Add(1)
 		go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
 			defer wg.Done()
-			contents[i], errs[i] = readFileAt(cfg, path, ref) // Each goroutine writes its own slot, so no lock is needed
+			contents[i], errs[i] = readFileAt(ctx, cfg, path, ref) // Each goroutine writes its own slot, so no lock is needed
 		}()
 	}
 	wg.Wait()
@@ -302,7 +307,7 @@ func readFilesAt(cfg *Config, paths []string, ref string) (map[string][]byte, er
 //
 // NOTE: The tree API takes `<commit sha>:<folder path>` in place of a tree sha (measured).
 // A list of 74,000 files (23MB) was not cut short (measured).
-func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map[string]string, error) {
+func readBlobSHAsInFolder(ctx context.Context, cfg *Config, commitSHA string, folderPath string) (map[string]string, error) {
 	if !isValidRepoPath(folderPath) {
 		return nil, fmt.Errorf("refusing to list a folder path that isn't valid: %q", folderPath)
 	}
@@ -315,7 +320,7 @@ func readBlobSHAsInFolder(cfg *Config, commitSHA string, folderPath string) (map
 		Truncated bool `json:"truncated"`
 	}
 	escapedFolderPath := (&url.URL{Path: folderPath}).EscapedPath()
-	err := callRepoAPI(cfg, http.MethodGet, "/git/trees/"+commitSHA+":"+escapedFolderPath+"?recursive=1", nil, &tree)
+	err := callRepoAPI(ctx, cfg, http.MethodGet, "/git/trees/"+commitSHA+":"+escapedFolderPath+"?recursive=1", nil, &tree)
 	if hasGitHubStatus(err, http.StatusNotFound) {
 		return map[string]string{}, nil
 	}
@@ -365,7 +370,7 @@ func gitBlobSHA(content []byte) string {
 // The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
 // READMEs given to `AddFetchedReadmeToSave` are written in the same commit too.
 // Each removed item and each saved README costs one more request (a listing of its folder).
-func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) (*Archive, error) {
+func UpdateArchive(ctx context.Context, cfg *Config, change func(a *Archive) (CommitMessage, error)) (*Archive, error) {
 	// Turns the three data files into file content (the `encodeLines` format). Returns path -> content
 	encode := func(a *Archive) (map[string][]byte, error) {
 		files := map[string][]byte{}
@@ -383,7 +388,7 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 	}
 	var updated *Archive
 	// Reads the three files together from the same commit
-	err := UpdateFiles(cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+	err := UpdateFiles(ctx, cfg, []string{StarItemsDBPath, StarListsDBPath, RepoMetaDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
 		a := &Archive{}
 		var err error
 		if a.StarItems, err = decodeItems[StarItem](filesRead[StarItemsDBPath]); err != nil {
@@ -433,7 +438,7 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 			}
 		}
 		for _, id := range removedIDs {
-			readmePaths, err := readReadmeSnapshotPaths(cfg, commitSHA, id)
+			readmePaths, err := readReadmeSnapshotPaths(ctx, cfg, commitSHA, id)
 			if err != nil {
 				return FileChangesCommit{}, err
 			}
@@ -445,7 +450,7 @@ func UpdateArchive(cfg *Config, change func(a *Archive) (CommitMessage, error)) 
 			if !isArchivedAfter[id] {
 				continue // A README of an item not in the archive would have no item to own it
 			}
-			snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(id))
+			snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, commitSHA, buildReadmeFolderPath(id))
 			if err != nil {
 				return FileChangesCommit{}, err
 			}
@@ -478,21 +483,21 @@ type branchHead struct {
 //
 // Returns:
 //   - The commit sha. For an empty repository, GitHub refuses with 409 (`GitHubAPIError`)
-func readBranchCommit(cfg *Config) (string, error) {
+func readBranchCommit(ctx context.Context, cfg *Config) (string, error) {
 	var ref struct {
 		Object struct {
 			SHA string `json:"sha"`
 		} `json:"object"`
 	}
-	if err := callRepoAPI(cfg, http.MethodGet, "/git/ref/heads/"+cfg.DBRepoBranch, nil, &ref); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodGet, "/git/ref/heads/"+cfg.DBRepoBranch, nil, &ref); err != nil {
 		return "", err
 	}
 	return ref.Object.SHA, nil
 }
 
 // Reads the commit that the default branch points to, and its tree
-func readBranchHead(cfg *Config) (branchHead, error) {
-	sha, err := readBranchCommit(cfg)
+func readBranchHead(ctx context.Context, cfg *Config) (branchHead, error) {
+	sha, err := readBranchCommit(ctx, cfg)
 	if err != nil {
 		return branchHead{}, err
 	}
@@ -501,7 +506,7 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 			SHA string `json:"sha"`
 		} `json:"tree"`
 	}
-	if err := callRepoAPI(cfg, http.MethodGet, "/git/commits/"+sha, nil, &commit); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodGet, "/git/commits/"+sha, nil, &commit); err != nil {
 		return branchHead{}, err
 	}
 	return branchHead{commit: sha, tree: commit.Tree.SHA}, nil
@@ -546,7 +551,7 @@ func readBranchHead(cfg *Config) (branchHead, error) {
 //   - Limit: right after the move, GitHub may briefly return the old branch value.
 //     Then it looks like "didn't move" and the error is returned.
 //     The data is safe, and the request can simply be sent again.
-func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error {
+func commitFiles(ctx context.Context, cfg *Config, head branchHead, changes FileChangesCommit) error {
 	entries := []map[string]any{} // Tree entries. `any` lets one entry hold a string and another a JSON `null`
 	for path, content := range changes.FilesToWrite {
 		// The entry carries the content as a JSON string, which holds only UTF-8.
@@ -563,7 +568,7 @@ func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error 
 			SHA string `json:"sha"`
 		}
 		request := map[string]any{"content": base64.StdEncoding.EncodeToString(content), "encoding": "base64"}
-		if err := callRepoAPI(cfg, http.MethodPost, "/git/blobs", request, &blob); err != nil {
+		if err := callRepoAPI(ctx, cfg, http.MethodPost, "/git/blobs", request, &blob); err != nil {
 			return err
 		}
 		entries = append(entries, map[string]any{"path": path, "mode": "100644", "type": "blob", "sha": blob.SHA})
@@ -574,7 +579,7 @@ func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error 
 	var tree struct {
 		SHA string `json:"sha"`
 	}
-	if err := callRepoAPI(cfg, http.MethodPost, "/git/trees", map[string]any{"base_tree": head.tree, "tree": entries}, &tree); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodPost, "/git/trees", map[string]any{"base_tree": head.tree, "tree": entries}, &tree); err != nil {
 		return err
 	}
 	if tree.SHA == head.tree { // Every change matched what was already there, so a commit would change nothing
@@ -583,21 +588,21 @@ func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error 
 	var commit struct {
 		SHA string `json:"sha"`
 	}
-	if err := callRepoAPI(cfg, http.MethodPost, "/git/commits", map[string]any{"message": changes.Message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodPost, "/git/commits", map[string]any{"message": changes.Message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit); err != nil {
 		return err
 	}
 	// Moves without force. If the branch moved in the meantime, GitHub refuses
-	err := callRepoAPI(cfg, http.MethodPatch, "/git/refs/heads/"+cfg.DBRepoBranch, map[string]any{"sha": commit.SHA, "force": false}, nil)
+	err := callRepoAPI(ctx, cfg, http.MethodPatch, "/git/refs/heads/"+cfg.DBRepoBranch, map[string]any{"sha": commit.SHA, "force": false}, nil)
 	if err == nil {
 		return nil
 	}
 	// Doesn't guess the cause from the status code.
 	// Reads the branch again and checks whether it contains the new commit
-	now, readErr := readBranchCommit(cfg)
+	now, readErr := readBranchCommit(ctx, cfg)
 	if readErr != nil || now == head.commit { // The branch didn't move: not a conflict
 		return err
 	}
-	included, compareErr := isCommitInBranch(cfg, now, commit.SHA)
+	included, compareErr := isCommitInBranch(ctx, cfg, now, commit.SHA)
 	switch {
 	case compareErr != nil:
 		return err
@@ -618,11 +623,11 @@ func commitFiles(cfg *Config, head branchHead, changes FileChangesCommit) error 
 //   - `true` if it contains it (also when it is the same commit)
 //
 // NOTE: The compare API (`newCommit...branchCommit`) answers "ahead" or "identical" when `branchCommit` contains `newCommit`.
-func isCommitInBranch(cfg *Config, branchCommit string, newCommit string) (bool, error) {
+func isCommitInBranch(ctx context.Context, cfg *Config, branchCommit string, newCommit string) (bool, error) {
 	var compare struct {
 		Status string `json:"status"` // ahead, identical, behind, diverged
 	}
-	if err := callRepoAPI(cfg, http.MethodGet, "/compare/"+newCommit+"..."+branchCommit, nil, &compare); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodGet, "/compare/"+newCommit+"..."+branchCommit, nil, &compare); err != nil {
 		return false, err
 	}
 	return compare.Status == "ahead" || compare.Status == "identical", nil
@@ -638,8 +643,8 @@ func isCommitInBranch(cfg *Config, branchCommit string, newCommit string) (bool,
 //
 // Returns:
 //   - `GitHubAPIError` if GitHub answers with a failure
-func callRepoAPI(cfg *Config, method string, path string, body any, dst any) error {
-	res, err := CallGitHubAPI(cfg, "/repos/"+cfg.DBRepoFullName+path, GitHubAPIRequest{Method: method, Body: body})
+func callRepoAPI(ctx context.Context, cfg *Config, method string, path string, body any, dst any) error {
+	res, err := CallGitHubAPI(ctx, cfg, "/repos/"+cfg.DBRepoFullName+path, GitHubAPIRequest{Method: method, Body: body})
 	if err != nil {
 		return err
 	}
@@ -650,7 +655,7 @@ func callRepoAPI(cfg *Config, method string, path string, body any, dst any) err
 	if dst == nil {
 		return nil
 	}
-	return json.NewDecoder(res.Body).Decode(dst)
+	return DecodeGitHubAnswer(res, dst)
 }
 
 // Maximum length of a commit message, in characters.

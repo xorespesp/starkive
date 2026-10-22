@@ -28,6 +28,7 @@ var nodeIDPattern = regexp.MustCompile(`^[\w=-]{1,100}$`)
 // If the GitHub request itself fails, it answers with an error (a GitHub failure is 502).
 // In that case it doesn't report any repository as gone.
 func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -48,7 +49,7 @@ func handleGitHubRepoMetaPost(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	nodes, missing, err := core.FetchRepoMeta(cfg, body.IDs)
+	nodes, missing, err := core.FetchRepoMeta(ctx, cfg, body.IDs)
 	if err != nil {
 		return err
 	}

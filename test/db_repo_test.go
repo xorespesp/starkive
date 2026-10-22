@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 //
 // In every case, the repository name is filled in with the name found by its ID (`me/archive`).
 func TestDBRepoState(t *testing.T) {
+	ctx := context.Background()
 	cases := []struct {
 		name    string
 		prepare func(gh *fakeGitHub)
@@ -37,7 +39,7 @@ func TestDBRepoState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if state, err := core.ResolveDBRepo(cfg); err != nil || state != c.want || cfg.DBRepoFullName != "me/archive" {
+			if state, err := core.ResolveDBRepo(ctx, cfg); err != nil || state != c.want || cfg.DBRepoFullName != "me/archive" {
 				t.Errorf("got %v %v (%s)", state, err, cfg.DBRepoFullName)
 			}
 		})
@@ -52,6 +54,7 @@ func TestDBRepoState(t *testing.T) {
 // NOTE: This guards the check that keeps this code from misreading or writing to a repository made by another version of starkive.
 // It stops. It doesn't adapt or convert the format.
 func TestOtherFormatStopsEverything(t *testing.T) {
+	ctx := context.Background()
 	for _, marker := range []string{`{"format":{"major":99,"minor":0}}` + "\n", `{}` + "\n", "not json\n"} {
 		gh := setup(t, sampleStarItems, sampleStarLists)
 		cookie := login(t)
@@ -60,7 +63,7 @@ func TestOtherFormatStopsEverything(t *testing.T) {
 		// so the server's cached "starkive repository" result for the previous repository isn't used for the new one
 		gh = setup(t, sampleStarItems, sampleStarLists)
 		gh.files[core.MarkerDBPath] = marker
-		if _, err := core.LoadConfig(); err == nil || !strings.Contains(err.Error(), "this version of starkive uses format") {
+		if _, err := core.LoadConfig(ctx); err == nil || !strings.Contains(err.Error(), "this version of starkive uses format") {
 			t.Errorf("%q: config %v", marker, err)
 		}
 		for name, rec := range map[string]*httptest.ResponseRecorder{
@@ -83,9 +86,10 @@ func TestOtherFormatStopsEverything(t *testing.T) {
 // Tests that a repository whose marker has the same major format version but another minor version is used as usual.
 // A minor version only marks a change that keeps the contract, so it must not stop anything.
 func TestOtherMinorFormatWorks(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.files[core.MarkerDBPath] = fmt.Sprintf(`{"format":{"major":%d,"minor":99}}`+"\n", core.DBRepoFormat.Major)
-	if _, err := core.LoadConfig(); err != nil {
+	if _, err := core.LoadConfig(ctx); err != nil {
 		t.Fatalf("config: %v", err)
 	}
 	if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", login(t)); rec.Code != 200 {
@@ -98,6 +102,7 @@ func TestOtherMinorFormatWorks(t *testing.T) {
 // That is an empty message, a message with no summary or only spaces after the prefix, and a message with no prefix.
 // With nothing to write or delete, an empty message is fine and nothing happens (there is no commit, so the message isn't used).
 func TestInvalidCommitMessageIsRefused(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	before := len(gh.commits)
@@ -107,20 +112,20 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 		"spaces after the prefix": core.NewCommitMessage("user(star-lists)", " "),
 		"no prefix":               core.NewCommitMessage("", "delete Graphics"),
 	} {
-		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToWrite: map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("files with %s: %v, commits %d -> %d", name, err, before, len(gh.commits))
 		}
 	}
-	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err := core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{FilesToDelete: []string{core.StarListsDBPath}}, nil
 	})
 	if err == nil || len(gh.commits) != before {
 		t.Errorf("delete with empty message: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
-	err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err = core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{}, nil
 	})
 	if err != nil || len(gh.commits) != before {
@@ -132,26 +137,27 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 // A path to read that isn't valid stops it before `buildFileChangesCommit` is called.
 // A path that is changed twice in one commit (written and deleted, or deleted twice) is refused before any tree is made.
 func TestInvalidPathIsRefused(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	before := len(gh.commits)
 	message := core.NewCommitMessage("user(star-lists)", "delete Graphics")
 	for _, p := range []string{"/" + core.StarListsDBPath, "./" + core.StarListsDBPath} {
 		called := false
-		err := core.UpdateFiles(cfg, []string{p}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateFiles(ctx, cfg, []string{p}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 			called = true
 			return core.FileChangesCommit{}, nil
 		})
 		if err == nil || called {
 			t.Errorf("read %q: %v, buildFileChangesCommit called %v", p, err, called)
 		}
-		err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err = core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToWrite: map[string][]byte{p: []byte("[]\n")}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("write %q: %v, commits %d -> %d", p, err, before, len(gh.commits))
 		}
-		err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err = core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToDelete: []string{p}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
@@ -168,7 +174,7 @@ func TestInvalidPathIsRefused(t *testing.T) {
 		"deleted twice": {FilesToDelete: []string{core.StarListsDBPath, core.StarListsDBPath}},
 	} {
 		changes.Message = message
-		err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 			return changes, nil
 		})
 		if err == nil || len(gh.commits) != before || gh.treeCalls != treeCallsBefore {
@@ -180,6 +186,7 @@ func TestInvalidPathIsRefused(t *testing.T) {
 // Tests that `core.UpdateFiles` writes and deletes files in one commit.
 // Deleting a file that isn't there fails the whole commit, so nothing changes (measured on GitHub, imitated by the fake).
 func TestWriteAndDeleteInOneCommit(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	const notesPath = "db/notes.txt" // A file that only this test makes and deletes
@@ -194,7 +201,7 @@ func TestWriteAndDeleteInOneCommit(t *testing.T) {
 		}, nil
 	}
 
-	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
+	err := core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
 	_, notesLeft := gh.files[notesPath]
 	if err != nil || len(gh.commits) != before+1 || notesLeft || gh.readFile(core.StarListsDBPath) != "[]\n" {
 		t.Fatalf("write and delete: %v, commits %d -> %d, notes left %v, star lists %q", err, before, len(gh.commits), notesLeft, gh.readFile(core.StarListsDBPath))
@@ -203,7 +210,7 @@ func TestWriteAndDeleteInOneCommit(t *testing.T) {
 	// The notes file is gone now, so GitHub refuses the tree with 422 and the write in the same commit doesn't happen either
 	gh.files[core.StarListsDBPath] = sampleStarLists
 	treeCallsBefore := gh.treeCalls
-	err = core.UpdateFiles(cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
+	err = core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, writeListsAndDeleteNotes)
 	var githubErr *core.GitHubAPIError
 	refusedByGitHub := errors.As(err, &githubErr) && githubErr.Status == http.StatusUnprocessableEntity
 	if !refusedByGitHub || gh.treeCalls != treeCallsBefore+1 || len(gh.commits) != before+1 || gh.readFile(core.StarListsDBPath) != sampleStarLists {
@@ -216,6 +223,7 @@ func TestWriteAndDeleteInOneCommit(t *testing.T) {
 //   - Recording that sync is on when it is already on makes no commit and leaves the file as it is
 //   - A write that changes a value commits, in the layout the server writes
 func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
+	ctx := context.Background()
 	for _, layout := range []string{"compact", "keys in another order"} {
 		gh := setup(t, sampleStarItems, sampleStarLists)
 		if layout == "keys in another order" {
@@ -232,13 +240,13 @@ func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
 		cfg := loadTestConfig(t)
 		original := gh.readFile(core.ConfigDBPath)
 		before := len(gh.commits)
-		if err := core.RecordSyncEnabled(cfg); err != nil {
+		if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
 			t.Fatal(err)
 		}
 		if len(gh.commits) != before || gh.readFile(core.ConfigDBPath) != original {
 			t.Errorf("%s, same values: commits %q", layout, gh.commits[before:])
 		}
-		if err := core.SetDashboardURL(cfg, "https://other.example.com"); err != nil {
+		if err := core.SetDashboardURL(ctx, cfg, "https://other.example.com"); err != nil {
 			t.Fatal(err)
 		}
 		if len(gh.commits) != before+1 || !strings.Contains(gh.readFile(core.ConfigDBPath), "\n  \"dashboard_url\": \"https://other.example.com\"") {
@@ -252,6 +260,7 @@ func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
 //   - A write that changes nothing (with an empty message, like a sync with no new Stars) makes no error and no commit
 //   - A write that changes another file commits only that file, and leaves the file with the different layout as it is
 func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	var items []map[string]any
 	if err := json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &items); err != nil {
@@ -267,10 +276,10 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 	gh.mu.Unlock()
 	cfg := loadTestConfig(t)
 
-	if _, err := core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
+	if _, err := core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
 		t.Errorf("nothing changed: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
-	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
 		a.StarLists = append(a.StarLists, core.StarList{ID: 9999, Name: "new"})
 		return core.NewCommitMessage("user(star-lists)", "add new"), nil
 	})
@@ -282,10 +291,11 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 // Tests that `core.UpdateFiles` makes no commit when its changes leave the tree as it was.
 // GitHub then answers the new tree with the sha of the base tree, so no commit is made on top of it
 func TestUnchangedTreeIsNotCommitted(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cfg := loadTestConfig(t)
 	before := len(gh.commits)
-	err := core.UpdateFiles(cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err := core.UpdateFiles(ctx, cfg, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{
 			FilesToWrite: map[string][]byte{core.StarListsDBPath: filesRead[core.StarListsDBPath]}, // The same content again
 			Message:      core.NewCommitMessage("user(star-lists)", "edit Graphics"),

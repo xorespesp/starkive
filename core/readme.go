@@ -13,6 +13,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -116,8 +117,8 @@ func collectReadmeSnapshotsByID(blobSHAByPath map[string]string) map[int64][]rea
 // Reads the README snapshots under folder `folderPath` at commit `commitSHA`, by item ID, with one request.
 // The folder is `ReadmesDBDir` or one of its subfolders (`buildReadmeFolderPath`).
 // It reads no file content (`readBlobSHAsInFolder`), and keeps only the files `collectReadmeSnapshotsByID` accepts.
-func readReadmeSnapshotsInFolder(cfg *Config, commitSHA string, folderPath string) (map[int64][]readmeSnapshot, error) {
-	blobSHAByPath, err := readBlobSHAsInFolder(cfg, commitSHA, folderPath)
+func readReadmeSnapshotsInFolder(ctx context.Context, cfg *Config, commitSHA string, folderPath string) (map[int64][]readmeSnapshot, error) {
+	blobSHAByPath, err := readBlobSHAsInFolder(ctx, cfg, commitSHA, folderPath)
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +129,8 @@ func readReadmeSnapshotsInFolder(cfg *Config, commitSHA string, folderPath strin
 //
 // Returns:
 //   - The paths, sorted. Empty if the item has no snapshot
-func readReadmeSnapshotPaths(cfg *Config, commitSHA string, itemID int64) ([]string, error) {
-	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(itemID))
+func readReadmeSnapshotPaths(ctx context.Context, cfg *Config, commitSHA string, itemID int64) ([]string, error) {
+	snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, commitSHA, buildReadmeFolderPath(itemID))
 	if err != nil {
 		return nil, err
 	}
@@ -228,20 +229,6 @@ func parseReadmeSnapshotFile(content []byte) (string, bool) {
 		return string(content), false
 	}
 	return string(text), true
-}
-
-// Error for a request that isn't sent because its deadline has passed
-var errDeadlinePassed = errors.New("deadline passed before the request")
-
-// Returns the time left until `deadline`, as the time limit of the next request.
-// It returns `errDeadlinePassed` if no time is left.
-// A zero `GitHubAPIRequest.Timeout` means the default limit, so a request must never get one in place of "no time left".
-func timeLeftUntil(deadline time.Time) (time.Duration, error) {
-	timeLeft := time.Until(deadline)
-	if timeLeft <= 0 {
-		return 0, errDeadlinePassed
-	}
-	return timeLeft, nil
 }
 
 // Largest number of `node_id`s that one `FetchReadmesByNodeIDs` call takes.
@@ -399,7 +386,7 @@ func (candidates *readmeCandidates) pickReadmePath() (string, []*readmeFolder) {
 // This keeps a call short even if a repository has many binary READMEs
 const maxReadmeContentQueries = 3
 
-// Fetches the READMEs of the repositories `nodeIDs` with GitHub GraphQL, ending by `deadline`.
+// Fetches the READMEs of the repositories `nodeIDs` with GitHub GraphQL, ending by the deadline of `ctx`.
 // It picks each README the way GitHub does (`readmeCandidates.pickReadmePath`), and reads the picked files.
 // That is usually up to three queries, sent one after another (the listing, the listing of another folder if needed, the contents).
 // A binary pick is passed over, which takes more queries (`maxReadmeContentQueries`).
@@ -415,7 +402,7 @@ const maxReadmeContentQueries = 3
 //     a file gone between the queries, or a repository whose next pick is still unread after `maxReadmeContentQueries` content queries or after a later query failed.
 //     Ask those again later
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached before the first content query is answered (`callGraphQL`).
-//     Any other error means a query failed or wasn't sent (`errDeadlinePassed`), and says nothing about the READMEs.
+//     Any other error means a query failed, including one cut at the deadline (`context.DeadlineExceeded`), and says nothing about the READMEs.
 //     If a later query fails, even for the rate limit, the READMEs settled so far are returned without an error
 //
 // NOTE: It asks by `node_id`, so a renamed repository needs no lookup (measured).
@@ -424,7 +411,7 @@ const maxReadmeContentQueries = 3
 // A file GitHub judges binary by its content (`isBinary`) comes with no `text` (measured).
 // UTF-16 without a byte order mark is binary or not by its content, and when it isn't, its `text` keeps the NUL bytes (measured).
 // Text over 512,000 bytes comes cut (measured), which still holds more than `maxReadmeBytes`.
-func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([]*FetchedReadme, error) {
+func FetchReadmesByNodeIDs(ctx context.Context, cfg *Config, nodeIDs []string) ([]*FetchedReadme, error) {
 	// Lists the `.github` folder and the root folder.
 	// GitHub looks for a README in `.github`, then the root, then `docs` (docs).
 	// Most READMEs are in the first two (measured on 300 repositories), so `docs` is listed later, only when needed.
@@ -447,11 +434,7 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 			Root   *githubFolder `json:"root"`   // The root folder. `nil` for an empty repository
 		} `json:"nodes"`
 	}
-	timeLeft, err := timeLeftUntil(deadline)
-	if err != nil {
-		return nil, err
-	}
-	err = callGraphQL(cfg, listingQuery, map[string]any{"ids": nodeIDs}, timeLeft, &listed)
+	err := callGraphQL(ctx, cfg, listingQuery, map[string]any{"ids": nodeIDs}, &listed)
 	var nodeErrs graphQLErrors // Errors about some repositories, when the rest of the answer can be used
 	if err != nil && !errors.As(err, &nodeErrs) {
 		return nil, err
@@ -497,7 +480,7 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 			}
 		}
 		if len(foldersToList) > 0 {
-			listings, err := listReadmeFolders(cfg, nodeIDs, foldersToList, deadline)
+			listings, err := listReadmeFolders(ctx, cfg, nodeIDs, foldersToList)
 			if err != nil && isFirstRound {
 				return nil, err
 			}
@@ -532,7 +515,7 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 		if len(pickedPaths) == 0 {
 			break
 		}
-		files, err := readReadmeFiles(cfg, nodeIDs, pickedPaths, deadline)
+		files, err := readReadmeFiles(ctx, cfg, nodeIDs, pickedPaths)
 		if err != nil && isFirstRound {
 			return nil, err
 		}
@@ -566,13 +549,13 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 	return readmes, nil
 }
 
-// Lists the folders `foldersToList` (position in `nodeIDs` -> folders of that repository) with one query that ends by `deadline`.
+// Lists the folders `foldersToList` (position in `nodeIDs` -> folders of that repository) with one query.
 //
 // Returns:
 //   - Position -> the listing of each folder, in the same order.
 //     `nil` where GraphQL couldn't give the repository or the folder this time (for example, it went away after the first query)
 //   - An error if the query failed, as for `FetchReadmesByNodeIDs`
-func listReadmeFolders(cfg *Config, nodeIDs []string, foldersToList map[int][]*readmeFolder, deadline time.Time) (map[int][]*githubFolder, error) {
+func listReadmeFolders(ctx context.Context, cfg *Config, nodeIDs []string, foldersToList map[int][]*readmeFolder) (map[int][]*githubFolder, error) {
 	// Each folder has its own path, so each gets its own aliased field (`r<position>f<k>`) with its own path variable
 	fields := []string{}
 	params := []string{}
@@ -590,11 +573,7 @@ func listReadmeFolders(cfg *Config, nodeIDs []string, foldersToList map[int][]*r
 	var answers map[string]*struct { // Alias (`r<position>f<k>`) -> repository. `nil` if GraphQL can't give it
 		Object *githubFolder `json:"object"` // `nil` if the folder failed or is gone
 	}
-	timeLeft, err := timeLeftUntil(deadline)
-	if err != nil {
-		return nil, err
-	}
-	err = callGraphQL(cfg, folderQuery, variables, timeLeft, &answers)
+	err := callGraphQL(ctx, cfg, folderQuery, variables, &answers)
 	var folderErrs graphQLErrors // A repository or folder that failed is `nil`, and is asked again later
 	if err != nil && !errors.As(err, &folderErrs) {
 		return nil, err
@@ -617,12 +596,12 @@ type githubFile struct {
 	Text     *string `json:"text"`     // The text in UTF-8. `nil` for a binary file
 }
 
-// Reads the files at `pickedPaths` (position in `nodeIDs` -> path) with one query that ends by `deadline`.
+// Reads the files at `pickedPaths` (position in `nodeIDs` -> path) with one query.
 //
 // Returns:
 //   - Position -> the file. `nil` where GraphQL couldn't give the repository or the file is gone
 //   - An error if the query failed, as for `FetchReadmesByNodeIDs`
-func readReadmeFiles(cfg *Config, nodeIDs []string, pickedPaths map[int]string, deadline time.Time) (map[int]*githubFile, error) {
+func readReadmeFiles(ctx context.Context, cfg *Config, nodeIDs []string, pickedPaths map[int]string) (map[int]*githubFile, error) {
 	// Each repository needs its own file path, so each gets its own aliased field (`r<position>`) with its own variables
 	fields := []string{}
 	params := []string{}
@@ -637,11 +616,7 @@ func readReadmeFiles(cfg *Config, nodeIDs []string, pickedPaths map[int]string, 
 	var contents map[string]*struct { // Alias (`r<position>`) -> repository. `nil` if GraphQL can't give it
 		Object *githubFile `json:"object"` // `nil` if the file is gone
 	}
-	timeLeft, err := timeLeftUntil(deadline)
-	if err != nil {
-		return nil, err
-	}
-	err = callGraphQL(cfg, contentQuery, variables, timeLeft, &contents)
+	err := callGraphQL(ctx, cfg, contentQuery, variables, &contents)
 	var contentErrs graphQLErrors // A repository that failed is `nil`, and is asked again later
 	if err != nil && !errors.As(err, &contentErrs) {
 		return nil, err
@@ -694,12 +669,12 @@ type ReadmeSnapshotContent struct {
 // NOTE: The code leaves one file per item, but a hand edit of the DB repository can leave more.
 // A saved README wins over the absent marker, because a saved README is what this feature keeps.
 // Among several README files, the first by path is shown.
-func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error) {
-	commitSHA, err := readBranchCommit(cfg) // The tree sha isn't needed, so only the commit is read
+func ReadReadmeSnapshot(ctx context.Context, cfg *Config, itemID int64) (ReadmeSnapshotContent, error) {
+	commitSHA, err := readBranchCommit(ctx, cfg) // The tree sha isn't needed, so only the commit is read
 	if err != nil {
 		return ReadmeSnapshotContent{}, err
 	}
-	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, buildReadmeFolderPath(itemID))
+	snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, commitSHA, buildReadmeFolderPath(itemID))
 	if err != nil {
 		return ReadmeSnapshotContent{}, err
 	}
@@ -711,7 +686,7 @@ func ReadReadmeSnapshot(cfg *Config, itemID int64) (ReadmeSnapshotContent, error
 		if snapshot.isAbsent {
 			continue
 		}
-		content, err := readFileAt(cfg, snapshot.path, commitSHA)
+		content, err := readFileAt(ctx, cfg, snapshot.path, commitSHA)
 		if err != nil {
 			return ReadmeSnapshotContent{}, err
 		}
@@ -733,7 +708,7 @@ const readmeRefreshGroups = 61
 
 // Most READMEs written in one commit.
 // Making a tree of 300 files of 4.7KB took about 4 seconds, and 2,000 files took 18.6 seconds (measured).
-// This keeps one commit far below the request time limit (`githubTimeout`)
+// This keeps one commit far below the time limit of one GitHub request (`githubTimeout`)
 const maxReadmesPerCommit = 300
 
 // Number of `FetchReadmesByNodeIDs` calls sent at the same time during sync.
@@ -742,19 +717,20 @@ const maxReadmesPerCommit = 300
 // GitHub allows 60 seconds of GraphQL CPU time per minute (docs), so more at once could reach it
 const readmeFetchParallel = 3
 
-// Time kept before the deadline for the commit after the last README call of a batch.
+// Time kept before `endBy` of `SyncReadmeSnapshotsWithGitHub` for the commit after the last README call of a batch.
 // A commit of `maxReadmesPerCommit` READMEs makes a tree that took about 4 seconds (measured),
 // so this leaves room for a slow commit
 const readmeCommitReserve = 2 * githubTimeout
 
-// Brings the README snapshots of the archive in line with the READMEs on GitHub, until `deadline`.
+// Brings the README snapshots of the archive in line with the READMEs on GitHub, until `endBy`.
 //  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`), each in random order.
 //     Items in `skippedIDs` aren't asked
 //  2. Fetches up to `maxReadmesPerCommit` READMEs (`fetchReadmesInParallel`), and writes them in one commit (`writeFetchedReadmesInSingleCommit`)
 //  3. Goes on with the next batch while time is left
 //
 // Args:
-//   - `deadline`: A README call starts only if its first query can end `readmeCommitReserve` before this
+//   - `endBy`: Time after which this step fetches no more READMEs.
+//     A README call starts only if its first query can end `readmeCommitReserve` before this
 //   - `skippedIDs`: IDs of repositories that GitHub can't find now. Asking them would only make absent markers
 //   - `now`: Time that picks today's group. Taken as an argument so tests can set the day
 //
@@ -767,16 +743,16 @@ const readmeCommitReserve = 2 * githubTimeout
 // NOTE: Snapshots of items no longer in the archive are deleted in every commit it makes.
 // With nothing to check, it still makes one commit for them.
 // So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
-func SyncReadmeSnapshotsWithGitHub(cfg *Config, deadline time.Time, skippedIDs []int64, now time.Time) (int, error) {
-	commitSHA, err := readBranchCommit(cfg)
+func SyncReadmeSnapshotsWithGitHub(ctx context.Context, cfg *Config, endBy time.Time, skippedIDs []int64, now time.Time) (int, error) {
+	commitSHA, err := readBranchCommit(ctx, cfg)
 	if err != nil {
 		return 0, err
 	}
-	starItems, err := readItems[StarItem](cfg, StarItemsDBPath)
+	starItems, err := readItems[StarItem](ctx, cfg, StarItemsDBPath)
 	if err != nil {
 		return 0, err
 	}
-	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, ReadmesDBDir)
+	snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, commitSHA, ReadmesDBDir)
 	if err != nil {
 		return 0, err
 	}
@@ -802,18 +778,18 @@ func SyncReadmeSnapshotsWithGitHub(cfg *Config, deadline time.Time, skippedIDs [
 	rand.Shuffle(len(todaysItems), func(i int, j int) { todaysItems[i], todaysItems[j] = todaysItems[j], todaysItems[i] })
 	queue := append(uncheckedItems, todaysItems...)
 
-	fetchDeadline := deadline.Add(-readmeCommitReserve)
+	fetchEndBy := endBy.Add(-readmeCommitReserve) // Time by which the README calls of a batch end, so the commit has time left
 	checked := 0
 	for {
 		batch := queue[:min(maxReadmesPerCommit, len(queue))] // Can be empty: the commit still deletes the snapshots of removed items
-		fetched, stopErr := fetchReadmesInParallel(cfg, batch, fetchDeadline)
-		// A call can end right at `fetchDeadline`, so the time left can be a little under `readmeCommitReserve`.
+		fetched, stopErr := fetchReadmesInParallel(ctx, cfg, batch, fetchEndBy)
+		// A call can end right at `fetchEndBy`, so the time left can be a little under `readmeCommitReserve`.
 		// Half of it is still enough for the commit, and the READMEs fetched aren't thrown away
-		if time.Until(deadline) < readmeCommitReserve/2 {
+		if time.Until(endBy) < readmeCommitReserve/2 {
 			log.Printf("readmes: no time left to commit %d fetched READMEs", len(fetched))
 			return checked, nil
 		}
-		if err := writeFetchedReadmesInSingleCommit(cfg, fetched); err != nil {
+		if err := writeFetchedReadmesInSingleCommit(ctx, cfg, fetched); err != nil {
 			return checked, err
 		}
 		checked += len(fetched)
@@ -828,7 +804,7 @@ func SyncReadmeSnapshotsWithGitHub(cfg *Config, deadline time.Time, skippedIDs [
 	}
 }
 
-// Error for README calls that weren't sent because the time ran out
+// Error for README calls that weren't sent, or were cut, because the time ran out
 var errReadmesOutOfTime = errors.New("out of time")
 
 // Error for a batch whose README calls all failed.
@@ -836,19 +812,25 @@ var errReadmesOutOfTime = errors.New("out of time")
 var errReadmesAllFailed = errors.New("every README call of a batch failed")
 
 // Fetches the READMEs of the items `items`, `maxReadmeNodeIDs` in each `FetchReadmesByNodeIDs` call and `readmeFetchParallel` calls at a time.
-// A call starts only if its first query can end by `fetchDeadline` even when it waits the longest (`githubTimeout`).
+// A call starts only if its first query can end by `fetchEndBy` even when it waits the longest (`httpClient.Timeout`, that is `githubTimeout`).
+// A call still going at `fetchEndBy` is cut there.
 //
 // Returns:
 //   - The READMEs fetched: item ID -> README.
 //     An item that GitHub can't tell about now, or whose call failed, isn't in it, and is asked again later
-//   - Why it stopped before asking every item: `errReadmesOutOfTime`, or an error that wraps `errGitHubRateLimited`.
+//   - Why not every call was answered: `errReadmesOutOfTime` (not sent in time, or cut at `fetchEndBy`),
+//     or an error that wraps `errGitHubRateLimited`.
 //     `errReadmesAllFailed` if every call failed, so no more batches are asked.
-//     `nil` if every item was asked and at least one call succeeded
+//     `nil` if every call ended and at least one succeeded
 //
 // NOTE: A call usually has up to three queries in a row, each ending in a few seconds as a rule (measured).
-// One that runs past `fetchDeadline` fails, and its items are asked again later.
+// One cut at `fetchEndBy` counts as running out of time, not as a failure of GitHub, and its items are asked again later.
 // A failure about one repository isn't a failed call: GraphQL answers the others, and that one isn't fetched.
-func fetchReadmesInParallel(cfg *Config, items []StarItem, fetchDeadline time.Time) (map[int64]FetchedReadme, error) {
+func fetchReadmesInParallel(ctx context.Context, cfg *Config, items []StarItem, fetchEndBy time.Time) (map[int64]FetchedReadme, error) {
+	// `WithDeadline` makes a `ctx` with an earlier deadline, `fetchEndBy` (never later than the deadline of `ctx`).
+	// `cancel` frees its timer once the calls are done
+	fetchCtx, cancel := context.WithDeadline(ctx, fetchEndBy)
+	defer cancel()
 	groups := [][]StarItem{} // `items` split into the items of each call
 	for start := 0; start < len(items); start += maxReadmeNodeIDs {
 		groups = append(groups, items[start:min(start+maxReadmeNodeIDs, len(items))])
@@ -867,7 +849,7 @@ func fetchReadmesInParallel(cfg *Config, items []StarItem, fetchDeadline time.Ti
 			defer wg.Done()
 			for {
 				mu.Lock()
-				if stopErr == nil && next < len(groups) && time.Now().Add(githubTimeout).After(fetchDeadline) {
+				if stopErr == nil && next < len(groups) && time.Now().Add(httpClient.Timeout).After(fetchEndBy) {
 					stopErr = errReadmesOutOfTime
 				}
 				if stopErr != nil || next >= len(groups) {
@@ -882,12 +864,18 @@ func fetchReadmesInParallel(cfg *Config, items []StarItem, fetchDeadline time.Ti
 				for i, item := range group {
 					nodeIDs[i] = item.NodeID
 				}
-				readmes, err := FetchReadmesByNodeIDs(cfg, nodeIDs, fetchDeadline)
+				readmes, err := FetchReadmesByNodeIDs(fetchCtx, cfg, nodeIDs)
 				mu.Lock()
 				switch {
 				case errors.Is(err, errGitHubRateLimited):
 					if stopErr == nil {
 						stopErr = err
+					}
+				case err != nil && fetchCtx.Err() != nil:
+					// Cut at the deadline: the time ran out, which says nothing about GitHub.
+					// It is told by `fetchCtx`, because a single slow request (`githubTimeout`) gives the same error
+					if stopErr == nil {
+						stopErr = errReadmesOutOfTime
 					}
 				case err != nil:
 					failed++
@@ -916,8 +904,8 @@ func fetchReadmesInParallel(cfg *Config, items []StarItem, fetchDeadline time.Ti
 // Writes the READMEs `fetched` in one commit, and deletes in it the snapshots of items no longer in the archive.
 // It reads the archive and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
 // Nothing is committed if nothing changes.
-func writeFetchedReadmesInSingleCommit(cfg *Config, fetched map[int64]FetchedReadme) error {
-	return UpdateFiles(cfg, []string{StarItemsDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+func writeFetchedReadmesInSingleCommit(ctx context.Context, cfg *Config, fetched map[int64]FetchedReadme) error {
+	return UpdateFiles(ctx, cfg, []string{StarItemsDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
 		starItems, err := decodeItems[StarItem](filesRead[StarItemsDBPath])
 		if err != nil {
 			return FileChangesCommit{}, err
@@ -926,7 +914,7 @@ func writeFetchedReadmesInSingleCommit(cfg *Config, fetched map[int64]FetchedRea
 		for _, item := range starItems {
 			isArchived[item.ID] = true
 		}
-		snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, commitSHA, ReadmesDBDir)
+		snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, commitSHA, ReadmesDBDir)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

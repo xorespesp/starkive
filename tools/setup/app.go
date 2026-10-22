@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
@@ -207,7 +208,7 @@ func checkDashboard(cfg *core.Config, site string) error {
 // The state is the value that checks that the start page and the returning request belong to this run.
 // These two paths don't look at the setup page's key cookie (terminal mode has no cookie).
 // It adds paths to the server, so call it only once per run.
-func createGitHubApp(u ui, server *localServer, cfg *core.Config, site string) (core.GitHubApp, error) {
+func createGitHubApp(ctx context.Context, u ui, server *localServer, cfg *core.Config, site string) (core.GitHubApp, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return core.GitHubApp{}, err
@@ -244,7 +245,7 @@ func createGitHubApp(u ui, server *localServer, cfg *core.Config, site string) (
 			http.Error(w, "This page wasn't opened by this setup run.", http.StatusBadRequest)
 			return
 		}
-		app, err := createGitHubAppFromCode(cfg, query.Get("code"))
+		app, err := createGitHubAppFromCode(ctx, cfg, query.Get("code"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if err != nil {
 			fmt.Fprintln(w, "Creating the app failed. Close this tab and see the setup tool.")

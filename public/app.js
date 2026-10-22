@@ -2066,7 +2066,7 @@ const SYNC_WATCH_MS = 5000;
 const SYNC_WATCH_SLOW_MS = 30 * 1000;
 
 // Time after which a followed run is read every `SYNC_WATCH_SLOW_MS` (milliseconds).
-// A sync stops starting requests after four minutes (`syncTimeLimit` on the server), so a run past this mostly waits in the queue
+// A sync call ends on the server within 290 seconds (`requestTimeLimit` in `core`), so a run past this mostly waits in the queue
 const SYNC_WATCH_SLOW_AFTER_MS = 5 * 60 * 1000;
 
 let syncWatch = null; // The loop of `watchSyncWorkflowRun` while it runs, including loading the archive again after a run. `null` otherwise

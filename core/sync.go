@@ -5,7 +5,7 @@
 package core
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -46,8 +46,8 @@ var lastPageLink = regexp.MustCompile(`[?&]page=(\d+)>; rel="last"`)
 // NOTE: Each page can be read on its own.
 // So even thousands of Stars can be split into several requests and read at the same time.
 // In the dashboard, one request becomes one GitHub call, so it stays within the function time limit.
-func FetchStarredPage(cfg *Config, page int) ([]StarredRepo, int, error) {
-	res, err := CallGitHubAPI(cfg, fmt.Sprintf("/user/starred?per_page=%d&page=%d", StarsPerPage, page),
+func FetchStarredPage(ctx context.Context, cfg *Config, page int) ([]StarredRepo, int, error) {
+	res, err := CallGitHubAPI(ctx, cfg, fmt.Sprintf("/user/starred?per_page=%d&page=%d", StarsPerPage, page),
 		GitHubAPIRequest{Accept: "application/vnd.github.star+json"})
 	if err != nil {
 		return nil, 0, err
@@ -57,7 +57,7 @@ func FetchStarredPage(cfg *Config, page int) ([]StarredRepo, int, error) {
 		return nil, 0, err
 	}
 	starredRepos := []StarredRepo{}
-	if err := json.NewDecoder(res.Body).Decode(&starredRepos); err != nil {
+	if err := DecodeGitHubAnswer(res, &starredRepos); err != nil {
 		return nil, 0, err
 	}
 	lastPage := page // If the `Link` header has no `rel="last"`, this is the last page
@@ -80,8 +80,8 @@ const starredPagesParallel = 6
 //
 // NOTE: If Stars are added or removed while reading, the page boundaries shift.
 // Then the same repository can come on two pages, so duplicates are removed by repository ID.
-func FetchAllStarredRepos(cfg *Config) ([]StarredRepo, error) {
-	first, lastPage, err := FetchStarredPage(cfg, 1)
+func FetchAllStarredRepos(ctx context.Context, cfg *Config) ([]StarredRepo, error) {
+	first, lastPage, err := FetchStarredPage(ctx, cfg, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func FetchAllStarredRepos(cfg *Config) ([]StarredRepo, error) {
 				if page > lastPage {
 					return
 				}
-				pages[page-1], _, errs[page-1] = FetchStarredPage(cfg, page) // Each page has its own slot, so writing without a lock doesn't overlap
+				pages[page-1], _, errs[page-1] = FetchStarredPage(ctx, cfg, page) // Each page has its own slot, so writing without a lock doesn't overlap
 			}
 		}()
 	}
@@ -146,7 +146,7 @@ type githubStarListItems struct {
 // So the result is turned around.
 // Star lists and the repositories in them both come 100 at a time.
 // So both are read until there is no next batch.
-func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
+func FetchGitHubStarListsByRepo(ctx context.Context, cfg *Config) (map[int64][]string, error) {
 	// Reads my GitHub star lists and the first 100 repositories in each.
 	// If there are more than 100 star lists, reading continues with `$after`
 	const listsQuery = `query($after: String) {
@@ -195,7 +195,7 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 				} `json:"lists"`
 			} `json:"viewer"`
 		}
-		if err := callGraphQL(cfg, listsQuery, map[string]any{"after": after}, 0, &data); err != nil {
+		if err := callGraphQL(ctx, cfg, listsQuery, map[string]any{"after": after}, &data); err != nil {
 			return nil, err
 		}
 		for _, githubStarList := range data.Viewer.Lists.Nodes {
@@ -206,7 +206,7 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 						Items githubStarListItems `json:"items"`
 					} `json:"node"`
 				}
-				if err := callGraphQL(cfg, itemsQuery, map[string]any{"id": githubStarList.ID, "after": page.PageInfo.EndCursor}, 0, &more); err != nil {
+				if err := callGraphQL(ctx, cfg, itemsQuery, map[string]any{"id": githubStarList.ID, "after": page.PageInfo.EndCursor}, &more); err != nil {
 					return nil, err
 				}
 				page = more.Node.Items
@@ -242,13 +242,13 @@ func FetchGitHubStarListsByRepo(cfg *Config) (map[int64][]string, error) {
 // So sending the same request again gives the same result.
 // Star lists are made only when there are items to add.
 // No item points to a star list that doesn't exist.
-func ArchiveStarredRepos(cfg *Config, starredRepos []StarredRepo, starListIDs []int64, commitPrefix string) (int, error) {
+func ArchiveStarredRepos(ctx context.Context, cfg *Config, starredRepos []StarredRepo, starListIDs []int64, commitPrefix string) (int, error) {
 	// GitHub star lists are read only when there are new repositories to add (most daily syncs have none).
 	// They aren't read again when `change` is called again after a conflict.
 	// They are input from GitHub, not the archive, so another commit doesn't make them stale
 	var githubStarLists map[int64][]string
 	added := 0
-	_, err := UpdateArchive(cfg, func(a *Archive) (CommitMessage, error) {
+	_, err := UpdateArchive(ctx, cfg, func(a *Archive) (CommitMessage, error) {
 		added = 0 // If called again after a conflict, count again from zero
 		// Both the star list check and the duplicate check below use the archive right before the commit (`a`)
 		requested, err := a.CheckStarListIDs(starListIDs)
@@ -263,7 +263,7 @@ func ArchiveStarredRepos(cfg *Config, starredRepos []StarredRepo, starListIDs []
 			return CommitMessage{}, nil // Nothing to add. No file changed, so no commit is made
 		}
 		if githubStarLists == nil {
-			if githubStarLists, err = FetchGitHubStarListsByRepo(cfg); err != nil {
+			if githubStarLists, err = FetchGitHubStarListsByRepo(ctx, cfg); err != nil {
 				return CommitMessage{}, err
 			}
 		}
@@ -308,14 +308,16 @@ type SyncResult struct {
 
 // Brings the archive in line with GitHub.
 //  1. Adds my GitHub Stars that aren't in the archive (`ArchiveStarredRepos`)
-//  2. Refreshes the metadata snapshots within `metaRefreshBudget`, or the time left before `deadline` if that is shorter (`RefreshMeta`)
-//  3. Refreshes the README snapshots with the time left before `deadline` (`SyncReadmeSnapshotsWithGitHub`).
+//  2. Refreshes the metadata snapshots within `metaRefreshBudget`, or the time left before `longStepsEndBy` if that is shorter (`RefreshMeta`)
+//  3. Refreshes the README snapshots with the time left before `longStepsEndBy` (`SyncReadmeSnapshotsWithGitHub`).
 //     Repositories that the metadata step found missing aren't asked. If that step failed, none are skipped
 //
 // Args:
-//   - `deadline`: Time after which the metadata and README steps start no new request.
+//   - `ctx`: Deadline of the whole sync. Every request, commits included, ends by it
+//   - `longStepsEndBy`: Time after which the metadata and README steps fetch nothing more from GitHub, earlier than the deadline of `ctx`.
+//     A commit or read they start before it can end after it, by the deadline of `ctx`.
 //     They leave what is left for the next sync.
-//     Adding new Stars doesn't check it
+//     Adding new Stars doesn't check it, but its requests end by the deadline of `ctx`
 //
 // Returns:
 //   - The counts (`SyncResult`). Even if a step failed, the counts of the steps that succeeded are filled in
@@ -327,15 +329,15 @@ type SyncResult struct {
 // Each run compares all Stars with the archive.
 // So overlapping runs or a skipped day give the same result.
 // GitHub Stars are never changed.
-func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
+func Sync(ctx context.Context, cfg *Config, longStepsEndBy time.Time) (SyncResult, error) {
 	result := SyncResult{}
 	var errs []error
 	stepStart := time.Now() // Start of the current step, for the step times in the log
 
-	starredRepos, err := FetchAllStarredRepos(cfg)
+	starredRepos, err := FetchAllStarredRepos(ctx, cfg)
 	if err == nil {
 		result.NumStarredRepos = len(starredRepos)
-		result.NumAddedRepos, err = ArchiveStarredRepos(cfg, starredRepos, []int64{}, "sync(star-items)")
+		result.NumAddedRepos, err = ArchiveStarredRepos(ctx, cfg, starredRepos, []int64{}, "sync(star-items)")
 	}
 	if err != nil {
 		errs = append(errs, fmt.Errorf("archive new stars: %w", err)) // Wrapped with `%w`, so `errors.As` still finds the inner error (`HTTPError`, `GitHubAPIError`)
@@ -343,7 +345,7 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	starsTime := time.Since(stepStart)
 	stepStart = time.Now()
 
-	meta, err := RefreshMeta(cfg, min(metaRefreshBudget, time.Until(deadline))) // `min`: built into Go since 1.21
+	meta, err := RefreshMeta(ctx, cfg, min(metaRefreshBudget, time.Until(longStepsEndBy))) // `min`: built into Go since 1.21
 	if err == nil {
 		result.NumMetaCheckedRepos, result.NumUnavailableRepos = meta.NumCheckedRepos, len(meta.UnavailableRepoIDs)
 	} else {
@@ -352,7 +354,7 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	metaTime := time.Since(stepStart)
 	stepStart = time.Now()
 
-	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(cfg, deadline, meta.UnavailableRepoIDs, time.Now())
+	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(ctx, cfg, longStepsEndBy, meta.UnavailableRepoIDs, time.Now())
 	if err != nil {
 		errs = append(errs, fmt.Errorf("refresh readmes: %w", err))
 	}

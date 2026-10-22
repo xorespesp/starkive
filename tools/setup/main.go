@@ -46,6 +46,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -138,6 +139,7 @@ func buildTokenURL(repoName string) string {
 // On failure it always points to two places to check "if GitHub refused the token" (repository selection and permissions).
 // This is because it can't tell for sure which error is that case
 func main() {
+	ctx := context.Background() // No deadline: a person waits for the setup tool, and each GitHub request still gives up after 20 seconds
 	headless := flag.Bool("headless", false, "run the setup headless, in the terminal")
 	version := flag.Bool("version", false, "print the version information")
 	flag.Parse()
@@ -154,7 +156,7 @@ func main() {
 	if err == nil {
 		// Printed before the GitHub check, so the user knows what goes to Vercel even if the check fails
 		fmt.Println("Vercel deploy source: " + vercelDeployCommit.buildTreeURL())
-		err = checkVercelDeployCommit(readGitHubAPIURL(), vercelDeployCommit)
+		err = checkVercelDeployCommit(ctx, readGitHubAPIURL(), vercelDeployCommit)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())
@@ -185,7 +187,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = run(u, server, vercelDeployCommit)
+	err = run(ctx, u, server, vercelDeployCommit)
 	if err != nil {
 		lines := []string{
 			"Setup stopped: " + err.Error(),
@@ -226,7 +228,7 @@ func main() {
 // If the App were created while permissions are missing, an unusable App would be left on GitHub.
 // The workflow itself is installed last, after the dashboard address is recorded in `config.json`.
 // That way, the address to call already exists when the workflow runs for the first time.
-func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
+func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit commitRef) error {
 	// 1. Archive name, DB repository and its token, repository preparation and sync key.
 	// The owner (username) isn't known before the token is entered, so only the repository name is decided first
 	u.step(1)
@@ -262,26 +264,26 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 		GitHubAPI:         readGitHubAPIURL(),
 		GitHubWeb:         strings.TrimRight(readEnv("STARKIVE_GH_WEB_URL", "https://github.com"), "/"),
 	}
-	owner, err := core.FetchTokenOwner(cfg)
+	owner, err := core.FetchTokenOwner(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	u.say("Token owner: `" + owner.Login + "`, the only account that can sign in to the dashboard.")
-	public, err := lookUpRepo(cfg, owner.Login+"/"+repoName)
+	public, err := lookUpRepo(ctx, cfg, owner.Login+"/"+repoName)
 	if err != nil {
 		return err
 	}
-	state, err := core.ResolveDBRepo(cfg)
+	state, err := core.ResolveDBRepo(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	if public {
 		u.note("This repository is public, so anyone can read your archive. Only you and the dashboard can change it.")
 	}
-	if err := checkStarring(cfg); err != nil {
+	if err := checkStarring(ctx, cfg); err != nil {
 		return err
 	}
-	publicKey, err := readSecretsPublicKey(cfg)
+	publicKey, err := readSecretsPublicKey(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -289,26 +291,26 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	case core.DBRepoForeign:
 		return core.ErrDBRepoNotStarkive
 	case core.DBRepoEmpty:
-		if err := initializeDBRepo(cfg); err != nil {
+		if err := initializeDBRepo(ctx, cfg); err != nil {
 			return err
 		}
 		u.say("Initialized the empty repository.")
 	default:
 		u.say("`" + cfg.DBRepoFullName + "` is already a starkive archive. Setting it up again; your data stays as it is.")
 	}
-	if err := addInitialFiles(cfg); err != nil {
+	if err := addInitialFiles(ctx, cfg); err != nil {
 		return err
 	}
-	if err := checkWorkflowsPermission(cfg); err != nil { // Check permissions before creating the App
+	if err := checkWorkflowsPermission(ctx, cfg); err != nil { // Check permissions before creating the App
 		return err
 	}
-	if err := checkActionsPermission(cfg); err != nil {
+	if err := checkActionsPermission(ctx, cfg); err != nil {
 		return err
 	}
 
 	// Sync key.
 	// A secret value can't be read back and compared, so it is overwritten every time (the same token gives the same value)
-	if err := writeSecret(cfg, publicKey, core.SyncKeySecretName, core.DeriveSyncKey(cfg)); err != nil {
+	if err := writeSecret(ctx, cfg, publicKey, core.SyncKeySecretName, core.DeriveSyncKey(cfg)); err != nil {
 		return err
 	}
 	u.say("Stored the sync key in the repository's secrets.")
@@ -323,7 +325,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	// The tool can't tell them apart, so it explains both ways.
 	// (If it is from an earlier run, creating another one with the same name doesn't get the default address.)
 	u.step(2)
-	app, appStatus, err := core.LoadGitHubApp(cfg)
+	app, appStatus, err := core.LoadGitHubApp(ctx, cfg)
 	if err != nil { // If the config file is broken (`core.ErrConfigBroken`), neither the App nor the dashboard address can be used. So stop here, before the person creates anything on GitHub
 		return err
 	}
@@ -370,14 +372,14 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 		previous := app
 		u.say("Next, create a GitHub App that lets you sign in to the dashboard with your GitHub account. It gets no access to your repositories or account data.")
 		u.note("On GitHub's page, review the app and click Create GitHub App. Leave the name and the other settings as they are.")
-		created, err := createGitHubApp(u, server, cfg, site)
+		created, err := createGitHubApp(ctx, u, server, cfg, site)
 		if err != nil {
 			return err
 		}
 		// If it can't be saved (including when another run saved one first), the App just created isn't used.
 		// So tell the person to delete it, and stop.
 		// Running again skips this step, because a saved App exists
-		if err := core.SaveGitHubApp(cfg, created); err != nil {
+		if err := core.SaveGitHubApp(ctx, cfg, created); err != nil {
 			return fmt.Errorf("%w. The app just created isn't used. Delete it: https://github.com/settings/apps/%s", err, created.Slug)
 		}
 		app = created
@@ -391,7 +393,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	// 4. Record the dashboard address and install the workflow if it is missing.
 	// The workflow comes last, so the address to call is already recorded when it first runs
 	u.step(4)
-	if err := finishDBRepo(cfg, app.SiteURL); err != nil {
+	if err := finishDBRepo(ctx, cfg, app.SiteURL); err != nil {
 		return err
 	}
 	u.say("The sync workflow is set up in `" + cfg.DBRepoFullName + "`.")
@@ -424,12 +426,12 @@ func readGitHubAPIURL() string {
 //   - If the token can't see it (not created, created with another name, or private and not selected by the token),
 //     an error that explains all these cases together.
 //     GitHub answers 404 for all of them (docs: a private repository without read access is also 404)
-func lookUpRepo(cfg *core.Config, fullName string) (public bool, err error) {
+func lookUpRepo(ctx context.Context, cfg *core.Config, fullName string) (public bool, err error) {
 	var repo struct {
 		ID      int64 `json:"id"`      // Repository ID
 		Private bool  `json:"private"` // Whether it is a private repository
 	}
-	err = getGitHubJSON(cfg, "/repos/"+fullName, &repo)
+	err = getGitHubJSON(ctx, cfg, "/repos/"+fullName, &repo)
 	var githubErr *core.GitHubAPIError
 	if errors.As(err, &githubErr) && githubErr.Status == http.StatusNotFound { // `errors.As`: if the error is that type, takes it out into the variable (like `dynamic_cast`)
 		owner, _, _ := strings.Cut(fullName, "/")
@@ -449,8 +451,8 @@ func lookUpRepo(cfg *core.Config, fullName string) (public bool, err error) {
 // Checks that the token can read the account's Stars (Starring read permission).
 // The dashboard's Import and sync read Stars with this permission.
 // Without the permission, it returns GitHub's 403 error as is (the needed permission is added to the message)
-func checkStarring(cfg *core.Config) error {
-	res, err := core.CallGitHubAPI(cfg, "/user/starred?per_page=1", core.GitHubAPIRequest{})
+func checkStarring(ctx context.Context, cfg *core.Config) error {
+	res, err := core.CallGitHubAPI(ctx, cfg, "/user/starred?per_page=1", core.GitHubAPIRequest{})
 	if err != nil {
 		return err
 	}

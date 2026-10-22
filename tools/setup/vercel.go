@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -143,10 +144,10 @@ func parseGitRemoteURL(remote string) (string, error) {
 // If the copy fails, only an empty repository with the dashboard name is left (measured).
 // So the setup stops here, before the person creates a repository and a token.
 // Without authentication, a private repository gives the same 404 as a repository that doesn't exist.
-func checkVercelDeployCommit(apiBase string, vercelDeployCommit commitRef) error {
+func checkVercelDeployCommit(ctx context.Context, apiBase string, vercelDeployCommit commitRef) error {
 	isStampedBuild := stampedVercelDeployRepoURL != "" // Release executables are stamped, so the user can't fix this with git
 	fullName := strings.TrimPrefix(vercelDeployCommit.url, "https://github.com/")
-	status, err := readPublicGitHubStatus(apiBase + "/repos/" + fullName)
+	status, err := readPublicGitHubStatus(ctx, apiBase+"/repos/"+fullName)
 	if err != nil {
 		return err
 	}
@@ -157,7 +158,7 @@ func checkVercelDeployCommit(apiBase string, vercelDeployCommit commitRef) error
 		}
 		return fmt.Errorf("couldn't find %s as a public repository on GitHub. The Vercel Deploy link can only copy a public repository: %s", vercelDeployCommit.url, advice)
 	}
-	status, err = readPublicGitHubStatus(apiBase + "/repos/" + fullName + "/commits/" + vercelDeployCommit.sha)
+	status, err = readPublicGitHubStatus(ctx, apiBase+"/repos/"+fullName+"/commits/"+vercelDeployCommit.sha)
 	if err != nil {
 		return err
 	}
@@ -172,8 +173,8 @@ func checkVercelDeployCommit(apiBase string, vercelDeployCommit commitRef) error
 
 // Sends a GET to the GitHub API address `target` without authentication and returns the status code.
 // For an answer other than 200, 404 or 422, it returns GitHub's error as is
-func readPublicGitHubStatus(target string) (int, error) {
-	req, err := http.NewRequest(http.MethodGet, target, nil)
+func readPublicGitHubStatus(ctx context.Context, target string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return 0, err
 	}

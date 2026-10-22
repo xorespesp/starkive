@@ -2,6 +2,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -51,9 +52,10 @@ func startFakeTreeAPI(t *testing.T) (*Config, *atomic.Int32) {
 //   - A list that GitHub cut short is an error (502)
 //   - A folder path that isn't clean is refused before any request
 func TestReadBlobSHAsInFolder(t *testing.T) {
+	ctx := context.Background()
 	cfg, requests := startFakeTreeAPI(t)
 
-	got, err := readBlobSHAsInFolder(cfg, "c1", "db/readmes/45")
+	got, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/readmes/45")
 	want := map[string]string{
 		"db/readmes/45/12345.md":      "a",
 		"db/readmes/45/345.no-readme": "b",
@@ -64,17 +66,17 @@ func TestReadBlobSHAsInFolder(t *testing.T) {
 		t.Errorf("folder: %v, %v", got, err)
 	}
 
-	if got, err := readBlobSHAsInFolder(cfg, "c1", "db/missing"); err != nil || got == nil || len(got) != 0 {
+	if got, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/missing"); err != nil || got == nil || len(got) != 0 {
 		t.Errorf("missing folder: %v, %v", got, err)
 	}
 
 	var httpErr *HTTPError
-	if _, err := readBlobSHAsInFolder(cfg, "c1", "db/huge"); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway {
+	if _, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/huge"); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway {
 		t.Errorf("cut short list: %v", err)
 	}
 
 	requestsBefore := requests.Load()
-	if _, err := readBlobSHAsInFolder(cfg, "c1", "db/readmes/"); err == nil || requests.Load() != requestsBefore {
+	if _, err := readBlobSHAsInFolder(ctx, cfg, "c1", "db/readmes/"); err == nil || requests.Load() != requestsBefore {
 		t.Errorf("folder path not clean: %v, requests %d -> %d", err, requestsBefore, requests.Load())
 	}
 }
@@ -145,5 +147,33 @@ func TestGitBlobSHA(t *testing.T) {
 	}
 	if got := gitBlobSHA([]byte("hello\n")); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
 		t.Errorf("hello: %s", got)
+	}
+}
+
+// Tests that a file whose body stops partway is a 502, like an answer that never came (`readFileAt`).
+// The server promises more bytes than it sends, so the connection closes in the middle of the body
+func TestReadFileCutInTheBodyIsBadGateway(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		fmt.Fprint(w, "partial")
+	}))
+	t.Cleanup(server.Close)
+	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoBranch: "main", DBRepoAccessToken: "test-token"}
+	if content, err := ReadFile(ctx, cfg, StarItemsDBPath); content != nil || !isBadGateway(err) {
+		t.Errorf("body cut: %q, %v", content, err)
+	}
+}
+
+// Tests that a REST answer that isn't the expected JSON is a 502, like any GitHub failure (`callRepoAPI`, `DecodeGitHubAnswer`)
+func TestUnreadableRESTAnswerIsBadGateway(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<html>Unicorn!</html>")
+	}))
+	t.Cleanup(server.Close)
+	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoBranch: "main", DBRepoAccessToken: "test-token"}
+	if _, err := readBranchCommit(ctx, cfg); !isBadGateway(err) {
+		t.Errorf("HTML answer: %v", err)
 	}
 }

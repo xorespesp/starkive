@@ -2,6 +2,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,12 +15,14 @@ import (
 //   - An answer with `data` and errors (a partial result) fills the value and returns `graphQLErrors`,
 //     which tells a node that wasn't found from a node that failed for another reason, and from an error elsewhere.
 //     For a caller that doesn't take it out, it is still a 502 `HTTPError`
-//   - An answer with no `data` is a 502 `HTTPError`, not a partial result
+//   - An answer with no `data` is a 502 `HTTPError`, not a partial result.
+//     So is an answer that isn't JSON, or whose `data` has another shape
 //   - A rate limit answered with 200 and an error, or with 403, wraps `errGitHubRateLimited`.
 //     The one answered with 200 is also a 502 `HTTPError`, and the 403 one keeps GitHub's status.
 //     The last point used with no error is still a success
 //   - Any other HTTP failure is a `GitHubAPIError` that doesn't wrap `errGitHubRateLimited`
 func TestCallGraphQL(t *testing.T) {
+	ctx := context.Background()
 	var answer func(w http.ResponseWriter) // What the server answers. Set by each case
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/graphql" || r.Method != http.MethodPost {
@@ -38,7 +41,7 @@ func TestCallGraphQL(t *testing.T) {
 
 	answer = func(w http.ResponseWriter) { fmt.Fprint(w, `{"data":{"nodes":[{"name":"a"}]}}`) }
 	var full nodesData
-	if err := callGraphQL(cfg, "query", nil, 0, &full); err != nil || len(full.Nodes) != 1 || full.Nodes[0].Name != "a" {
+	if err := callGraphQL(ctx, cfg, "query", nil, &full); err != nil || len(full.Nodes) != 1 || full.Nodes[0].Name != "a" {
 		t.Errorf("data only: %v, %+v", err, full)
 	}
 	answer = func(w http.ResponseWriter) { // The query that used the last point
@@ -46,7 +49,7 @@ func TestCallGraphQL(t *testing.T) {
 		fmt.Fprint(w, `{"data":{"nodes":[{"name":"a"}]}}`)
 	}
 	var last nodesData
-	if err := callGraphQL(cfg, "query", nil, 0, &last); err != nil || len(last.Nodes) != 1 {
+	if err := callGraphQL(ctx, cfg, "query", nil, &last); err != nil || len(last.Nodes) != 1 {
 		t.Errorf("last point with no error: %v, %+v", err, last)
 	}
 
@@ -57,7 +60,7 @@ func TestCallGraphQL(t *testing.T) {
 			{"type":"FORBIDDEN","path":["nodes",2],"message":"Resource protected by organization SAML enforcement"}]}`)
 	}
 	var partial nodesData
-	err := callGraphQL(cfg, "query", nil, 0, &partial)
+	err := callGraphQL(ctx, cfg, "query", nil, &partial)
 	var nodeErrs graphQLErrors
 	var httpErr *HTTPError
 	if !errors.As(err, &nodeErrs) || len(partial.Nodes) != 3 || partial.Nodes[0].Name != "a" || partial.Nodes[1] != nil {
@@ -87,6 +90,12 @@ func TestCallGraphQL(t *testing.T) {
 		{"null data and no errors", func(w http.ResponseWriter) {
 			fmt.Fprint(w, `{"data":null}`)
 		}, false, http.StatusBadGateway, 0},
+		{"not JSON", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `<html>Unicorn!</html>`)
+		}, false, http.StatusBadGateway, 0},
+		{"data of another shape", func(w http.ResponseWriter) {
+			fmt.Fprint(w, `{"data":{"nodes":"a"}}`)
+		}, false, http.StatusBadGateway, 0},
 		{"rate limit with 200", func(w http.ResponseWriter) {
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			fmt.Fprint(w, `{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
@@ -112,7 +121,7 @@ func TestCallGraphQL(t *testing.T) {
 	for _, c := range cases {
 		answer = c.answer
 		var data nodesData
-		err := callGraphQL(cfg, "query", nil, 0, &data)
+		err := callGraphQL(ctx, cfg, "query", nil, &data)
 		var nodeErrs graphQLErrors
 		var httpErr *HTTPError
 		status := 0

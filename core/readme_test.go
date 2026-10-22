@@ -3,15 +3,18 @@ package core
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -114,8 +117,9 @@ func TestFetchedReadmePath(t *testing.T) {
 // Tests that `readReadmeSnapshotsInFolder` keeps only the README snapshots of a folder listing.
 // The file that isn't a README and the file in a subfolder of the listing are left out
 func TestReadReadmeSnapshotsInFolder(t *testing.T) {
+	ctx := context.Background()
 	cfg, _ := startFakeTreeAPI(t)
-	snapshotsByID, err := readReadmeSnapshotsInFolder(cfg, "c1", "db/readmes/45")
+	snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, cfg, "c1", "db/readmes/45")
 	want := map[int64][]readmeSnapshot{
 		12345: {{path: "db/readmes/45/12345.md", blobSHA: "a"}},
 		345:   {{path: "db/readmes/45/345.no-readme", blobSHA: "b", isAbsent: true}},
@@ -129,14 +133,15 @@ func TestReadReadmeSnapshotsInFolder(t *testing.T) {
 //   - Item 12345 shares its folder with item 345 and other files, and gets only its own README
 //   - An item whose folder doesn't exist gets no path
 func TestReadReadmeSnapshotPaths(t *testing.T) {
+	ctx := context.Background()
 	cfg, requests := startFakeTreeAPI(t)
 
-	paths, err := readReadmeSnapshotPaths(cfg, "c1", 12345)
+	paths, err := readReadmeSnapshotPaths(ctx, cfg, "c1", 12345)
 	if want := []string{"db/readmes/45/12345.md"}; err != nil || !slices.Equal(paths, want) || requests.Load() != 1 {
 		t.Errorf("item 12345: %q, %v, requests %d", paths, err, requests.Load())
 	}
 
-	if paths, err := readReadmeSnapshotPaths(cfg, "c1", 7); err != nil || len(paths) != 0 || requests.Load() != 2 {
+	if paths, err := readReadmeSnapshotPaths(ctx, cfg, "c1", 7); err != nil || len(paths) != 0 || requests.Load() != 2 {
 		t.Errorf("item with no folder: %q, %v, requests %d", paths, err, requests.Load())
 	}
 }
@@ -235,7 +240,8 @@ type testReadmeRepo struct {
 //     or one in the next folder (listing `docs` if needed), and with none left the README is absent.
 //     A repository whose last README is found binary by the last content query is absent.
 //     A repository with a pick still unread after `maxReadmeContentQueries` content queries gives `nil`.
-//     If a later query fails, the READMEs already read are kept and the repositories still left give `nil`
+//     If a later query fails, the READMEs already read are kept and the repositories still left give `nil`.
+//     A repository whose next folder listing is cut (as at the deadline of `ctx`) gives `nil` too, not absent
 //   - An ID that isn't a repository, a README whose content query alone failed,
 //     a repository with an error inside it (a folder that failed), a repository gone before a later folder listing,
 //     and a file gone before the content query give `nil`, so they are asked again later.
@@ -244,8 +250,10 @@ type testReadmeRepo struct {
 //   - A rate limit passes through as an error that wraps `errGitHubRateLimited` (each kind is tested in `TestCallGraphQL`).
 //     A failed query, an answer with no data and an answer whose node count doesn't match are errors that don't wrap it.
 //     The whole call fails even when only a later folder listing or the content query fails
-//   - A call whose deadline has passed fails with `errDeadlinePassed`, and a query still waiting at the deadline fails then
+//   - A call whose deadline has passed fails at once, and a query still waiting at the deadline fails then.
+//     Both fail with a 502 that wraps `context.DeadlineExceeded`
 func TestFetchReadmesByNodeIDs(t *testing.T) {
+	ctx := context.Background()
 	longReadme := strings.Repeat(strings.Repeat("y", 99)+"\n", 100) // 10KB
 	repos := map[string]testReadmeRepo{
 		"R_md":       {root: []string{"LICENSE", "README.md"}, texts: map[string]string{"README.md": "# MD\n"}},
@@ -285,6 +293,7 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 	var failWith func(w http.ResponseWriter) // If not `nil`, every query is answered with it
 	failQuery := ""                          // Kind of the query that `failWith` answers. Empty for every kind
 	failContentFrom := 0                     // If not 0, content queries from this one on (counting from 1) fail with 502
+	var cutLaterFolders context.CancelFunc   // If not `nil`, a folder query after a content query calls it and waits with no answer, as at the deadline
 	queries := []string{}                    // Kind of each query received: `listing`, `folders` or `content`
 	foldersAsked := []string{}               // `<ID>:<folder path>` of each folder listed after the first query
 	var query string                         // The query being answered. Only the fields it asks for are given, as GitHub does
@@ -386,6 +395,14 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
 			return
 		}
+		if kind == "folders" && cutLaterFolders != nil && countOf(queries, "content") > 0 {
+			cutLaterFolders()
+			select { // The caller gives up when its `ctx` ends, which closes the connection
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
 		if !isEveryGraphQLVariableDeclared(query) {
 			fmt.Fprint(w, `{"data":null,"errors":[{"message":"Variable is not declared, is declared with another type, or is declared but not used"}]}`)
 			return
@@ -473,7 +490,7 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := &Config{GitHubAPI: server.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
 
-	got, err := FetchReadmesByNodeIDs(cfg, ids, time.Now().Add(githubTimeout))
+	got, err := FetchReadmesByNodeIDs(ctx, cfg, ids)
 	wantLong, _ := buildReadmeSnapshotFile(longReadme)
 	absent := &FetchedReadme{isAbsent: true}
 	want := []*FetchedReadme{
@@ -511,18 +528,31 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 	}
 
 	queries = nil
-	if got, err := FetchReadmesByNodeIDs(cfg, []string{"R_gone", "U_user"}, time.Now().Add(githubTimeout)); err != nil ||
+	if got, err := FetchReadmesByNodeIDs(ctx, cfg, []string{"R_gone", "U_user"}); err != nil ||
 		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{absent, nil})) || !slices.Equal(queries, []string{"listing"}) {
 		t.Errorf("nothing to read: %v, %v, queries %v", derefReadmes(got), err, queries)
 	}
 
 	// The second content query fails: the README read in the first is kept, and the repository still left gives `nil`
 	queries, failContentFrom = nil, 2
-	if got, err := FetchReadmesByNodeIDs(cfg, []string{"R_md", "R_binNext"}, time.Now().Add(githubTimeout)); err != nil ||
+	if got, err := FetchReadmesByNodeIDs(ctx, cfg, []string{"R_md", "R_binNext"}); err != nil ||
 		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{{extension: "md", content: []byte("# MD\n")}, nil})) {
 		t.Errorf("later query fails: %v, %v, queries %v", derefReadmes(got), err, queries)
 	}
 	failContentFrom = 0
+
+	// The `docs` listing after a binary pick is cut, as at the deadline of `ctx`.
+	// `R_binDocs` still has `docs` to look in, so it gives `nil`.
+	// `R_binary` has no folder left, so it is absent without that listing
+	cutCtx, cut := context.WithCancel(ctx)
+	defer cut()
+	queries, cutLaterFolders = nil, cut
+	if got, err := FetchReadmesByNodeIDs(cutCtx, cfg, []string{"R_md", "R_binary", "R_binDocs"}); err != nil ||
+		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{{extension: "md", content: []byte("# MD\n")}, absent, nil})) ||
+		!slices.Equal(queries, []string{"listing", "content"}) {
+		t.Errorf("later folder listing cut: %v, %v, queries %v", derefReadmes(got), err, queries)
+	}
+	cutLaterFolders = nil
 
 	errorCases := []struct {
 		name          string
@@ -562,13 +592,15 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		failWith = c.answer
 		failQuery = c.query
 		mu.Unlock()
-		got, err := FetchReadmesByNodeIDs(cfg, []string{"R_md", "R_docs"}, time.Now().Add(githubTimeout))
+		got, err := FetchReadmesByNodeIDs(ctx, cfg, []string{"R_md", "R_docs"})
 		if err == nil || got != nil || errors.Is(err, errGitHubRateLimited) != c.isRateLimited {
 			t.Errorf("%s: %v, %v", c.name, got, err)
 		}
 	}
 
-	if _, err := FetchReadmesByNodeIDs(cfg, []string{"R_md"}, time.Now().Add(-time.Second)); !errors.Is(err, errDeadlinePassed) {
+	pastCtx, cancelPast := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancelPast()
+	if _, err := FetchReadmesByNodeIDs(pastCtx, cfg, []string{"R_md"}); !errors.Is(err, context.DeadlineExceeded) || !isBadGateway(err) {
 		t.Errorf("deadline already passed: %v", err)
 	}
 
@@ -579,7 +611,10 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 	t.Cleanup(slow.Close)
 	start := time.Now()
 	slowCfg := &Config{GitHubAPI: slow.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
-	if _, err := FetchReadmesByNodeIDs(slowCfg, []string{"R_md"}, time.Now().Add(100*time.Millisecond)); err == nil || time.Since(start) > 400*time.Millisecond {
+	shortCtx, cancelShort := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancelShort()
+	if _, err := FetchReadmesByNodeIDs(shortCtx, slowCfg, []string{"R_md"}); !errors.Is(err, context.DeadlineExceeded) || !isBadGateway(err) ||
+		!strings.Contains(err.Error(), "GitHub didn't answer in time") || time.Since(start) > 400*time.Millisecond {
 		t.Errorf("slow answer past the deadline: %v after %v", err, time.Since(start))
 	}
 }
@@ -608,6 +643,83 @@ func isEveryGraphQLVariableDeclared(query string) bool {
 		}
 	}
 	return len(used) == len(declared)
+}
+
+// Tests that a README call cut at its deadline counts as running out of time, not as a failure of GitHub.
+// Counting it as a failure would stop the sync step as if GitHub were down (`errReadmesAllFailed`).
+//   - A call cut at the deadline of `ctx`
+//   - A call cut at `fetchEndBy`, which comes before the deadline of `ctx`.
+//     Its first query answers in time, and the next one waits past `fetchEndBy`.
+//     The call ends at `fetchEndBy`, before the time limit of that query, so the time kept for the commit stays free
+func TestReadmeCallCutAtDeadlineIsOutOfTime(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // The server notices a closed connection only after the body is read
+		select {                    // Waits until the caller gives up
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(slow.Close)
+	cfg := &Config{GitHubAPI: slow.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	fetched, stopErr := fetchReadmesInParallel(ctx, cfg, []StarItem{{ID: 1, NodeID: "R_1"}}, time.Now().Add(time.Hour))
+	if len(fetched) != 0 || !errors.Is(stopErr, errReadmesOutOfTime) {
+		t.Errorf("cut at the deadline of ctx: %v, %v", fetched, stopErr)
+	}
+
+	var queries atomic.Int32
+	listingThenSlow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if queries.Add(1) == 1 {
+			time.Sleep(800 * time.Millisecond) // The next query starts after this, so its time limit ends well after `fetchEndBy`
+			fmt.Fprint(w, `{"data":{"nodes":[{"id":"R_1","github":null,"root":{"entries":[{"name":"README.md","type":"blob","mode":33188}]}}]}}`)
+			return
+		}
+		io.Copy(io.Discard, r.Body) // The server notices a closed connection only after the body is read
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(listingThenSlow.Close)
+	savedClient := httpClient
+	httpClient = &http.Client{Timeout: 2 * time.Second} // Stands in for `githubTimeout`, so a call can start with `fetchEndBy` close
+	t.Cleanup(func() { httpClient = savedClient })
+	cfg = &Config{GitHubAPI: listingThenSlow.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+	start := time.Now()
+	fetched, stopErr = fetchReadmesInParallel(context.Background(), cfg, []StarItem{{ID: 1, NodeID: "R_1"}}, start.Add(2100*time.Millisecond))
+	took := time.Since(start) // Cut at 2.1 seconds. Without the cut, the second query would wait until 2.8 seconds or later
+	if len(fetched) != 0 || !errors.Is(stopErr, errReadmesOutOfTime) || queries.Load() != 2 || took > 2500*time.Millisecond {
+		t.Errorf("cut at fetchEndBy: %v, %v, queries %d, after %v", fetched, stopErr, queries.Load(), took)
+	}
+}
+
+// Tests that a single request that hits `githubTimeout` counts as a failed call, not as running out of time.
+// Both can give an error that matches `context.DeadlineExceeded`, depending on the Go version, so running out of time is told by the context.
+// So this test guards only on a Go version where they match
+func TestReadmeCallTimeoutIsFailure(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // The server notices a closed connection only after the body is read
+		select {                    // Waits until the caller gives up
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(slow.Close)
+	savedClient := httpClient
+	httpClient = &http.Client{Timeout: 100 * time.Millisecond} // Stands in for `githubTimeout`, which is too long for a test
+	t.Cleanup(func() { httpClient = savedClient })
+	cfg := &Config{GitHubAPI: slow.URL, DBRepoFullName: "me/archive", DBRepoAccessToken: "test-token"}
+	fetched, stopErr := fetchReadmesInParallel(context.Background(), cfg, []StarItem{{ID: 1, NodeID: "R_1"}}, time.Now().Add(time.Hour))
+	if len(fetched) != 0 || !errors.Is(stopErr, errReadmesAllFailed) {
+		t.Errorf("one slow request: %v, %v", fetched, stopErr)
+	}
+}
+
+// Reports whether `Respond` answers `err` with 502 (an `HTTPError` with that status, found through the wrapping)
+func isBadGateway(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == http.StatusBadGateway
 }
 
 // Returns how many times `value` is in `values`

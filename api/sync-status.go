@@ -18,11 +18,12 @@ import (
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 // If GitHub refuses a read (for example, the token lacks the Actions permission), answers 502 with GitHub's message.
 func handleSyncStatusGet(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	status, err := core.ReadSyncStatus(cfg)
+	status, err := core.ReadSyncStatus(ctx, cfg)
 	if err != nil {
 		return err
 	}

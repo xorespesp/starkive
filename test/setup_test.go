@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -122,6 +123,7 @@ func TestSignInStartsOnlyAtDashboardAddress(t *testing.T) {
 // For a broken file, `core.LoadGitHubApp` reports `core.ErrConfigBroken`, so the setup tool can stop before it creates an App.
 // (The sign-in response doesn't tell the causes apart.)
 func TestSignInNeedsSetUpApp(t *testing.T) {
+	ctx := context.Background()
 	setupWithoutGitHubApp(t, "", "")
 	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("no app: %d %s", rec.Code, rec.Body)
@@ -136,7 +138,7 @@ func TestSignInNeedsSetUpApp(t *testing.T) {
 	if rec := call(api.HandleLoginSession, "POST", "/api/login-session", "", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Sign-in isn't set up") {
 		t.Errorf("broken config: %d %s", rec.Code, rec.Body)
 	}
-	if _, _, err := core.LoadGitHubApp(loadTestConfig(t)); !errors.Is(err, core.ErrConfigBroken) {
+	if _, _, err := core.LoadGitHubApp(ctx, loadTestConfig(t)); !errors.Is(err, core.ErrConfigBroken) {
 		t.Errorf("broken config: %v", err)
 	}
 }
@@ -149,12 +151,13 @@ func TestSignInNeedsSetUpApp(t *testing.T) {
 //   - The check uses the file right before the commit.
 //     If another run saved an App first in the meantime, it doesn't overwrite it
 func TestSaveGitHubApp(t *testing.T) {
+	ctx := context.Background()
 	newApp := core.GitHubApp{AppID: 99, Slug: "starkive-user4242-abc123", OwnerID: testUserID, ClientID: testClientID, ClientSecret: testClientSecret, SiteURL: testDashboardURL}
 
 	gh := setupWithoutGitHubApp(t, "", "")
 	gh.files[core.ConfigDBPath] = makeTestConfigFile(testDashboardURL, encodeTestGitHubApp(t, "token-of-last-year", testUserID))
 	cfg := loadTestConfig(t)
-	if err := core.SaveGitHubApp(cfg, newApp); err != nil {
+	if err := core.SaveGitHubApp(ctx, cfg, newApp); err != nil {
 		t.Fatal(err)
 	}
 	file := gh.readFile(core.ConfigDBPath)
@@ -168,7 +171,7 @@ func TestSaveGitHubApp(t *testing.T) {
 	login(t) // The saved App can really be used to sign in
 	another := newApp
 	another.Slug = "starkive-user4242-def456"
-	if err := core.SaveGitHubApp(cfg, another); !errors.Is(err, core.ErrGitHubAppExists) || !strings.Contains(gh.readFile(core.ConfigDBPath), `"slug": "starkive-user4242-abc123"`) {
+	if err := core.SaveGitHubApp(ctx, cfg, another); !errors.Is(err, core.ErrGitHubAppExists) || !strings.Contains(gh.readFile(core.ConfigDBPath), `"slug": "starkive-user4242-abc123"`) {
 		t.Errorf("second save: %v", err)
 	}
 
@@ -178,7 +181,7 @@ func TestSaveGitHubApp(t *testing.T) {
 	gh.mu.Lock()
 	gh.interfereOnce = func(files map[string]string) { files[core.ConfigDBPath] = first }
 	gh.mu.Unlock()
-	if err := core.SaveGitHubApp(loadTestConfig(t), newApp); !errors.Is(err, core.ErrGitHubAppExists) || gh.readFile(core.ConfigDBPath) != first {
+	if err := core.SaveGitHubApp(ctx, loadTestConfig(t), newApp); !errors.Is(err, core.ErrGitHubAppExists) || gh.readFile(core.ConfigDBPath) != first {
 		t.Errorf("app that appeared meanwhile: %v, file %q", err, gh.readFile(core.ConfigDBPath))
 	}
 }

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -304,6 +305,7 @@ func TestGitHubAppManifest(t *testing.T) {
 // It accepts the App only if the App owner is the token owner.
 // It keeps the homepage registered in the App (`external_url`) in `SiteURL`, without a trailing `/`
 func TestCreateGitHubAppFromCode(t *testing.T) {
+	ctx := context.Background()
 	var conversionAuth []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -321,11 +323,11 @@ func TestCreateGitHubAppFromCode(t *testing.T) {
 	defer srv.Close()
 	cfg := &core.Config{DBRepoAccessToken: "token-4242", GitHubAPI: srv.URL, GitHubWeb: srv.URL}
 
-	app, err := createGitHubAppFromCode(cfg, "owner-4242")
+	app, err := createGitHubAppFromCode(ctx, cfg, "owner-4242")
 	if err != nil || app.OwnerID != 4242 || app.SiteURL != "https://starkive.example.com" || app.ClientSecret != "s" {
 		t.Errorf("token owner's app: %+v %v", app, err)
 	}
-	if _, err := createGitHubAppFromCode(cfg, "owner-777"); !errors.Is(err, errGitHubAppWrongOwner) {
+	if _, err := createGitHubAppFromCode(ctx, cfg, "owner-777"); !errors.Is(err, errGitHubAppWrongOwner) {
 		t.Errorf("another account's app: %v", err)
 	}
 	for _, auth := range conversionAuth {
@@ -339,6 +341,7 @@ func TestCreateGitHubAppFromCode(t *testing.T) {
 // It only tries to create a tree with the workflow, and sends no request that moves the branch (PATCH). There is no commit.
 // Without the permission, it returns GitHub's 403 as an error with the needed permission (`workflows=write`)
 func TestCheckWorkflowsPermission(t *testing.T) {
+	ctx := context.Background()
 	for _, denied := range []bool{false, true} {
 		var methods []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -361,7 +364,7 @@ func TestCheckWorkflowsPermission(t *testing.T) {
 			}
 		}))
 		cfg := &core.Config{DBRepoAccessToken: "token_4242", DBRepoFullName: "me/archive", DBRepoBranch: "main", GitHubAPI: srv.URL}
-		err := checkWorkflowsPermission(cfg)
+		err := checkWorkflowsPermission(ctx, cfg)
 		srv.Close()
 		if denied != (err != nil) || (denied && !strings.Contains(err.Error(), "workflows=write")) {
 			t.Errorf("denied=%v: %v", denied, err)
@@ -442,6 +445,7 @@ func newFakeDBRepo(t *testing.T, existing []string) (*core.Config, *fakeDBRepoWr
 //   - A README that is already there isn't overwritten. Only the missing file is added
 //   - If nothing is missing, it sends no write request (no commit)
 func TestAddInitialFiles(t *testing.T) {
+	ctx := context.Background()
 	for _, c := range []struct {
 		name     string
 		existing []string          // Files already in the repository
@@ -453,7 +457,7 @@ func TestAddInitialFiles(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg, got := newFakeDBRepo(t, c.existing)
-			if err := addInitialFiles(cfg); err != nil {
+			if err := addInitialFiles(ctx, cfg); err != nil {
 				t.Fatal(err)
 			}
 			if c.want == nil {
@@ -473,8 +477,9 @@ func TestAddInitialFiles(t *testing.T) {
 //   - A missing workflow is installed with this version's content, in one commit, `user(workflow): install sync workflow`
 //   - A workflow that is already there isn't replaced, even if its content differs
 func TestInstallWorkflowIfAbsent(t *testing.T) {
+	ctx := context.Background()
 	cfg, got := newFakeDBRepo(t, nil)
-	if err := installWorkflowIfAbsent(cfg); err != nil {
+	if err := installWorkflowIfAbsent(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 	if got.written[core.SyncWorkflowPath] != syncWorkflowContent || len(got.written) != 1 || got.message != "user(workflow): install sync workflow" {
@@ -482,7 +487,7 @@ func TestInstallWorkflowIfAbsent(t *testing.T) {
 	}
 
 	cfg, got = newFakeDBRepo(t, []string{core.SyncWorkflowPath})
-	if err := installWorkflowIfAbsent(cfg); err != nil {
+	if err := installWorkflowIfAbsent(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 	if got.count != 0 {

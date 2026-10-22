@@ -33,6 +33,7 @@ const maxStarredPageNumber = 1000
 // So if only this part can't be read, it still returns the Stars and just adds a failure flag.
 // The details go only to the server log.
 func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -41,13 +42,13 @@ func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil || page < 1 || page > maxStarredPageNumber {
 		return core.Errorf(http.StatusBadRequest, "Invalid page")
 	}
-	starredRepos, lastPage, err := core.FetchStarredPage(cfg, page)
+	starredRepos, lastPage, err := core.FetchStarredPage(ctx, cfg, page)
 	if err != nil {
 		return err
 	}
 	result := map[string]any{"starred_repos": starredRepos, "last_page": lastPage}
 	if page == 1 {
-		githubStarLists, err := core.FetchGitHubStarListsByRepo(cfg)
+		githubStarLists, err := core.FetchGitHubStarListsByRepo(ctx, cfg)
 		if err != nil {
 			log.Printf("github star lists: %v", err)
 			result["github_star_lists_failed"] = true

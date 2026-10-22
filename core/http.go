@@ -1,10 +1,11 @@
 // HTTP handling shared by the API functions.
-// It covers error answers (`HTTPError`, `Respond`), reading and writing JSON, request checks (`Authorize`, `RequireSameOrigin`),
+// It covers the request deadline and error answers (`requestTimeLimit`, `HTTPError`, `Respond`), reading and writing JSON, request checks (`Authorize`, `RequireSameOrigin`),
 // the site address, and the length limits of text fields that people type.
 package core
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -43,27 +45,42 @@ func (e *HTTPError) addHeader(key string, value string) *HTTPError {
 	return e
 }
 
+// Time from the start of a request to the deadline of its `ctx` (`Respond`).
+// A Vercel function is stopped at 300 seconds (measured, with or without `maxDuration` in `vercel.json`).
+// The 10 seconds left let the server still answer and log why it stopped
+const requestTimeLimit = 290 * time.Second
+
 // Runs a handler and turns the returned error into a JSON error answer.
 // The entry function of each API wraps its per-method handlers with this function.
-//   - `HTTPError`: answers with its status code and message
+// The handler gets the request with a `ctx` whose deadline is `requestTimeLimit` from now (`r.Context()`).
+//   - `HTTPError`: answers with its status code and message.
+//     For a 5xx whose error wraps a cause, the whole error goes to the server log
 //   - `GitHubAPIError` (GitHub answered with a failure): always answers 502
 //   - Any other error: answers 500 "Internal server error", and writes the details only to the server log
 //
 // Args:
 //   - `handle`: Per-method handler. Returns `nil` when it has written the whole answer, or an error on failure
 //
-// NOTE: GitHub's status codes aren't used as our status codes.
+// NOTE: The `ctx` doesn't stop when the browser goes away (`context.WithoutCancel`).
+// Otherwise closing the tab right after saving would stop a commit halfway, and the save would be lost.
+// It stops only at its deadline, before Vercel stops the function.
+// GitHub's status codes aren't used as our status codes.
 // The page treats 401 as "session expired" and closes the session.
 // If a 401 from GitHub rejecting the server token passed through, a token problem would look like a sign-out.
 // The same goes for a 409 from GitHub being read as our save conflict (409).
 func Respond(w http.ResponseWriter, r *http.Request, handle func(http.ResponseWriter, *http.Request) error) {
-	err := handle(w, r)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), requestTimeLimit)
+	defer cancel() // `cancel` frees the timer of the deadline when the request ends
+	err := handle(w, r.WithContext(ctx))
 	if err == nil {
 		return
 	}
 
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) { // If `err` is a `*HTTPError` or wraps one with `%w`, it is taken out into `httpErr` (like `dynamic_cast`)
+		if httpErr.Status >= 500 && err != error(httpErr) { // The error wraps a cause (e.g. why GitHub couldn't be reached) that the answer leaves out
+			log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+		}
 		for key, values := range httpErr.Header {
 			for _, v := range values {
 				w.Header().Add(key, v)
@@ -116,7 +133,8 @@ func WriteJSON(w http.ResponseWriter, status int, body any) {
 //
 // NOTE: A data file is already the JSON array the browser needs, so it isn't decoded and encoded again.
 func WriteDBFile(w http.ResponseWriter, r *http.Request, cfg *Config, path string) error {
-	content, err := ReadFile(cfg, path)
+	ctx := r.Context() // The deadline that `Respond` set for this request
+	content, err := ReadFile(ctx, cfg, path)
 	if err != nil {
 		return err
 	}
@@ -309,6 +327,7 @@ func NormalizeSiteURL(raw string) string {
 // The session is checked with the environment variable alone, before asking GitHub.
 // So a request without sign-in causes no GitHub request.
 func Authorize(r *http.Request) (*Config, error) {
+	ctx := r.Context() // The deadline that `Respond` set for this request
 	if r.Method != http.MethodGet {
 		if err := RequireSameOrigin(r); err != nil {
 			return nil, err
@@ -321,7 +340,7 @@ func Authorize(r *http.Request) (*Config, error) {
 	if err := requireSession(r, cfg); err != nil {
 		return nil, err
 	}
-	if err := useDBRepo(cfg); err != nil {
+	if err := useDBRepo(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

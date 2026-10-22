@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -26,8 +27,8 @@ type secretsPublicKey struct {
 // NOTE: This request needs the Secrets read permission (measured).
 // So if it succeeds, the permission is checked too.
 // Without the permission, it returns GitHub's 403 error as is (the needed permission is added to the message).
-func readSecretsPublicKey(cfg *core.Config) (secretsPublicKey, error) {
-	res, err := core.CallGitHubAPI(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/secrets/public-key", core.GitHubAPIRequest{})
+func readSecretsPublicKey(ctx context.Context, cfg *core.Config) (secretsPublicKey, error) {
+	res, err := core.CallGitHubAPI(ctx, cfg, "/repos/"+cfg.DBRepoFullName+"/actions/secrets/public-key", core.GitHubAPIRequest{})
 	if err != nil {
 		return secretsPublicKey{}, err
 	}
@@ -53,13 +54,13 @@ func readSecretsPublicKey(cfg *core.Config) (secretsPublicKey, error) {
 // A value written this way comes back unchanged in a workflow run (measured).
 // A secret value can't be read back through the API.
 // So whether it went in correctly shows only when a workflow actually uses it.
-func writeSecret(cfg *core.Config, key secretsPublicKey, name string, value string) error {
+func writeSecret(ctx context.Context, cfg *core.Config, key secretsPublicKey, name string, value string) error {
 	sealed, err := sealSecret(key.Key, value)
 	if err != nil {
 		return err
 	}
 	body := map[string]string{"encrypted_value": sealed, "key_id": key.KeyID}
-	res, err := core.CallGitHubAPI(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/secrets/"+name, core.GitHubAPIRequest{Method: http.MethodPut, Body: body})
+	res, err := core.CallGitHubAPI(ctx, cfg, "/repos/"+cfg.DBRepoFullName+"/actions/secrets/"+name, core.GitHubAPIRequest{Method: http.MethodPut, Body: body})
 	if err != nil {
 		return err
 	}

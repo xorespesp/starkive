@@ -24,11 +24,12 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Longest time one sync may take.
-// The function time limit is 300 seconds (measured, with or without `maxDuration` in `vercel.json`).
-// The workflow waits as long (`curl --max-time 300`).
-// The 60 seconds left cover the work before and after the sync, and a last request that ends late
-const syncTimeLimit = 240 * time.Second
+// Time kept at the end of the request after the long sync steps end.
+// A commit or request started before then can still end in it, and the server can still answer.
+// The long steps (metadata and README) stop fetching this long before the deadline of the request (`requestTimeLimit` in `core`),
+// that is, 240 seconds after the request starts.
+// The workflow waits up to 300 seconds for the answer (`curl --max-time 300`), the same as the function time limit (measured)
+const syncWrapUpTime = 50 * time.Second
 
 // Handles a call from the sync workflow.
 // Checks the sync key, syncs or not as `core.SyncOnWorkflowCall` decides, and answers `{ status }`.
@@ -47,8 +48,9 @@ func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	status, err := core.SyncOnWorkflowCall(cfg, now.Add(syncTimeLimit), now)
+	ctx := r.Context()
+	requestDeadline, _ := ctx.Deadline() // `core.Respond` always sets one
+	status, err := core.SyncOnWorkflowCall(ctx, cfg, requestDeadline.Add(-syncWrapUpTime), time.Now())
 	if err != nil {
 		log.Printf("sync workflow call: %v", err)
 		return core.Errorf(http.StatusBadGateway, "Sync failed. See the dashboard's server logs for details")
@@ -66,11 +68,12 @@ func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
 // So the page shows a running sync from the run list on GitHub (`active_run` of `/api/sync-status`),
 // and that stays true after the page is closed or opened elsewhere.
 func handleSyncArchivePost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
 	}
-	run, err := core.TriggerSyncWorkflow(cfg)
+	run, err := core.TriggerSyncWorkflow(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -86,6 +89,7 @@ func handleSyncArchivePost(w http.ResponseWriter, r *http.Request) error {
 // Answers 400 if neither field is sent or the interval isn't one of the choices.
 // Answers 409 when turning it on or off and the DB repository has no workflow.
 func handleSyncArchivePatch(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -100,7 +104,7 @@ func handleSyncArchivePatch(w http.ResponseWriter, r *http.Request) error {
 	if body.Enabled == nil && body.SyncIntervalDays == nil {
 		return core.Errorf(http.StatusBadRequest, "Send enabled or sync_interval_days")
 	}
-	status, err := core.UpdateSyncSettings(cfg, body.Enabled, body.SyncIntervalDays)
+	status, err := core.UpdateSyncSettings(ctx, cfg, body.Enabled, body.SyncIntervalDays)
 	if err != nil {
 		return err
 	}

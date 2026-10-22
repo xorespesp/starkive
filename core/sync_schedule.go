@@ -13,6 +13,7 @@
 package core
 
 import (
+	"context"
 	"crypto/hmac"
 	"encoding/base64"
 	"errors"
@@ -60,6 +61,7 @@ var errSyncKeyRejected = Errorf(http.StatusUnauthorized, "Sync key missing or wr
 // No one can read the secret holding the key, even if the repository is public.
 // It is given only to workflow runs of that repository (docs), so only that workflow can make these calls.
 func AuthorizeSyncWorkflowCall(r *http.Request) (*Config, error) {
+	ctx := r.Context() // The deadline that `Respond` set for this request
 	cfg, err := LoadEnvConfig()
 	if err != nil {
 		return nil, err
@@ -68,7 +70,7 @@ func AuthorizeSyncWorkflowCall(r *http.Request) (*Config, error) {
 	if !found || !hmac.Equal([]byte(key), []byte(DeriveSyncKey(cfg))) { // `hmac.Equal`: constant-time compare, so the time taken doesn't reveal the key
 		return nil, errSyncKeyRejected
 	}
-	if err := useDBRepo(cfg); err != nil {
+	if err := useDBRepo(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -91,9 +93,9 @@ const syncWorkflowActive = "active"
 //
 // Returns:
 //   - The workflow state. `nil` if the DB repository has no workflow file (GitHub answers 404, measured)
-func readSyncWorkflow(cfg *Config) (*syncWorkflow, error) {
+func readSyncWorkflow(ctx context.Context, cfg *Config) (*syncWorkflow, error) {
 	var workflow syncWorkflow
-	err := callRepoAPI(cfg, http.MethodGet, syncWorkflowAPIPath, nil, &workflow)
+	err := callRepoAPI(ctx, cfg, http.MethodGet, syncWorkflowAPIPath, nil, &workflow)
 	if hasGitHubStatus(err, http.StatusNotFound) {
 		return nil, nil
 	}
@@ -146,13 +148,13 @@ const lastScheduledRunWindowDays = 7
 // The window keeps every recent run on one page, so the last one is found whatever the order.
 // Without a run in the window, the result is the latest of the first page, which may not be the newest.
 // That only happens when no scheduled run has finished for a week, and the dashboard warns about it anyway.
-func readLastScheduledWorkflowRun(cfg *Config, now time.Time) (*SyncWorkflowRun, error) {
-	since := now.UTC().AddDate(0, 0, -lastScheduledRunWindowDays).Format("2006-01-02") // Go writes a layout as one fixed example time (2006-01-02 15:04:05), so this is YYYY-MM-DD
-	last, err := readLatestScheduledWorkflowRunOnPage(cfg, "&created=%3E%3D"+since)    // `created=>=<date>`, encoded
+func readLastScheduledWorkflowRun(ctx context.Context, cfg *Config, now time.Time) (*SyncWorkflowRun, error) {
+	since := now.UTC().AddDate(0, 0, -lastScheduledRunWindowDays).Format("2006-01-02")   // Go writes a layout as one fixed example time (2006-01-02 15:04:05), so this is YYYY-MM-DD
+	last, err := readLatestScheduledWorkflowRunOnPage(ctx, cfg, "&created=%3E%3D"+since) // `created=>=<date>`, encoded
 	if err != nil || last != nil {
 		return last, err
 	}
-	return readLatestScheduledWorkflowRunOnPage(cfg, "")
+	return readLatestScheduledWorkflowRunOnPage(ctx, cfg, "")
 }
 
 // Reads one page (20) of the finished scheduled runs that match `filter`, and returns the one that started last.
@@ -163,8 +165,8 @@ func readLastScheduledWorkflowRun(cfg *Config, now time.Time) (*SyncWorkflowRun,
 //
 // Returns:
 //   - The run. `nil` if the page has no run that wasn't cancelled, or if there is no workflow (GitHub answers 404)
-func readLatestScheduledWorkflowRunOnPage(cfg *Config, filter string) (*SyncWorkflowRun, error) {
-	runs, err := readSyncWorkflowRuns(cfg, "event=schedule&status=completed&per_page=20"+filter)
+func readLatestScheduledWorkflowRunOnPage(ctx context.Context, cfg *Config, filter string) (*SyncWorkflowRun, error) {
+	runs, err := readSyncWorkflowRuns(ctx, cfg, "event=schedule&status=completed&per_page=20"+filter)
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +191,11 @@ func readLatestScheduledWorkflowRunOnPage(cfg *Config, filter string) (*SyncWork
 //
 // Returns:
 //   - The runs on the page, in GitHub's order. Empty if there is no workflow (GitHub answers 404)
-func readSyncWorkflowRuns(cfg *Config, query string) ([]SyncWorkflowRun, error) {
+func readSyncWorkflowRuns(ctx context.Context, cfg *Config, query string) ([]SyncWorkflowRun, error) {
 	var list struct {
 		Runs []SyncWorkflowRun `json:"workflow_runs"`
 	}
-	err := callRepoAPI(cfg, http.MethodGet, syncWorkflowAPIPath+"/runs?"+query, nil, &list)
+	err := callRepoAPI(ctx, cfg, http.MethodGet, syncWorkflowAPIPath+"/runs?"+query, nil, &list)
 	if hasGitHubStatus(err, http.StatusNotFound) { // If there is no workflow, its run list is 404 too
 		return []SyncWorkflowRun{}, nil
 	}
@@ -215,9 +217,9 @@ func readSyncWorkflowRuns(cfg *Config, query string) ([]SyncWorkflowRun, error) 
 // NOTE: The workflow's `concurrency` lets one run go at a time, and keeps one more waiting (docs, measured).
 // With the scheduled run once a day and Sync now locked while a run goes, the runs since yesterday normally fit in one page (20).
 // So both are found whatever the order of the list.
-func readRecentSyncWorkflowRuns(cfg *Config, now time.Time) (*SyncWorkflowRun, *SyncWorkflowRun, error) {
-	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                  // YYYY-MM-DD (the layout is Go's example time)
-	runs, err := readSyncWorkflowRuns(cfg, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
+func readRecentSyncWorkflowRuns(ctx context.Context, cfg *Config, now time.Time) (*SyncWorkflowRun, *SyncWorkflowRun, error) {
+	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                       // YYYY-MM-DD (the layout is Go's example time)
+	runs, err := readSyncWorkflowRuns(ctx, cfg, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
 	if err != nil {
 		return nil, nil, err
 	}
@@ -248,9 +250,9 @@ func readRecentSyncWorkflowRuns(cfg *Config, now time.Time) (*SyncWorkflowRun, *
 // So the run that is `in_progress` is the run that sent the call.
 // If the list doesn't show any run as `in_progress` yet, a manual run that hasn't finished counts.
 // Then a Sync now isn't taken for a scheduled run that isn't due, and the worst case is one extra sync.
-func isCallFromManualWorkflowRun(cfg *Config, now time.Time) (bool, error) {
-	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                  // YYYY-MM-DD (the layout is Go's example time)
-	runs, err := readSyncWorkflowRuns(cfg, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
+func isCallFromManualWorkflowRun(ctx context.Context, cfg *Config, now time.Time) (bool, error) {
+	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                       // YYYY-MM-DD (the layout is Go's example time)
+	runs, err := readSyncWorkflowRuns(ctx, cfg, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
 	if err != nil {
 		return false, err
 	}
@@ -277,8 +279,8 @@ func isCallFromManualWorkflowRun(cfg *Config, now time.Time) (bool, error) {
 // So the state is read first, and the answer says what to do.
 // With `return_run_details`, GitHub answers after the run exists, with its ID and page (measured).
 // The run showed in the run list half a second after the answer (measured).
-func TriggerSyncWorkflow(cfg *Config) (SyncWorkflowRun, error) {
-	workflow, err := readSyncWorkflow(cfg)
+func TriggerSyncWorkflow(ctx context.Context, cfg *Config) (SyncWorkflowRun, error) {
+	workflow, err := readSyncWorkflow(ctx, cfg)
 	if err != nil {
 		return SyncWorkflowRun{}, err
 	}
@@ -293,7 +295,7 @@ func TriggerSyncWorkflow(cfg *Config) (SyncWorkflowRun, error) {
 		URL string `json:"html_url"`
 	}
 	body := map[string]any{"ref": cfg.DBRepoBranch, "return_run_details": true}
-	if err := callRepoAPI(cfg, http.MethodPost, syncWorkflowAPIPath+"/dispatches", body, &started); err != nil {
+	if err := callRepoAPI(ctx, cfg, http.MethodPost, syncWorkflowAPIPath+"/dispatches", body, &started); err != nil {
 		return SyncWorkflowRun{}, err
 	}
 	return SyncWorkflowRun{ID: started.ID, Event: workflowRunManualEvent, Status: workflowRunQueued, URL: started.URL}, nil
@@ -332,7 +334,8 @@ func syncDayNumber(now time.Time) int64 {
 // With "Manual only" (`manualOnlyIntervalDays`), a scheduled run never syncs.
 //
 // Args:
-//   - `deadline`: Time after which the sync starts no new request of its long steps (passed to `Sync`)
+//   - `ctx`: Deadline of the whole call. Every request ends by it
+//   - `longStepsEndBy`: Time by which the long steps of the sync end (passed to `Sync`)
 //   - `now`: Current time. Taken as an argument so tests can set the date
 //
 // Returns:
@@ -348,13 +351,13 @@ func syncDayNumber(now time.Time) int64 {
 // The call doesn't say which run sent it, and the installed workflow can't be changed to say it.
 // So the run is found in the run list (`isCallFromManualWorkflowRun`).
 // The workflow's `concurrency` runs one run at a time, so syncs don't overlap.
-func SyncOnWorkflowCall(cfg *Config, deadline time.Time, now time.Time) (string, error) {
-	isManual, err := isCallFromManualWorkflowRun(cfg, now)
+func SyncOnWorkflowCall(ctx context.Context, cfg *Config, longStepsEndBy time.Time, now time.Time) (string, error) {
+	isManual, err := isCallFromManualWorkflowRun(ctx, cfg, now)
 	if err != nil {
 		return "", err
 	}
 	if !isManual {
-		settings, err := readSyncConfig(cfg)
+		settings, err := readSyncConfig(ctx, cfg)
 		if err != nil {
 			return "", err
 		}
@@ -362,7 +365,7 @@ func SyncOnWorkflowCall(cfg *Config, deadline time.Time, now time.Time) (string,
 		if intervalDays == manualOnlyIntervalDays {
 			return "not_due", nil
 		}
-		last, err := readLastScheduledWorkflowRun(cfg, now)
+		last, err := readLastScheduledWorkflowRun(ctx, cfg, now)
 		if err != nil {
 			return "", err
 		}
@@ -371,7 +374,7 @@ func SyncOnWorkflowCall(cfg *Config, deadline time.Time, now time.Time) (string,
 			return "not_due", nil
 		}
 	}
-	if _, err := Sync(cfg, deadline); err != nil {
+	if _, err := Sync(ctx, cfg, longStepsEndBy); err != nil {
 		return "", err
 	}
 	return "synced", nil
@@ -415,11 +418,11 @@ func SyncOnWorkflowCall(cfg *Config, deadline time.Time, now time.Time) (string,
 //   - A workflow that GitHub turned off for inactivity (`disabled_inactivity`) is turned on the same way.
 //     It is turned on only when a person clicks, never by itself
 //     (getting around the inactivity rule automatically breaks GitHub's terms).
-func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStatus, error) {
+func UpdateSyncSettings(ctx context.Context, cfg *Config, enabled *bool, intervalDays *int) (SyncStatus, error) {
 	if intervalDays != nil && !slices.Contains(syncIntervalChoices, *intervalDays) {
 		return SyncStatus{}, Errorf(http.StatusBadRequest, "sync_interval_days must be one of %v", syncIntervalChoices)
 	}
-	workflow, err := readSyncWorkflow(cfg)
+	workflow, err := readSyncWorkflow(ctx, cfg)
 	if err != nil {
 		return SyncStatus{}, err
 	}
@@ -437,7 +440,7 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 			if *enabled {
 				action, after = "/enable", syncWorkflowActive
 			}
-			if err := callRepoAPI(cfg, http.MethodPut, syncWorkflowAPIPath+action, nil, nil); err != nil {
+			if err := callRepoAPI(ctx, cfg, http.MethodPut, syncWorkflowAPIPath+action, nil, nil); err != nil {
 				return SyncStatus{}, err
 			}
 			state = after // It shows up in the Actions API right away (measured), so don't ask again
@@ -445,7 +448,7 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 	}
 
 	var written syncConfig // Setting this function wrote (or found nothing to change in). The answer is made from this value, not read again
-	err = updateConfig(cfg, func(file *dbConfigFile) (CommitMessage, error) {
+	err = updateConfig(ctx, cfg, func(file *dbConfigFile) (CommitMessage, error) {
 		summaries := []string{}
 		switch {
 		case intervalDays == nil: // Don't change the interval
@@ -476,10 +479,10 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 
 	status := SyncStatus{IntervalDays: written.intervalDays(), EnabledSince: written.EnabledSince, Workflow: state}
 	if workflow != nil {
-		if status.LastScheduledRun, err = readLastScheduledWorkflowRun(cfg, time.Now()); err != nil {
+		if status.LastScheduledRun, err = readLastScheduledWorkflowRun(ctx, cfg, time.Now()); err != nil {
 			return SyncStatus{}, err
 		}
-		if status.ActiveRun, status.LastRun, err = readRecentSyncWorkflowRuns(cfg, time.Now()); err != nil {
+		if status.ActiveRun, status.LastRun, err = readRecentSyncWorkflowRuns(ctx, cfg, time.Now()); err != nil {
 			return SyncStatus{}, err
 		}
 	}
@@ -490,8 +493,8 @@ func UpdateSyncSettings(cfg *Config, enabled *bool, intervalDays *int) (SyncStat
 //
 // NOTE: GitHub registers a workflow written through the API as on (measured).
 // So the workflow isn't turned on separately, and only the setting is matched to that state.
-func RecordSyncEnabled(cfg *Config) error {
-	return updateConfig(cfg, func(file *dbConfigFile) (CommitMessage, error) {
+func RecordSyncEnabled(ctx context.Context, cfg *Config) error {
+	return updateConfig(ctx, cfg, func(file *dbConfigFile) (CommitMessage, error) {
 		if file.Sync.EnabledSince == nil {
 			file.Sync.markEnabledNow()
 		}
@@ -530,7 +533,7 @@ const syncWorkflowMissing = "missing"
 // NOTE: The four questions to GitHub (config file, workflow state, two run lists) are sent at the same time, not one after another.
 // So the answer takes as long as the slowest question, not the sum of all four.
 // If there is no workflow, the run list requests are wasted, but that is rare.
-func ReadSyncStatus(cfg *Config) (SyncStatus, error) {
+func ReadSyncStatus(ctx context.Context, cfg *Config) (SyncStatus, error) {
 	var settings syncConfig
 	var workflow *syncWorkflow
 	var lastScheduled, active, last *SyncWorkflowRun
@@ -538,10 +541,10 @@ func ReadSyncStatus(cfg *Config) (SyncStatus, error) {
 	now := time.Now()
 	var wg sync.WaitGroup // Counter that waits until all started goroutines end (like `std::thread::join`)
 	wg.Add(4)
-	go func() { defer wg.Done(); settings, errs[0] = readSyncConfig(cfg) }() // Each goroutine writes different variables, so writing without a lock doesn't overlap
-	go func() { defer wg.Done(); workflow, errs[1] = readSyncWorkflow(cfg) }()
-	go func() { defer wg.Done(); lastScheduled, errs[2] = readLastScheduledWorkflowRun(cfg, now) }()
-	go func() { defer wg.Done(); active, last, errs[3] = readRecentSyncWorkflowRuns(cfg, now) }()
+	go func() { defer wg.Done(); settings, errs[0] = readSyncConfig(ctx, cfg) }() // Each goroutine writes different variables, so writing without a lock doesn't overlap
+	go func() { defer wg.Done(); workflow, errs[1] = readSyncWorkflow(ctx, cfg) }()
+	go func() { defer wg.Done(); lastScheduled, errs[2] = readLastScheduledWorkflowRun(ctx, cfg, now) }()
+	go func() { defer wg.Done(); active, last, errs[3] = readRecentSyncWorkflowRuns(ctx, cfg, now) }()
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: joins several errors into one. `nil` if all are `nil`
 		return SyncStatus{}, err

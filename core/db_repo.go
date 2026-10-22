@@ -5,6 +5,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,13 +71,14 @@ func (v DBRepoFormatVersion) String() string {
 //
 // Returns:
 //   - Server config with the DB repository filled in.
-//     500 if the environment variables are wrong, 409 `HTTPError` if the DB repository can't be used
-func LoadConfig() (*Config, error) {
+//     500 if the environment variables are wrong, 409 `HTTPError` if the DB repository can't be used,
+//     502 if GitHub fails or doesn't answer
+func LoadConfig(ctx context.Context) (*Config, error) {
 	cfg, err := LoadEnvConfig()
 	if err != nil {
 		return nil, err
 	}
-	if err := useDBRepo(cfg); err != nil {
+	if err := useDBRepo(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -146,17 +148,21 @@ const (
 //     `ErrDBRepoNotFound` if the token can't see it. The error from `newDBRepoFormatError` if the major format version differs
 //
 // NOTE: The name is the current name that GitHub returns, so it follows the user's renames.
-// The result is kept in `dbRepoCache`.
-func ResolveDBRepo(cfg *Config) (DBRepoState, error) {
+// The result is kept in `dbRepoCache`, unless the deadline of `ctx` cut the request.
+func ResolveDBRepo(ctx context.Context, cfg *Config) (DBRepoState, error) {
 	key := makeEnvCacheKey(cfg)
 	result, found := dbRepoCache.get(key)
 	if !found {
-		result.repo, result.err = findDBRepo(cfg)
+		result.repo, result.err = findDBRepo(ctx, cfg)
 		ttl := dbRepoNotReadyTTL
 		if result.err == nil && result.repo.State == DBRepoStarkive {
 			ttl = dbRepoReadyTTL
 		}
-		dbRepoCache.put(key, result, ttl)
+		// NOTE: A request cut at its own deadline says nothing about the repository.
+		// Keeping that error would make the other requests fail for a while too
+		if ctx.Err() == nil { // Told by `ctx`, because a single slow request (`githubTimeout`) gives the same error and is worth keeping
+			dbRepoCache.put(key, result, ttl)
+		}
 	}
 	if result.err != nil {
 		return 0, result.err
@@ -178,8 +184,8 @@ func ResolveDBRepo(cfg *Config) (DBRepoState, error) {
 // The token has permission to write workflows.
 // This guard keeps starkive files from being committed to the wrong repository (e.g. the user's code repository).
 // Only the setup tool writes to an empty repository for the first time.
-func useDBRepo(cfg *Config) error {
-	state, err := ResolveDBRepo(cfg)
+func useDBRepo(ctx context.Context, cfg *Config) error {
+	state, err := ResolveDBRepo(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -198,8 +204,8 @@ func useDBRepo(cfg *Config) error {
 // Returns:
 //   - The found repository.
 //     `ErrDBRepoNotFound` if it can't be seen (404). A 502 `HTTPError` if GitHub returns an unusable name or an empty branch
-func findDBRepo(cfg *Config) (dbRepo, error) {
-	res, err := CallGitHubAPI(cfg, fmt.Sprintf("/repositories/%d", cfg.DBRepoID), GitHubAPIRequest{})
+func findDBRepo(ctx context.Context, cfg *Config) (dbRepo, error) {
+	res, err := CallGitHubAPI(ctx, cfg, fmt.Sprintf("/repositories/%d", cfg.DBRepoID), GitHubAPIRequest{})
 	if err != nil {
 		return dbRepo{}, err
 	}
@@ -211,7 +217,7 @@ func findDBRepo(cfg *Config) (dbRepo, error) {
 		return dbRepo{}, err
 	}
 	var found dbRepo
-	if err := json.NewDecoder(res.Body).Decode(&found); err != nil {
+	if err := DecodeGitHubAnswer(res, &found); err != nil {
 		return dbRepo{}, err
 	}
 	// The name goes into every API path after this, so its shape is checked even though GitHub returned it
@@ -220,7 +226,7 @@ func findDBRepo(cfg *Config) (dbRepo, error) {
 	}
 	located := *cfg // Struct copy. The caller's `cfg` is not changed until the result is in the cache. The found repository is inspected through this copy
 	located.DBRepoFullName, located.DBRepoBranch = found.FullName, found.Branch
-	if found.State, err = inspectDBRepo(&located); err != nil {
+	if found.State, err = inspectDBRepo(ctx, &located); err != nil {
 		return dbRepo{}, err
 	}
 	return found, nil
@@ -238,7 +244,7 @@ func findDBRepo(cfg *Config) (dbRepo, error) {
 // Emptiness and the marker are read in one query, at the same point. `HEAD` is the default branch.
 // A repository with only a README and no marker is also treated as foreign.
 // There is no exception like "allow it if it only has the initial files GitHub made". This keeps the rule simple.
-func inspectDBRepo(cfg *Config) (DBRepoState, error) {
+func inspectDBRepo(ctx context.Context, cfg *Config) (DBRepoState, error) {
 	owner, name, _ := strings.Cut(cfg.DBRepoFullName, "/")
 	// Asks, in one go, whether the DB repository is empty and what the marker file at the tip of the default branch is.
 	// `$marker` is `HEAD:<marker path>`
@@ -257,7 +263,7 @@ func inspectDBRepo(cfg *Config) (DBRepoState, error) {
 		} `json:"repository"` // `nil` if the repository can't be seen
 	}
 	vars := map[string]any{"owner": owner, "name": name, "marker": "HEAD:" + MarkerDBPath}
-	if err := callGraphQL(cfg, query, vars, 0, &data); err != nil {
+	if err := callGraphQL(ctx, cfg, query, vars, &data); err != nil {
 		return 0, err
 	}
 	switch {
@@ -396,8 +402,8 @@ func encodeConfig(file dbConfigFile) ([]byte, error) {
 // It doesn't write to a file it can't read, because writing a new one would erase the App settings inside it.
 // The check and the save happen on the file right before the commit.
 // So even when a settings write and an App write overlap, neither erases the other's values.
-func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, error)) error {
-	return UpdateFiles(cfg, []string{ConfigDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+func updateConfig(ctx context.Context, cfg *Config, change func(file *dbConfigFile) (CommitMessage, error)) error {
+	return UpdateFiles(ctx, cfg, []string{ConfigDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
 		file, err := decodeConfig(filesRead[ConfigDBPath])
 		if err != nil {
 			return FileChangesCommit{}, err
@@ -430,8 +436,8 @@ func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, e
 //
 // NOTE: A file that can't be decoded is read as empty settings with no error, so a broken config file doesn't stop the scheduled sync.
 // `updateConfig` blocks writes to such a file.
-func readSyncConfig(cfg *Config) (syncConfig, error) {
-	content, err := ReadFile(cfg, ConfigDBPath)
+func readSyncConfig(ctx context.Context, cfg *Config) (syncConfig, error) {
+	content, err := ReadFile(ctx, cfg, ConfigDBPath)
 	if err != nil {
 		return syncConfig{}, err
 	}
@@ -447,8 +453,8 @@ func readSyncConfig(cfg *Config) (syncConfig, error) {
 //
 // Args:
 //   - `siteURL`: The canonical address of the dashboard, registered in the GitHub App (`GitHubApp.SiteURL`)
-func SetDashboardURL(cfg *Config, siteURL string) error {
-	return updateConfig(cfg, func(file *dbConfigFile) (CommitMessage, error) {
+func SetDashboardURL(ctx context.Context, cfg *Config, siteURL string) error {
+	return updateConfig(ctx, cfg, func(file *dbConfigFile) (CommitMessage, error) {
 		file.DashboardURL = siteURL
 		return NewCommitMessage("user(config)", "set dashboard address to "+siteURL), nil
 	})

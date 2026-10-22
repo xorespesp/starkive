@@ -11,6 +11,7 @@
 package core
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -85,6 +86,7 @@ func StartGitHubLogin(cfg *Config, app GitHubApp, now time.Time) (authorizeURL s
 //   - The failure reason. Empty if the user is the token owner
 //   - Details for the server log (when the reason alone is not enough). Never sent to the page
 func FinishGitHubLogin(cfg *Config, app GitHubApp, r *http.Request, now time.Time) (GitHubLoginFailure, error) {
+	ctx := r.Context() // The deadline that `Respond` set for this request
 	query := r.URL.Query()
 	if query.Get("error") != "" {
 		return GitHubLoginCancelled, nil
@@ -92,15 +94,15 @@ func FinishGitHubLogin(cfg *Config, app GitHubApp, r *http.Request, now time.Tim
 	if !isValidLoginState(cfg, r, query.Get("state"), now) {
 		return GitHubLoginExpired, nil
 	}
-	token, err := exchangeGitHubLoginCode(cfg, app, query.Get("code"))
+	token, err := exchangeGitHubLoginCode(ctx, cfg, app, query.Get("code"))
 	if err != nil {
 		return GitHubLoginFailed, err
 	}
-	userID, err := fetchGitHubUserID(cfg, token)
+	userID, err := fetchGitHubUserID(ctx, cfg, token)
 	if err != nil {
 		return GitHubLoginFailed, err
 	}
-	owner, err := FetchTokenOwner(cfg)
+	owner, err := FetchTokenOwner(ctx, cfg)
 	if err != nil {
 		return GitHubLoginFailed, err
 	}
@@ -131,11 +133,11 @@ const tokenOwnerTTL = 24 * time.Hour
 // NOTE: The owner of a token stays the same until the token changes.
 // So it is kept, and GitHub is not asked again on every call.
 // The owner's username can still change, so a kept owner can have an old username for up to `tokenOwnerTTL`.
-func FetchTokenOwner(cfg *Config) (GitHubUser, error) {
+func FetchTokenOwner(ctx context.Context, cfg *Config) (GitHubUser, error) {
 	if owner, found := tokenOwnerCache.get(makeEnvCacheKey(cfg)); found {
 		return owner, nil
 	}
-	res, err := CallGitHubAPI(cfg, "/user", GitHubAPIRequest{})
+	res, err := CallGitHubAPI(ctx, cfg, "/user", GitHubAPIRequest{})
 	if err != nil {
 		return GitHubUser{}, err
 	}
@@ -144,7 +146,7 @@ func FetchTokenOwner(cfg *Config) (GitHubUser, error) {
 		return GitHubUser{}, err
 	}
 	var owner GitHubUser
-	if err := json.NewDecoder(res.Body).Decode(&owner); err != nil {
+	if err := DecodeGitHubAnswer(res, &owner); err != nil {
 		return GitHubUser{}, err
 	}
 	if owner.ID <= 0 || owner.Login == "" {
@@ -232,12 +234,12 @@ func isValidLoginState(cfg *Config, r *http.Request, state string, now time.Time
 //
 // NOTE: Even when the exchange fails, GitHub answers 200 and puts the reason in `error` in the body (e.g. `bad_verification_code`, docs).
 // So failure is detected by an empty token.
-func exchangeGitHubLoginCode(cfg *Config, app GitHubApp, code string) (string, error) {
+func exchangeGitHubLoginCode(ctx context.Context, cfg *Config, app GitHubApp, code string) (string, error) {
 	if code == "" {
 		return "", fmt.Errorf("callback has no code")
 	}
 	form := url.Values{"client_id": {app.ClientID}, "client_secret": {app.ClientSecret}, "code": {code}}
-	req, err := http.NewRequest(http.MethodPost, cfg.GitHubWeb+"/login/oauth/access_token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.GitHubWeb+"/login/oauth/access_token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -245,7 +247,7 @@ func exchangeGitHubLoginCode(cfg *Config, app GitHubApp, code string) (string, e
 	req.Header.Set("Accept", "application/json") // Without it, GitHub answers in form encoding (docs)
 	res, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", newGitHubUnreachableError(err)
 	}
 	defer res.Body.Close()
 	if err := CheckGitHubAPI(res); err != nil {
@@ -255,7 +257,7 @@ func exchangeGitHubLoginCode(cfg *Config, app GitHubApp, code string) (string, e
 		AccessToken string `json:"access_token"`
 		Error       string `json:"error"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+	if err := DecodeGitHubAnswer(res, &body); err != nil {
 		return "", err
 	}
 	if body.AccessToken == "" {
@@ -269,8 +271,8 @@ func exchangeGitHubLoginCode(cfg *Config, app GitHubApp, code string) (string, e
 // Args:
 //   - `token`: The user token from `exchangeGitHubLoginCode`.
 //     The sign-in App has no permissions, so this token can only read the public profile
-func fetchGitHubUserID(cfg *Config, token string) (int64, error) {
-	res, err := CallGitHubAPI(cfg, "/user", GitHubAPIRequest{Token: token})
+func fetchGitHubUserID(ctx context.Context, cfg *Config, token string) (int64, error) {
+	res, err := CallGitHubAPI(ctx, cfg, "/user", GitHubAPIRequest{Token: token})
 	if err != nil {
 		return 0, err
 	}
@@ -281,7 +283,7 @@ func fetchGitHubUserID(cfg *Config, token string) (int64, error) {
 	var user struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&user); err != nil {
+	if err := DecodeGitHubAnswer(res, &user); err != nil {
 		return 0, err
 	}
 	return user.ID, nil
@@ -431,11 +433,11 @@ func storeGitHubApp(cfg *Config, app GitHubApp, status GitHubAppStatus) {
 // Returns:
 //   - The App and its state
 //   - The read error if reading the file fails. `ErrConfigBroken` if the config file can't be decoded as JSON. Errors are not kept
-func LoadGitHubApp(cfg *Config) (GitHubApp, GitHubAppStatus, error) {
+func LoadGitHubApp(ctx context.Context, cfg *Config) (GitHubApp, GitHubAppStatus, error) {
 	if record, found := githubAppCache.get(makeRepoCacheKey(cfg)); found {
 		return record.app, record.status, nil
 	}
-	content, err := ReadFile(cfg, ConfigDBPath)
+	content, err := ReadFile(ctx, cfg, ConfigDBPath)
 	if err != nil {
 		return GitHubApp{}, "", err
 	}
@@ -462,8 +464,8 @@ var ErrGitHubAppExists = Errorf(http.StatusConflict, "A GitHub App is already se
 // So even if two setup tools run at once, only one gets in.
 // When it replaces settings that can't be decrypted, the commit body says to delete the previous App.
 // The private key is not received, so the server and the tool can't delete the App.
-func SaveGitHubApp(cfg *Config, app GitHubApp) error {
-	err := updateConfig(cfg, func(file *dbConfigFile) (CommitMessage, error) {
+func SaveGitHubApp(ctx context.Context, cfg *Config, app GitHubApp) error {
+	err := updateConfig(ctx, cfg, func(file *dbConfigFile) (CommitMessage, error) {
 		previous, status := decodeGitHubApp(cfg, file.SignInApp)
 		if status == GitHubAppReady {
 			return CommitMessage{}, ErrGitHubAppExists

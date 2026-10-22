@@ -16,7 +16,7 @@
 package handler
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -82,9 +82,9 @@ func parseRepoFullNameOrURL(fullNameOrURL string) string {
 // NOTE: `change` gets the whole archive so that some checks happen at the same commit as the save.
 // The star list ID check is one of them: it needs another file (`db/star-lists.json`).
 // If that file were read separately, an ID pointing to a star list deleted meanwhile could be saved.
-func updateStarItem(cfg *core.Config, id int64, change func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
+func updateStarItem(ctx context.Context, cfg *core.Config, id int64, change func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
 	var updated core.StarItem
-	_, err := core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err := core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
 		i := slices.IndexFunc(a.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
@@ -131,12 +131,12 @@ const addReadmeTimeout = 5 * time.Second
 // Returns:
 //   - A 400 `HTTPError` if the input shape is wrong or a star list ID doesn't exist.
 //     A 404 if GitHub can't find the repository, and a 409 if it's already in the archive
-func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrURL string, starListIDs []int64) error {
+func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, cfg *core.Config, fullNameOrURL string, starListIDs []int64) error {
 	fullName := parseRepoFullNameOrURL(fullNameOrURL)
 	if fullName == "" {
 		return core.Errorf(http.StatusBadRequest, "Enter owner/repo or a GitHub repository URL")
 	}
-	res, err := core.CallGitHubAPI(cfg, "/repos/"+fullName, core.GitHubAPIRequest{})
+	res, err := core.CallGitHubAPI(ctx, cfg, "/repos/"+fullName, core.GitHubAPIRequest{})
 	if err != nil {
 		return err
 	}
@@ -153,11 +153,17 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 		NodeID   string `json:"node_id"`   // ID for GraphQL lookups
 		FullName string `json:"full_name"` // `owner/repo` as GitHub answers it (the letter case may differ from the input)
 	}
-	if err := json.NewDecoder(res.Body).Decode(&repo); err != nil {
+	if err := core.DecodeGitHubAnswer(res, &repo); err != nil {
 		return err
 	}
 
-	readmes, readmeErr := core.FetchReadmesByNodeIDs(cfg, []string{repo.NodeID}, time.Now().Add(addReadmeTimeout))
+	// Only fetching the README gets the shorter deadline `addReadmeTimeout`, so a slow GitHub doesn't keep the user waiting.
+	// `WithTimeout` makes it a child of `ctx`, so it never ends later than the deadline of the request.
+	// The commit below uses `ctx`, not this child, so a slow README can't make the save fail.
+	// `cancel` frees the timer of the child right away, because nothing after the README uses it
+	addReadmeCtx, cancel := context.WithTimeout(ctx, addReadmeTimeout)
+	readmes, readmeErr := core.FetchReadmesByNodeIDs(addReadmeCtx, cfg, []string{repo.NodeID})
+	cancel()
 	if readmeErr == nil && readmes[0] == nil {
 		readmeErr = errors.New("GitHub can't tell about the README now") // Sync asks it again later
 	}
@@ -166,7 +172,7 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 	}
 
 	item := core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}
-	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
 		ids, err := a.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
 		if err != nil {
 			return core.CommitMessage{}, err
@@ -204,11 +210,11 @@ func addRepoByFullNameOrURL(w http.ResponseWriter, cfg *core.Config, fullNameOrU
 // So the request is small and doesn't need to be split.
 // Even if the list in the browser is stale or tampered with, the saved data is correct.
 // The cost is that the server reads all Stars once more.
-func addStarredRepoIDs(w http.ResponseWriter, cfg *core.Config, starredRepoIDs []int64, starListIDs []int64) error {
+func addStarredRepoIDs(ctx context.Context, w http.ResponseWriter, cfg *core.Config, starredRepoIDs []int64, starListIDs []int64) error {
 	if len(starredRepoIDs) > maxStarredRepoIDsPerRequest {
 		return core.Errorf(http.StatusBadRequest, "Send 1 to %d starred_repo_ids", maxStarredRepoIDsPerRequest)
 	}
-	starredRepos, err := core.FetchAllStarredRepos(cfg)
+	starredRepos, err := core.FetchAllStarredRepos(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -222,7 +228,7 @@ func addStarredRepoIDs(w http.ResponseWriter, cfg *core.Config, starredRepoIDs [
 			selected = append(selected, s)
 		}
 	}
-	added, err := core.ArchiveStarredRepos(cfg, selected, starListIDs, "user(star-items)")
+	added, err := core.ArchiveStarredRepos(ctx, cfg, selected, starListIDs, "user(star-items)")
 	if err != nil {
 		return err
 	}
@@ -233,6 +239,7 @@ func addStarredRepoIDs(w http.ResponseWriter, cfg *core.Config, starredRepoIDs [
 // Takes Add and Import requests and handles each by the shape of the body.
 // Exactly one of the two fields must be present. Otherwise it answers 400.
 func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -255,9 +262,9 @@ func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 		starListIDs = []int64{body.StarListID}
 	}
 	if body.RepoFullNameOrURL != "" {
-		return addRepoByFullNameOrURL(w, cfg, body.RepoFullNameOrURL, starListIDs)
+		return addRepoByFullNameOrURL(ctx, w, cfg, body.RepoFullNameOrURL, starListIDs)
 	}
-	return addStarredRepoIDs(w, cfg, body.StarredRepoIDs, starListIDs)
+	return addStarredRepoIDs(ctx, w, cfg, body.StarredRepoIDs, starListIDs)
 }
 
 // Changes the note or the star lists of one item, and answers with the changed item as JSON.
@@ -265,6 +272,7 @@ func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 // Answers 400 if `id` isn't a number, the note is too long, or a star list ID doesn't exist.
 // Answers 404 if the item doesn't exist.
 func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -287,7 +295,7 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 		}
 		body.Note = &trimmed
 	}
-	updated, err := updateStarItem(cfg, id, func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error) {
+	updated, err := updateStarItem(ctx, cfg, id, func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error) {
 		commitSummary := "edit " + s.Name
 		if body.Note != nil {
 			s.Note = *body.Note
@@ -315,6 +323,7 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 // Its metadata snapshot is removed in the next sync.
 // Answers 400 if `id` isn't a number, and 404 if the item doesn't exist.
 func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -323,7 +332,7 @@ func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateArchive(cfg, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err = core.UpdateArchive(ctx, cfg, func(a *core.Archive) (core.CommitMessage, error) {
 		i := slices.IndexFunc(a.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")

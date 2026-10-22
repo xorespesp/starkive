@@ -19,6 +19,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -35,6 +36,7 @@ import (
 // NOTE: The callback comes as a GET to the same address.
 // This is because the GitHub App has only one registered callback address, `/api/login-session`.
 func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	query := r.URL.Query()
 	if query.Has("code") || query.Has("error") {
 		return handleLoginSessionCallback(w, r)
@@ -46,7 +48,7 @@ func handleLoginSessionGet(w http.ResponseWriter, r *http.Request) error {
 	// Only the token owner can sign in, so this is the account that signed in.
 	// The username is only shown, so failing to read it doesn't keep the dashboard from opening
 	username := ""
-	if owner, err := core.FetchTokenOwner(cfg); err == nil {
+	if owner, err := core.FetchTokenOwner(ctx, cfg); err == nil {
 		username = owner.Login
 	} else {
 		log.Printf("token owner: %v", err)
@@ -69,8 +71,8 @@ type loginSessionStatus struct {
 //
 // NOTE: It doesn't tell these causes apart.
 // In every case, the fix is to run the setup tool, and the tool reports the exact cause.
-func loadSignInApp(cfg *core.Config) (core.GitHubApp, error) {
-	app, status, err := core.LoadGitHubApp(cfg)
+func loadSignInApp(ctx context.Context, cfg *core.Config) (core.GitHubApp, error) {
+	app, status, err := core.LoadGitHubApp(ctx, cfg)
 	if err != nil && !errors.Is(err, core.ErrConfigBroken) {
 		return core.GitHubApp{}, err
 	}
@@ -93,14 +95,15 @@ func loadSignInApp(cfg *core.Config) (core.GitHubApp, error) {
 // The canonical address is a public dashboard address, so it's fine to reveal it before sign-in.
 // The comparison ignores differences in letter case and default port (`core.NormalizeSiteURL`).
 func handleLoginSessionPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	if err := core.RequireSameOrigin(r); err != nil {
 		return err
 	}
-	cfg, err := core.LoadConfig()
+	cfg, err := core.LoadConfig(ctx)
 	if err != nil {
 		return err
 	}
-	app, err := loadSignInApp(cfg)
+	app, err := loadSignInApp(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -128,14 +131,15 @@ func handleLoginSessionPost(w http.ResponseWriter, r *http.Request) error {
 // The details of a failure (GitHub errors, etc.) go only to the server log.
 // The page gets only the kind of reason.
 func handleLoginSessionCallback(w http.ResponseWriter, r *http.Request) error {
-	cfg, err := core.LoadConfig()
+	ctx := r.Context()
+	cfg, err := core.LoadConfig(ctx)
 	if err != nil {
 		return err
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Add("Set-Cookie", core.ClearGitHubLoginStateCookie)
 	failure := core.GitHubLoginFailed // If the App settings can't be read, it ends with this reason
-	app, detail := loadSignInApp(cfg)
+	app, detail := loadSignInApp(ctx, cfg)
 	if detail == nil {
 		failure, detail = core.FinishGitHubLogin(cfg, app, r, time.Now())
 	}

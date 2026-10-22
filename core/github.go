@@ -1,24 +1,28 @@
 // Shared code for calling the GitHub API.
 // It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubAPI`, `GitHubAPIError`),
 // tells rate limit answers apart (`checkGitHubAPIWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
+// reads GitHub's JSON answers (`DecodeGitHubAnswer`),
+// turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`),
 // and builds Contents API paths.
 // Calls for each feature (saving the archive, sync, sign-in) are in their own files.
 package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-// Longest time to wait for a GitHub answer.
-// No single request takes longer than this, so the work ends within the Vercel function time limit.
+// Longest time to wait for one GitHub answer.
+// A request also ends at the deadline of its `ctx`, if that comes first (`CallGitHubAPI`)
 const githubTimeout = 20 * time.Second
 
 // HTTP client for GitHub requests. Go's default client has no time limit, so a separate one is made
@@ -26,24 +30,31 @@ var httpClient = &http.Client{Timeout: githubTimeout}
 
 // Options of a GitHub API request. Empty fields use the default
 type GitHubAPIRequest struct {
-	Method  string        // HTTP method. GET if empty
-	Accept  string        // `Accept` header. `application/vnd.github+json` if empty
-	Body    any           // Body to send as JSON. `nil` if there is none
-	Token   string        // Token to send instead of the DB repository token. The DB repository token if empty
-	Timeout time.Duration // Time limit of this request. `githubTimeout` if 0 or longer than it
+	Method string // HTTP method. GET if empty
+	Accept string // `Accept` header. `application/vnd.github+json` if empty
+	Body   any    // Body to send as JSON. `nil` if there is none
+	Token  string // Token to send instead of the DB repository token. The DB repository token if empty
 }
 
 // Sends a request to the GitHub API (REST or GraphQL).
 //
 // Args:
+//   - `ctx`: Deadline of the work this request belongs to.
+//     A `context.Context` carries a deadline and a cancel signal through the calls, like a stop token with a deadline in C++.
+//     Every function that reaches GitHub takes one as its first argument, or reads it from the request (`r.Context()`),
+//     and passes it down, so no request outlives the deadline
 //   - `path`: Path and query after `cfg.GitHubAPI` (e.g. `/repos/me/archive/git/ref/heads/main`)
-//   - `opt`: Method, `Accept`, body, token and time limit
+//   - `opt`: Method, `Accept`, body and token
 //
 // Returns:
 //   - The response. Failure answers (4xx, 5xx) are returned without an error too.
 //     The caller checks it with `CheckGitHubAPI`, and closes it with `res.Body.Close()` after reading
-//   - The error if the request couldn't be sent or no answer came back (including a timeout)
-func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Response, error) {
+//   - A 502 `HTTPError` if the request was made but couldn't be sent or no answer came back,
+//     after `githubTimeout` or at the deadline of `ctx`.
+//     It wraps the cause.
+//     To tell whether the deadline of `ctx` cut it, check `ctx.Err()`, not the error.
+//     A request that hit `githubTimeout` can match `context.DeadlineExceeded` too, depending on the Go version (measured)
+func CallGitHubAPI(ctx context.Context, cfg *Config, path string, opt GitHubAPIRequest) (*http.Response, error) {
 	if opt.Method == "" {
 		opt.Method = http.MethodGet
 	}
@@ -60,7 +71,7 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 		body = bytes.NewReader(encoded)
 	}
 
-	req, err := http.NewRequest(opt.Method, cfg.GitHubAPI+path, body)
+	req, err := http.NewRequestWithContext(ctx, opt.Method, cfg.GitHubAPI+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -76,11 +87,41 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := httpClient
-	if opt.Timeout > 0 && opt.Timeout < githubTimeout {
-		client = &http.Client{Timeout: opt.Timeout} // A client is cheap to make. It shares the default connection pool
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, newGitHubUnreachableError(err)
 	}
-	return client.Do(req)
+	return res, nil
+}
+
+// Wraps `err`, a failure to get an answer from GitHub, as a 502 `HTTPError`, so `Respond` answers 502 as for any GitHub failure.
+// The message tells a timeout from other failures.
+// The message, which the browser gets, leaves out the text of `err`, which has the request address.
+// The returned error keeps `err` for the server log.
+// Two `%w` keep both errors findable with `errors.Is` and `errors.As`.
+func newGitHubUnreachableError(err error) error {
+	message := "Couldn't reach GitHub"
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		message = "GitHub didn't answer in time"
+	}
+	return fmt.Errorf("%w: %w", Errorf(http.StatusBadGateway, "%s", message), err)
+}
+
+// Reads the JSON body of the GitHub answer `res` into `dst`.
+// A body that can't be read (such as an HTML error page in place of JSON) gives a 502 `HTTPError`,
+// so `Respond` answers 502 as for any GitHub failure, not 500
+func DecodeGitHubAnswer(res *http.Response, dst any) error {
+	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
+		return newGitHubUnreadableError(err)
+	}
+	return nil
+}
+
+// Wraps `err`, a failure to read a GitHub answer as the expected JSON, as a 502 `HTTPError`.
+// The message leaves out the text of `err`, and the returned error keeps it for the server log
+func newGitHubUnreadableError(err error) error {
+	return fmt.Errorf("%w: %w", Errorf(http.StatusBadGateway, "GitHub sent an answer that couldn't be read"), err)
 }
 
 // Sends a GitHub GraphQL query and fills a value with the `data` of the result.
@@ -88,7 +129,6 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 // Args:
 //   - `query`: GraphQL query
 //   - `variables`: Query variables
-//   - `timeout`: Time limit of the request. `githubTimeout` if 0 or longer than it
 //   - `dst`: Pointer to the value to fill with `data`
 //
 // Returns:
@@ -97,16 +137,16 @@ func CallGitHubAPI(cfg *Config, path string, opt GitHubAPIRequest) (*http.Respon
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
 //     It also wraps a 502 `HTTPError` when the answer was 200, or the `GitHubAPIError` when it was 403 or 429
 //   - A `GitHubAPIError` on any other HTTP failure.
-//     A 502 `HTTPError` if the answer has no `data`
+//     A 502 `HTTPError` if the answer has no `data`, can't be read, or doesn't come (`CallGitHubAPI`)
 //
 // NOTE: GraphQL can answer HTTP 200 and still report failures in `errors` in the body.
 // A rate limit is answered the same way, with no points left or a `Retry-After` header (docs).
 // The error type `RATE_LIMITED` isn't in the docs and wasn't measured, so it is only one of the signs.
 // With no points left, any error counts as the rate limit, even beside usable `data`.
 // That `data` is dropped, because the next request would be refused anyway.
-func callGraphQL(cfg *Config, query string, variables map[string]any, timeout time.Duration, dst any) error {
+func callGraphQL(ctx context.Context, cfg *Config, query string, variables map[string]any, dst any) error {
 	body := map[string]any{"query": query, "variables": variables}
-	res, err := CallGitHubAPI(cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: body, Timeout: timeout})
+	res, err := CallGitHubAPI(ctx, cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: body})
 	if err != nil {
 		return err
 	}
@@ -118,7 +158,7 @@ func callGraphQL(cfg *Config, query string, variables map[string]any, timeout ti
 		Data   json.RawMessage `json:"data"` // Raw JSON, not decoded yet. Decoded into `dst` at the end
 		Errors graphQLErrors   `json:"errors"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+	if err := DecodeGitHubAnswer(res, &result); err != nil {
 		return err
 	}
 	for _, e := range result.Errors {
@@ -132,8 +172,8 @@ func callGraphQL(cfg *Config, query string, variables map[string]any, timeout ti
 		}
 		return Errorf(http.StatusBadGateway, "GitHub GraphQL returned no data")
 	}
-	if err := json.Unmarshal(result.Data, dst); err != nil {
-		return err
+	if err := json.Unmarshal(result.Data, dst); err != nil { // `data` in a shape other than the query asked for
+		return newGitHubUnreadableError(err)
 	}
 	if len(result.Errors) > 0 {
 		return result.Errors

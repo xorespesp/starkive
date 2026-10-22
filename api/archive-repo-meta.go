@@ -22,6 +22,7 @@ import (
 // Answers 400 if `id` isn't a positive number, and 401 if not signed in.
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 func handleArchiveRepoMetaGet(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	cfg, err := core.Authorize(r)
 	if err != nil {
 		return err
@@ -36,7 +37,7 @@ func handleArchiveRepoMetaGet(w http.ResponseWriter, r *http.Request) error {
 	if id <= 0 {
 		return core.Errorf(http.StatusBadRequest, "Invalid id")
 	}
-	readme, err := core.ReadReadmeSnapshot(cfg, id)
+	readme, err := core.ReadReadmeSnapshot(ctx, cfg, id)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ package test
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
@@ -336,9 +337,9 @@ func gitBlobSHA(content string) string {
 	return fmt.Sprintf("%x", sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content))))
 }
 
-// Returns a sync deadline far enough away that every sync step runs to the end in a test.
-// The README step keeps time for its commit before the deadline (`readmeCommitReserve`), so a short deadline would skip it
-func testDeadline() time.Time { return time.Now().Add(time.Hour) }
+// Returns a `longStepsEndBy` (the time the long sync steps end by) far enough away that every sync step runs to the end in a test.
+// The README step keeps time for its commit before it (`readmeCommitReserve`), so a near time would skip that step
+func testLongStepsEndBy() time.Time { return time.Now().Add(time.Hour) }
 
 // Makes a fake repository ID from the repository name (`owner/repo`). It is the CRC32 of the name, so the same name always gives the same ID
 func makeRepoID(name string) int64 { return int64(crc32.ChecksumIEEE([]byte(name))) }
@@ -1062,6 +1063,7 @@ const sampleStarLists = "[\n" +
 //     another user, a different or missing state, a forged state cookie, an expired state, cancel on GitHub, a wrong code
 //   - Sign-in can't be started from another site
 func TestGitHubLogin(t *testing.T) {
+	ctx := context.Background()
 	setup(t, sampleStarItems, sampleStarLists)
 
 	// Authorization address: only the App's Client ID and the state
@@ -1090,11 +1092,11 @@ func TestGitHubLogin(t *testing.T) {
 	// Failing cases: never a session cookie. Redirect to the page with a reason.
 	// Expired state: the state and cookie of a sign-in started 11 minutes ago (the state cookie is valid for only 10 minutes)
 	expiredState, expiredCookie := func() (string, string) {
-		cfg, err := core.LoadConfig()
+		cfg, err := core.LoadConfig(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		app, _, err := core.LoadGitHubApp(cfg)
+		app, _, err := core.LoadGitHubApp(ctx, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1166,8 +1168,9 @@ func TestGitHubLoginFailsClosedWithoutTokenOwner(t *testing.T) {
 //     characters a token can't have, header injection)
 //   - If the token can't see the repository (the token doesn't select it), it gives 409 and doesn't guess another repository
 func TestDBRepoAccessKey(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
-	cfg, err := core.LoadConfig()
+	cfg, err := core.LoadConfig(ctx)
 	if err != nil || cfg.DBRepoID != testRepoID || cfg.DBRepoAccessToken != testToken || cfg.DBRepoFullName != "me/archive" || cfg.DBRepoBranch != "main" {
 		t.Fatalf("resolved: %+v %v", cfg, err)
 	}
@@ -1222,7 +1225,7 @@ func TestDBRepoAccessKey(t *testing.T) {
 	// If the token can't see the repository (the token doesn't select it), it reports 409 and doesn't guess the repository
 	gh = setup(t, sampleStarItems, sampleStarLists)
 	gh.repoMissing = true
-	if _, err := core.LoadConfig(); !errors.Is(err, core.ErrDBRepoNotFound) {
+	if _, err := core.LoadConfig(ctx); !errors.Is(err, core.ErrDBRepoNotFound) {
 		t.Errorf("repository not visible: %v", err)
 	}
 }
@@ -1235,6 +1238,7 @@ func TestDBRepoAccessKey(t *testing.T) {
 // NOTE: The test uses a live session.
 // It checks that a session made before the token's repository selection changed can't write to the new repository.
 func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
+	ctx := context.Background()
 	cases := []struct {
 		name    string
 		prepare func(gh *fakeGitHub)
@@ -1251,7 +1255,7 @@ func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
 			// A live session. This repository has no App settings, so sign-in isn't possible. The session cookie is made directly, signed with the server token
 			cookie := strings.SplitN(core.NewSessionCookie(&core.Config{DBRepoAccessToken: testToken}, time.Now()), ";", 2)[0]
 
-			if _, err := core.LoadConfig(); !errors.Is(err, c.want) {
+			if _, err := core.LoadConfig(ctx); !errors.Is(err, c.want) {
 				t.Errorf("config: %v", err)
 			}
 			if rec := callScheduledSync(); rec.Code != http.StatusConflict {
@@ -1523,6 +1527,7 @@ func TestRepoMetaDropsInaccessible(t *testing.T) {
 //     The add commit's body lists the added repositories
 //   - Running it again changes nothing, so there is no commit
 func TestSync(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starred = []string{"new/first", "new/second", "new/third", "old/archived"}
 	gh.files[core.StarItemsDBPath] = fmt.Sprintf("["+"\n"+
@@ -1530,7 +1535,7 @@ func TestSync(t *testing.T) {
 		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
 
 	cfg := newTestConfig()
-	result, err := core.Sync(cfg, testDeadline())
+	result, err := core.Sync(ctx, cfg, testLongStepsEndBy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1560,7 +1565,7 @@ func TestSync(t *testing.T) {
 
 	// Running it again has nothing to add, no changed metadata and no changed README, so no commit is made.
 	// The READMEs of today's group are asked again, and which items are in it depends on the date, so that count isn't compared
-	result, err = core.Sync(cfg, testDeadline())
+	result, err = core.Sync(ctx, cfg, testLongStepsEndBy())
 	result.NumCheckedReadmes = 0
 	if err != nil || result != (core.SyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {
 		t.Errorf("second run: %+v %v", result, err)
@@ -1577,24 +1582,25 @@ func TestSync(t *testing.T) {
 //   - If it shows up again, the mark is removed
 //   - With no time budget, nothing is asked
 func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/kept", "a/vanishing"}
 	cfg := newTestConfig()
-	if _, err := core.Sync(cfg, testDeadline()); err != nil {
+	if _, err := core.Sync(ctx, cfg, testLongStepsEndBy()); err != nil {
 		t.Fatal(err)
 	}
 	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
 
 	// If the query fails because of a GitHub outage, nothing is recorded as "gone"
 	gh.graphqlDown = true
-	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
+	if result, err := core.RefreshMeta(ctx, cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
 		t.Errorf("outage: %+v %v", result, err)
 	}
 	gh.graphqlDown = false
 
 	// When deleted, the snapshot (description, etc.) stays and only the time is added
 	gh.gone = map[string]bool{vanishingID: true}
-	if result, err := core.RefreshMeta(cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
+	if result, err := core.RefreshMeta(ctx, cfg, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Errorf("vanished: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]
@@ -1607,14 +1613,14 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	since := m.UnavailableSince
 
 	// The next run keeps the time it first disappeared
-	core.RefreshMeta(cfg, time.Minute)
+	core.RefreshMeta(ctx, cfg, time.Minute)
 	if got := readMeta(t, gh)[1].UnavailableSince; got != since {
 		t.Errorf("unavailable_since changed: %s -> %s", since, got)
 	}
 
 	// If it shows up again (for example, private then public), the mark is removed
 	gh.gone = nil
-	core.RefreshMeta(cfg, time.Minute)
+	core.RefreshMeta(ctx, cfg, time.Minute)
 	if got := readMeta(t, gh)[1]; got.UnavailableSince != "" {
 		t.Errorf("revived snapshot = %+v", got)
 	}
@@ -1623,7 +1629,7 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	}
 
 	// With no time, it neither asks nor changes anything
-	if result, err := core.RefreshMeta(cfg, 0); err != nil || result.NumCheckedRepos != 0 {
+	if result, err := core.RefreshMeta(ctx, cfg, 0); err != nil || result.NumCheckedRepos != 0 {
 		t.Errorf("no budget: %+v %v", result, err)
 	}
 }
@@ -1782,13 +1788,14 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 // Tests that Import doesn't add a Star again when the sync archived it first while the dialog was open.
 // Duplicates are checked against the archive at save time, not the browser's list
 func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, "")
 	gh.starred = makeManyStars("race", 3)
 	cookie := login(t)
 	all := fetchAllStarred(t, cookie)
 
 	// While the page was open, the daily sync archived the first repository first
-	core.ArchiveStarredRepos(&core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
+	core.ArchiveStarredRepos(ctx, &core.Config{DBRepoAccessToken: "t", DBRepoFullName: "me/archive", DBRepoBranch: "main",
 		GitHubAPI: os.Getenv("STARKIVE_GH_API_URL")}, all[:1], []int64{}, "sync(star-items)")
 
 	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{all[0].Repo.ID, all[1].Repo.ID, all[2].Repo.ID}})
@@ -1804,6 +1811,7 @@ func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
 //   - Import adds both the star list chosen in the dialog and the GitHub membership. The sync gives the same result
 //   - Star lists of items already in the archive aren't changed
 func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
+	ctx := context.Background()
 	// Archive star lists: Graphics (100) and a Korean name (200).
 	// The GitHub star lists with the same names are written with different spaces, case and Korean normalization
 	nfdKorean := "\u1112\u1161\u11ab\u1100\u1173\u11af" // The Korean name split into jamo (NFD). A name typed on macOS can arrive like this
@@ -1841,7 +1849,7 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 	}
 
 	// Sync: adds the other new Stars. For the same GitHub star list, they must go into the same star list as Import
-	if _, err := core.Sync(newTestConfig(), testDeadline()); err != nil {
+	if _, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy()); err != nil {
 		t.Fatal(err)
 	}
 	var starLists []core.StarList
@@ -1922,13 +1930,14 @@ func TestNoteLengthLimit(t *testing.T) {
 // If adding fails, the snapshot refreshes still run to the end and commit.
 // The error has the name of the failed step. When the outage ends, the next run fills in the missing Stars
 func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.starred = []string{"new/one"}
 	gh.githubStarListsDown = true // Adding new Stars needs the GitHub star lists, and only that query fails
 
 	// Adding new Stars fails, but the unrelated snapshot refreshes run to the end and commit.
 	// The error comes back with the step name
-	result, err := core.Sync(newTestConfig(), testDeadline())
+	result, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy())
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)
 	}
@@ -1939,7 +1948,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// When the outage ends, the next run fills in the missing Stars
 	gh.githubStarListsDown = false
-	if result, err := core.Sync(newTestConfig(), testDeadline()); err != nil || result.NumAddedRepos != 1 {
+	if result, err := core.Sync(ctx, newTestConfig(), testLongStepsEndBy()); err != nil || result.NumAddedRepos != 1 {
 		t.Errorf("next sync: %+v %v", result, err)
 	}
 }
@@ -2092,9 +2101,10 @@ func TestUpdateSkipsUntouchedMissingFiles(t *testing.T) {
 // The only thing known is the name saved in the archive,
 // so the snapshot is made with that name and the time it was gone is recorded
 func TestSnapshotOfRepoVanishedBeforeFirstCheck(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.gone = map[string]bool{"R_2": true} // A repository already gone at the first check
-	if result, err := core.RefreshMeta(newTestConfig(), time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
+	if result, err := core.RefreshMeta(ctx, newTestConfig(), time.Minute); err != nil || len(result.UnavailableRepoIDs) != 1 {
 		t.Fatalf("refresh: %+v %v", result, err)
 	}
 	m := readMeta(t, gh)[1]

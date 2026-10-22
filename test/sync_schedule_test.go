@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,8 @@ func callScheduledSyncWithKey(key string) *httptest.ResponseRecorder {
 // Reads the environment variables and makes the server config with the DB repository filled in (`core.LoadConfig`).
 // Stops the test on failure.
 func loadTestConfig(t *testing.T) *core.Config {
-	cfg, err := core.LoadConfig()
+	ctx := context.Background()
+	cfg, err := core.LoadConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,9 +80,10 @@ var scheduledAt = time.Date(2026, 10, 14, 18, 17, 0, 0, time.UTC)
 // NOTE: The sync day comes from date math (days counted from 1970-01-01), so it isn't known when the test is written.
 // That is why the test finds it this way.
 func findSyncDay(t *testing.T, cfg *core.Config) int {
+	ctx := context.Background()
 	due := -1
 	for day := 0; day < 3; day++ { // Runs each of the three days and finds the day that synced
-		got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), scheduledAt.AddDate(0, 0, day))
+		got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), scheduledAt.AddDate(0, 0, day))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,21 +101,23 @@ func findSyncDay(t *testing.T, cfg *core.Config) int {
 }
 
 // Tests that a scheduled call syncs only on days that match the interval.
-//   - With a daily interval (the default), every call syncs and adds new Stars to the archive
+//   - With a daily interval (the default), every call syncs and adds new Stars to the archive.
+//     The README step runs too, so the long steps get time before the deadline of the request (`syncWrapUpTime`)
 //   - Changing the interval to 3 days is saved in `config.json` (App settings stay as they are), and only one day in three syncs
 //   - A scheduled run that is a few hours late and passes midnight UTC still counts as the same day
 //   - Manual only (0) is saved as `"interval_days": 0` with the commit `user(config): sync manually only`, and then a scheduled run doesn't sync even on a sync day.
 //     A call from a run started by hand still syncs
 //   - An interval that can't be chosen (5, -1) and an empty request get 400
 func TestScheduledSync(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/one"}
 
 	if rec := callScheduledSync(); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"synced"}` {
 		t.Fatalf("daily: %d %s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(gh.readFile(core.StarItemsDBPath), "a/one") {
-		t.Errorf("star items: %s", gh.readFile(core.StarItemsDBPath))
+	if !strings.Contains(gh.readFile(core.StarItemsDBPath), "a/one") || gh.readmeQueries == 0 {
+		t.Errorf("star items: %s, README queries %d", gh.readFile(core.StarItemsDBPath), gh.readmeQueries)
 	}
 
 	cookie := login(t)
@@ -127,7 +132,7 @@ func TestScheduledSync(t *testing.T) {
 	cfg := loadTestConfig(t)
 	due := findSyncDay(t, cfg)
 	late := scheduledAt.AddDate(0, 0, due).Add(10 * time.Hour)
-	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "synced" {
+	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "synced" {
 		t.Errorf("a run delayed past midnight UTC: %q %v", got, err)
 	}
 
@@ -138,13 +143,13 @@ func TestScheduledSync(t *testing.T) {
 	if !strings.Contains(gh.readFile(core.ConfigDBPath), `"interval_days": 0`) || !strings.HasPrefix(gh.commits[len(gh.commits)-1], "user(config): sync manually only") {
 		t.Errorf("manual only config: %s, commit %q", gh.readFile(core.ConfigDBPath), gh.commits[len(gh.commits)-1])
 	}
-	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "not_due" {
+	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "not_due" {
 		t.Errorf("manual only on a sync day: %q %v", got, err)
 	}
 	gh.mu.Lock()
 	gh.runs = []fakeRun{{event: "workflow_dispatch", status: "in_progress", started: late}}
 	gh.mu.Unlock()
-	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "synced" {
+	if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), late); err != nil || got != "synced" {
 		t.Errorf("manual only, a call from Sync now: %q %v", got, err)
 	}
 
@@ -169,6 +174,7 @@ func TestScheduledSync(t *testing.T) {
 //     A manual run that only waits behind the calling run doesn't make it sync.
 //     A manual run still listed as queued, with no run listed as running, counts as the calling run
 func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starringDenied = true
 	rec := callScheduledSync()
@@ -214,7 +220,7 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		gh.mu.Lock()
 		gh.runs = c.runs
 		gh.mu.Unlock()
-		if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), notDue); err != nil || got != c.want {
+		if got, err := core.SyncOnWorkflowCall(ctx, cfg, testLongStepsEndBy(), notDue); err != nil || got != c.want {
 			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
 		}
 	}
@@ -243,7 +249,7 @@ func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 // Tests the answer of the sync status (`GET /api/sync-status`) when it can't be read.
 //   - If GitHub refuses a read (no Actions permission), it is 502 with GitHub's message and the needed permission.
 //     (The page uses this message to warn that the status couldn't be read.)
-//   - An error that isn't GitHub's answer (a cut connection) is 500 "Internal server error", without internal details such as the request address
+//   - No answer from GitHub (a cut connection) is 502 "Couldn't reach GitHub", without internal details such as the request address
 //   - The sign-in status (`GET /api/login-session`) doesn't carry the sync status, so it still answers when only this can't be read
 func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
@@ -268,8 +274,8 @@ func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh.actionsDenied = false
 	gh.contentsHangup = true
 	gh.mu.Unlock()
-	if code, body := read(); code != http.StatusInternalServerError || !strings.Contains(body, "Internal server error") || strings.Contains(body, "/repos/") {
-		t.Errorf("internal error: %d %s", code, body)
+	if code, body := read(); code != http.StatusBadGateway || !strings.Contains(body, "Couldn't reach GitHub") || strings.Contains(body, "/repos/") {
+		t.Errorf("no answer from GitHub: %d %s", code, body)
 	}
 }
 
@@ -436,13 +442,14 @@ func TestSyncNowAndStatus(t *testing.T) {
 //   - Recording that sync is on adds only the time turned on. Calling it again makes no commit
 //   - An interval that can't be chosen reads as the default (1)
 func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
+	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.mu.Lock()
 	gh.files[core.ConfigDBPath] = `{"dashboard_url":"https://old.test","sync":{"interval_days":5}}` + "\n"
 	gh.mu.Unlock()
 	cfg := loadTestConfig(t)
 
-	if err := core.SetDashboardURL(cfg, "https://new.test"); err != nil {
+	if err := core.SetDashboardURL(ctx, cfg, "https://new.test"); err != nil {
 		t.Fatal(err)
 	}
 	config := gh.readFile(core.ConfigDBPath)
@@ -450,11 +457,11 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 		t.Errorf("after setting the dashboard address: %s", config)
 	}
 
-	if err := core.RecordSyncEnabled(cfg); err != nil {
+	if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 	commits := countCommits(gh)
-	if err := core.RecordSyncEnabled(cfg); err != nil {
+	if err := core.RecordSyncEnabled(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 	config = gh.readFile(core.ConfigDBPath)
@@ -462,7 +469,7 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 		t.Errorf("after recording sync on twice (%d new commits): %s", countCommits(gh)-commits, config)
 	}
 
-	if status, err := core.ReadSyncStatus(cfg); err != nil || status.IntervalDays != 1 {
+	if status, err := core.ReadSyncStatus(ctx, cfg); err != nil || status.IntervalDays != 1 {
 		t.Errorf("status with an interval that can't be chosen: %+v %v", status, err)
 	}
 }

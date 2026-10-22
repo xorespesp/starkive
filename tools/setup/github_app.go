@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -102,8 +103,8 @@ var conversionClient = &http.Client{Timeout: 20 * time.Second}
 // That's why it builds the request itself instead of using `core.CallGitHubAPI`, which always adds the token.
 // The private key (`pem`) and webhook secret in the response aren't used, so they aren't read.
 // The homepage (`external_url`) is put in `SiteURL` in the shape the server compares with the request address (`core.NormalizeSiteURL`).
-func createGitHubAppFromCode(cfg *core.Config, code string) (core.GitHubApp, error) {
-	req, err := http.NewRequest(http.MethodPost, cfg.GitHubAPI+"/app-manifests/"+url.PathEscape(code)+"/conversions", nil)
+func createGitHubAppFromCode(ctx context.Context, cfg *core.Config, code string) (core.GitHubApp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.GitHubAPI+"/app-manifests/"+url.PathEscape(code)+"/conversions", nil)
 	if err != nil {
 		return core.GitHubApp{}, err
 	}
@@ -135,7 +136,7 @@ func createGitHubAppFromCode(cfg *core.Config, code string) (core.GitHubApp, err
 	if created.ID <= 0 || created.ClientID == "" || created.ClientSecret == "" || created.Owner.ID <= 0 || site == "" {
 		return core.GitHubApp{}, errors.New("GitHub returned an incomplete app")
 	}
-	owner, err := core.FetchTokenOwner(cfg)
+	owner, err := core.FetchTokenOwner(ctx, cfg)
 	if err != nil {
 		return core.GitHubApp{}, err
 	}

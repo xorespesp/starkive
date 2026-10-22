@@ -4,6 +4,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,7 +57,7 @@ const MaxRepoMetaIDs = 100
 // It puts `null` in their place, and writes the reason and position in its errors (docs).
 // That partial result is used, so "request failed" and "this repository doesn't exist" can be told apart.
 // A temporary outage isn't recorded as a disappearance.
-func FetchRepoMeta(cfg *Config, ids []string) ([]json.RawMessage, []string, error) {
+func FetchRepoMeta(ctx context.Context, cfg *Config, ids []string) ([]json.RawMessage, []string, error) {
 	// Star count, fork count and last push time are read only for display in the dashboard
 	const query = `query($ids: [ID!]!) {
 		nodes(ids: $ids) {
@@ -79,7 +80,7 @@ func FetchRepoMeta(cfg *Config, ids []string) ([]json.RawMessage, []string, erro
 	var data struct {
 		Nodes []json.RawMessage `json:"nodes"` // Each repository is kept raw, not decoded (it is passed to the dashboard as it is)
 	}
-	err := callGraphQL(cfg, query, map[string]any{"ids": ids}, 0, &data)
+	err := callGraphQL(ctx, cfg, query, map[string]any{"ids": ids}, &data)
 	var nodeErrs graphQLErrors // Errors about some repositories, when the rest of the answer can be used
 	if err != nil && !errors.As(err, &nodeErrs) {
 		return nil, nil, err
@@ -179,7 +180,7 @@ type MetaRefreshResult struct {
 //     The body lists disappeared, visible again and renamed repositories, and the number whose details changed
 //
 // Args:
-//   - `budget`: Time available. It keeps the work within the time limit of the sync
+//   - `budget`: Time for the requests to GitHub. The commit at the end comes after it
 //
 // Returns:
 //   - The number checked and the IDs not found
@@ -190,9 +191,9 @@ type MetaRefreshResult struct {
 // A disappearance is recorded only when GitHub clearly answers `NOT_FOUND`.
 // A temporary outage must not mark hundreds of repositories as gone.
 // Repositories are never deleted automatically.
-func RefreshMeta(cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
-	deadline := time.Now().Add(budget)
-	starItems, err := readItems[StarItem](cfg, StarItemsDBPath)
+func RefreshMeta(ctx context.Context, cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
+	budgetEndsAt := time.Now().Add(budget)
+	starItems, err := readItems[StarItem](ctx, cfg, StarItemsDBPath)
 	if err != nil {
 		return MetaRefreshResult{}, err
 	}
@@ -221,8 +222,8 @@ func RefreshMeta(cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
 			defer wg.Done()
 			for {
 				mu.Lock()
-				// Send the next request only if it ends before `deadline` even when it waits the longest for GitHub (`githubTimeout`)
-				if next >= len(batches) || time.Now().Add(githubTimeout).After(deadline) {
+				// Send the next request only if it ends before `budgetEndsAt` even when it waits the longest for GitHub (`githubTimeout`)
+				if next >= len(batches) || time.Now().Add(githubTimeout).After(budgetEndsAt) {
 					mu.Unlock()
 					return
 				}
@@ -234,7 +235,7 @@ func RefreshMeta(cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
 				for i, s := range batch {
 					ids[i] = s.NodeID
 				}
-				nodes, missing, err := FetchRepoMeta(cfg, ids)
+				nodes, missing, err := FetchRepoMeta(ctx, cfg, ids)
 				if err != nil {
 					log.Printf("repo details failed (%d repos left unchanged): %v", len(batch), err)
 					continue // A batch whose request failed changes nothing. This keeps a temporary outage from being recorded as a disappearance
@@ -259,7 +260,7 @@ func RefreshMeta(cfg *Config, budget time.Duration) (MetaRefreshResult, error) {
 	wg.Wait()
 
 	now := FormatNow()
-	updated, err := UpdateArchive(cfg, func(a *Archive) (CommitMessage, error) {
+	updated, err := UpdateArchive(ctx, cfg, func(a *Archive) (CommitMessage, error) {
 		byID := make(map[int64]RepoMeta, len(a.RepoMeta))
 		for _, m := range a.RepoMeta {
 			byID[m.ID] = m
