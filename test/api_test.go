@@ -125,8 +125,8 @@ type fakeReadme struct {
 	unavailable bool   // If `true`, GraphQL gives `null` with an error for the repository, as for a repository it can't give now
 }
 
-// Answers a README query by GraphQL: a listing of the `.github` and root folders, a listing of `docs`, or file contents.
-// A repository's README (`readmes`) is in its root folder next to `main.go`, and `.github` and `docs` don't exist.
+// Answers a README query by GraphQL: a listing of the `.github` and root folders, or file contents.
+// A repository's README (`readmes`) is in its root folder next to `main.go`, and the root has no folder, so no later folder listing comes.
 // Like GitHub, it answers only the fields the query asks for, and names each answer by the alias in the query.
 // It lists each folder by the path in its expression (`HEAD:<path>`), and finds a file only at the path its variable gives (`HEAD:<name>`).
 // A query that uses a variable it wasn't given, or doesn't declare it with the type GitHub expects, fails as a whole.
@@ -134,7 +134,7 @@ type fakeReadme struct {
 // Call it while holding `mu`.
 //
 // Args:
-//   - `query`: The GraphQL query, which tells which of the three kinds it is
+//   - `query`: The GraphQL query, which tells whether it is a listing or a content query
 //   - `rawBody`: The whole request body, for the variables of each file in a content query (`$id<position>`, `$path<position>`)
 func (f *fakeGitHub) answerReadmeQuery(w http.ResponseWriter, query string, rawBody []byte) {
 	f.readmeQueries++
@@ -740,7 +740,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rawBody, _ := io.ReadAll(r.Body)
 		json.Unmarshal(rawBody, &body)
-		if strings.Contains(body.Query, `"HEAD:.github"`) || strings.Contains(body.Query, `"HEAD:docs"`) || strings.Contains(body.Query, "expression: $path") {
+		if strings.Contains(body.Query, `"HEAD:.github"`) || strings.Contains(body.Query, "expression: $path") {
 			f.answerReadmeQuery(w, body.Query, rawBody)
 			return
 		}

@@ -82,7 +82,7 @@ func TestReadmeSnapshotsAreListedAgainAfterAConflict(t *testing.T) {
 //   - A README is saved as `<ID>.<extension>`, and old files of that ID (another extension, an absent marker) are deleted
 //   - A repository with no README gets the absent marker
 //   - A README that can't be fetched doesn't stop Add. The item is added with no README file, and no folder is listed
-//   - The README is asked by GraphQL (a listing query, then `docs` or the content)
+//   - The README is asked by GraphQL (a listing query, then the content if the listings show a README)
 func TestAddSavesTheReadme(t *testing.T) {
 	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
 	folder := core.ReadmesDBDir + "/98/"
@@ -97,7 +97,7 @@ func TestAddSavesTheReadme(t *testing.T) {
 		{"README", &fakeReadme{name: "README.md", content: "# Linux\n"},
 			map[string]string{folder + "2325298.rst": "old\n", folder + "2325298.no-readme": ""},
 			map[string]string{folder + "2325298.md": "# Linux\n"}, 1, 2},
-		{"no README", nil, nil, map[string]string{folder + "2325298.no-readme": ""}, 1, 2},
+		{"no README", nil, nil, map[string]string{folder + "2325298.no-readme": ""}, 1, 1}, // The root lists no `docs` folder, so the listing alone tells
 		{"README can't be given now", &fakeReadme{unavailable: true}, nil, map[string]string{}, 0, 1},
 	}
 	for _, c := range cases {
@@ -407,10 +407,10 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 			savedFiles++
 		}
 	}
-	// These items have no README, so a call of 30 items is two queries (the listing, then `docs`).
-	// Each of the 3 goroutines has at most one call going, so 6 queries finish 2 or 3 calls.
+	// These items have no README and no `docs` folder, so a call of 30 items is one query (the listing).
+	// So the 6 queries answered finish 6 calls.
 	// Each goroutine stops after its first rate limit answer
-	if err != nil || checked%30 != 0 || checked < 60 || checked > 90 || savedFiles != checked || gh.readmeQueries > 6+3 {
+	if err != nil || checked != 180 || savedFiles != checked || gh.readmeQueries > 6+3 {
 		t.Errorf("rate limit: %d %v, files %d, README queries %d", checked, err, savedFiles, gh.readmeQueries)
 	}
 

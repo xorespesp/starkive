@@ -330,6 +330,7 @@ type SyncResult struct {
 func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	result := SyncResult{}
 	var errs []error
+	stepStart := time.Now() // Start of the current step, for the step times in the log
 
 	starredRepos, err := FetchAllStarredRepos(cfg)
 	if err == nil {
@@ -339,6 +340,8 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("archive new stars: %w", err)) // Wrapped with `%w`, so `errors.As` still finds the inner error (`HTTPError`, `GitHubAPIError`)
 	}
+	starsTime := time.Since(stepStart)
+	stepStart = time.Now()
 
 	meta, err := RefreshMeta(cfg, min(metaRefreshBudget, time.Until(deadline))) // `min`: built into Go since 1.21
 	if err == nil {
@@ -346,13 +349,19 @@ func Sync(cfg *Config, deadline time.Time) (SyncResult, error) {
 	} else {
 		errs = append(errs, fmt.Errorf("refresh repo meta: %w", err))
 	}
+	metaTime := time.Since(stepStart)
+	stepStart = time.Now()
 
 	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(cfg, deadline, meta.UnavailableRepoIDs, time.Now())
 	if err != nil {
 		errs = append(errs, fmt.Errorf("refresh readmes: %w", err))
 	}
 
-	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, readmes checked: %d, errors: %v",
-		result.NumStarredRepos, result.NumAddedRepos, result.NumMetaCheckedRepos, result.NumUnavailableRepos, result.NumCheckedReadmes, errs)
+	readmesTime := time.Since(stepStart)
+
+	round := func(d time.Duration) time.Duration { return d.Round(100 * time.Millisecond) } // Printed like `1.2s`
+	log.Printf("starred: %d, new: %d, metadata checked: %d, unavailable: %d, readmes checked: %d, errors: %v, took: stars %v, meta %v, readmes %v",
+		result.NumStarredRepos, result.NumAddedRepos, result.NumMetaCheckedRepos, result.NumUnavailableRepos, result.NumCheckedReadmes, errs,
+		round(starsTime), round(metaTime), round(readmesTime))
 	return result, errors.Join(errs...)
 }
