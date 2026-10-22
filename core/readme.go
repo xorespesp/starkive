@@ -339,7 +339,7 @@ type readmeCandidates struct {
 //   - `true` if the `docs` folder must be listed before the README can be told
 //
 // NOTE: GitHub doesn't count a file it judges binary (`isBinary`) as a README.
-// It shows the next README in the same folder, or one in the next folder (measured).
+// It shows the next README in the same folder, or one in the next folder (measured, except from the root to `docs`).
 // So a binary file is passed over the same way, not taken as "no README".
 func (candidates *readmeCandidates) pickReadmePath() (string, bool) {
 	// Returns the path of the first README in folder `listing` that isn't ruled out as binary, or "" if there is none.
@@ -384,8 +384,9 @@ const maxReadmeContentQueries = 3
 //     `nil` where it can't tell now: an ID that isn't a repository, a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`,
 //     a file gone between the queries, or a repository whose next pick is still unread after `maxReadmeContentQueries` content queries or after a later query failed.
 //     Ask those again later
-//   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached (`callGraphQL`).
-//     Any other error means a query failed or wasn't sent (`errDeadlinePassed`), and says nothing about the READMEs
+//   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached before the first content query is answered (`callGraphQL`).
+//     Any other error means a query failed or wasn't sent (`errDeadlinePassed`), and says nothing about the READMEs.
+//     If a later query fails, even for the rate limit, the READMEs settled so far are returned without an error
 //
 // NOTE: It asks by `node_id`, so a renamed repository needs no lookup (measured).
 // GraphQL gives `text` in UTF-8.

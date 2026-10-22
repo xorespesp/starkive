@@ -28,7 +28,8 @@ import (
 // The setup tool installs it at this path, and the Actions API refers to the workflow by this file name
 const SyncWorkflowPath = ".github/workflows/starkive-sync.yml"
 
-// Name of the Actions secret in the DB repository that holds the sync key. The setup tool writes it under this name, and the workflow reads it by this name
+// Name of the Actions secret in the DB repository that holds the sync key.
+// The setup tool writes it under this name, and the workflow reads it by this name
 const SyncKeySecretName = "STARKIVE_SYNC_KEY"
 
 // Makes the key that checks calls from the sync workflow: `deriveKey(token, "starkive-sync")` written in base64url.
@@ -41,7 +42,8 @@ func DeriveSyncKey(cfg *Config) string {
 	return base64.RawURLEncoding.EncodeToString(deriveKey(cfg, "starkive-sync"))
 }
 
-// 401 error for a missing or wrong sync key. This happens when the secret was deleted or the token changed.
+// 401 error for a missing or wrong sync key.
+// This happens when the secret was deleted or the token changed.
 // Answering with a failure makes the workflow fail, so GitHub notifies the user
 var errSyncKeyRejected = Errorf(http.StatusUnauthorized, "Sync key missing or wrong. Run the starkive setup tool again")
 
@@ -108,7 +110,7 @@ type SyncWorkflowRun struct {
 	Status     string    `json:"status"`         // `queued`, `pending`, `in_progress`, `completed`, and so on (docs, measured)
 	StartedAt  time.Time `json:"run_started_at"` // Start time
 	Conclusion string    `json:"conclusion"`     // Result once `completed`: `success`, `failure`, `cancelled`, and so on. Empty before that
-	URL        string    `json:"html_url"`       // Address of the run's page on GitHub. Settings shows it as a link
+	URL        string    `json:"html_url"`       // Address of the run's page on GitHub
 }
 
 // Values of `SyncWorkflowRun` fields
@@ -326,7 +328,7 @@ func syncDayNumber(now time.Time) int64 {
 // Handles a call from the sync workflow in the DB repository.
 // A call from a run started by hand (Sync now) runs `Sync` right away, whatever the interval.
 // A call from a scheduled run runs `Sync` on a sync day, and otherwise does nothing.
-// If the last finished scheduled run failed, a scheduled run syncs again regardless of the interval.
+// If the last finished scheduled run failed, a scheduled run syncs again whatever the interval, unless it is Manual only.
 // With "Manual only" (`manualOnlyIntervalDays`), a scheduled run never syncs.
 //
 // Args:

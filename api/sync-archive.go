@@ -32,7 +32,8 @@ const syncTimeLimit = 240 * time.Second
 
 // Handles a call from the sync workflow.
 // Checks the sync key, syncs or not as `core.SyncOnWorkflowCall` decides, and answers `{ status }`.
-// It syncs for a run started by hand, on a due day, or after a failed scheduled run.
+// It syncs for a run started by hand.
+// For a scheduled run, it syncs on a due day or after a failed scheduled run, and never with Manual only.
 // Answers 401 if the key is missing or wrong, 409 if the DB repository can't be used, and 502 if the sync fails.
 //
 // NOTE: The response has only the status, without counts or error details.

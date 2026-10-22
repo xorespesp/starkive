@@ -192,17 +192,34 @@ function fetchArchiveFiles(beforeSignIn = false) {
  * Requests the sync status (`sync-status`).
  *
  * @param {boolean} [beforeSignIn] Whether the request is sent before we know the user is signed in (the option of the same name in `api`)
- * @returns {Promise<{ sync: object|null, syncError: string }>} The status (`core.SyncStatus`), or why it couldn't be read.
- *   A failed read doesn't throw: the dashboard works without the status, and `syncProblem` warns about it
+ * @returns {Promise<{ sync: object|null, syncError: string, syncSettingWritesAtSend: number }>} The status (`core.SyncStatus`), or why it couldn't be read.
+ *   A failed read doesn't throw: the dashboard works without the status, and `syncProblem` warns about it.
+ *   `syncSettingWritesAtSend` is `syncSettingWrites` when the request was sent (`isSyncStatusOutdated`)
  * @throws {DOMException} `AbortError` if the session closed (`isCancelled`)
  */
 async function fetchSyncStatus(beforeSignIn = false) {
+  const syncSettingWritesAtSend = syncSettingWrites;
   try {
-    return { sync: await api('sync-status', { beforeSignIn }), syncError: '' };
+    return { sync: await api('sync-status', { beforeSignIn }), syncError: '', syncSettingWritesAtSend };
   } catch (err) {
     if (isCancelled(err)) throw err;
-    return { sync: null, syncError: err.message };
+    return { sync: null, syncError: err.message, syncSettingWritesAtSend };
   }
+}
+
+// Number of sync setting changes that the server confirmed on this page.
+// A status read sent before the last of them may hold the old setting (`isSyncStatusOutdated`)
+let syncSettingWrites = 0;
+
+/**
+ * Reports whether the status read `result` was sent before a sync setting change that the server confirmed since.
+ * Such a read may hold the old setting, and putting it in `state.sync` would undo the change on screen.
+ *
+ * @param {{ syncSettingWritesAtSend: number }} result A result of `fetchSyncStatus`
+ * @returns {boolean}
+ */
+function isSyncStatusOutdated(result) {
+  return result.syncSettingWritesAtSend !== syncSettingWrites;
 }
 
 /**
@@ -1772,7 +1789,7 @@ const SYNC_STALL_MS = 3 * DAY_MS;
  *
  * @param {object|null} status Sync status from the server (the `state.sync` shape, `core.SyncStatus`):
  *   `enabled_since` (when the user turned it on, `null` if off), `workflow` (GitHub's workflow state, or `missing`),
- *   `last_scheduled_run` (`run_started_at`, `conclusion`, `html_url`), `interval_days`
+ *   `last_scheduled_run` (`run_started_at`, `conclusion`, `html_url`)
  * @param {string} readError Why the status couldn't be read (the `state.syncError` shape). An empty string if it was read
  * @returns {{ text: string, hint: string, fix: 'on'|'off'|null }|null} The message, the fix to add in Settings,
  *   and whether the fix button in Settings turns the workflow on (`on`) or off (`off`).
@@ -1895,7 +1912,7 @@ function updateSettingsAttention() {
  * So the dialog shows a message and a button to match them (`fix` of `syncProblem`).
  * Scheduled runs and Actions tab changes happen outside the dashboard, so the latest status is fetched again on open.
  * Just opening it writes nothing.
- * One function, `update`, sets locking and display from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `busy`).
+ * One function, `update`, sets locking and display from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `syncWatch`, `busy`).
  * The dialog keeps no copy of the status, so a reload of the dashboard (`openDashboard`) and the dialog never disagree.
  * Sync now is drawn from the runs on GitHub (`active_run`), so it shows a running sync after the dialog or the page is opened again.
  */
@@ -1937,12 +1954,12 @@ function openSettings() {
     ),
     el('div', { className: 'actions' }, close),
   );
-  // Sets locking, selected values and messages again from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `busy`).
+  // Sets locking, selected values and messages again from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `syncWatch`, `busy`).
   // Event handlers don't change them directly
   const update = () => {
     const status = state.sync;
     const installed = Boolean(status) && status.workflow !== 'missing';
-    const running = state.syncRequested || Boolean(status?.active_run);
+    const running = state.syncRequested || Boolean(status?.active_run) || Boolean(syncWatch); // `syncWatch` also covers loading the archive again after a run
     const active = status?.workflow === 'active';
     enabled.checked = Boolean(status?.enabled_since);
     enabled.disabled = busy || !installed;
@@ -1979,6 +1996,7 @@ function openSettings() {
     try {
       state.sync = await api('sync-archive', { method: 'PATCH', body });
       state.syncError = ''; // The server returned the status after the change
+      syncSettingWrites++; // Status reads sent before this are now outdated
     } catch (err) {
       if (isCancelled(err)) return;
       showError(err);
@@ -2019,8 +2037,9 @@ function openSettings() {
   fetchSyncStatus()
     .then((result) => {
       // A read sent before Sync now was pressed could hide the run it started, so it is dropped.
-      // `watchSyncWorkflowRun` reads the status again while a run goes
-      if (state.syncRequested || syncWatch) return;
+      // `watchSyncWorkflowRun` reads the status again while a run goes.
+      // A read sent before a setting change could undo it, so it is dropped too
+      if (state.syncRequested || syncWatch || isSyncStatusOutdated(result)) return;
       ({ sync: state.sync, syncError: state.syncError } = result);
       showSyncStatus();
       watchSyncWorkflowRun();
@@ -2050,71 +2069,83 @@ const SYNC_WATCH_SLOW_MS = 30 * 1000;
 // A sync stops starting requests after four minutes (`syncTimeLimit` on the server), so a run past this mostly waits in the queue
 const SYNC_WATCH_SLOW_AFTER_MS = 5 * 60 * 1000;
 
-let syncWatch = null; // The loop of `watchSyncWorkflowRun` while it runs. `null` otherwise
+let syncWatch = null; // The loop of `watchSyncWorkflowRun` while it runs, including loading the archive again after a run. `null` otherwise
 
 const announcedSyncRunIds = new Set(); // IDs of runs started by hand whose end was reported, so a stale read can't report one twice
 
 /**
- * Follows the running sync (`state.sync.active_run`) until that run ends, reading the status every `SYNC_WATCH_MS` (later `SYNC_WATCH_SLOW_MS`).
- * It does nothing if no sync runs or it already follows one.
- * When a run started by hand (Sync now) ends, it loads the archive again and reports the new items, the failure or the cancel.
+ * Follows the running syncs (`state.sync.active_run`) one after another until none runs (`followSyncWorkflowRun`).
+ * It does nothing if no sync runs or it already follows them.
  *
  * NOTE: Call it whenever `state.sync` is set, so a sync that started elsewhere (a scheduled run, another device) is followed too.
  * It keeps going after the Settings dialog closes, and stops when the session closes.
- * It follows one run by its ID, so a run that starts right after it (a scheduled run waiting behind Sync now) doesn't take its place.
- * The end is judged only from its own reads.
- * A failed read, here or elsewhere (`state.sync` set to `null`), says nothing about the run, so the status is read again later.
- * The archive is loaded again in the same session (`loadAll`), not with `openDashboard`.
- * A new session would cancel the requests of open dialogs, which then stay locked.
+ * A run waiting behind the one followed (a scheduled run behind Sync now) is followed next, so the status doesn't stop at the first run.
+ * Sync now stays locked (`syncWatch`) until the archive is loaded again and the end is reported.
+ * A press before that would compare the next run with the archive from before this run, and count its new items twice.
  */
 function watchSyncWorkflowRun() {
   if (syncWatch || !state.sync?.active_run) return;
   const signal = sessionScope?.signal;
-  const watched = state.sync.active_run;
-  const idsBefore = new Set(state.starItems.map((item) => item.id));
-  const startedAt = Date.now();
   syncWatch = (async () => {
     try {
-      for (;;) {
-        await wait(Date.now() - startedAt < SYNC_WATCH_SLOW_AFTER_MS ? SYNC_WATCH_MS : SYNC_WATCH_SLOW_MS, signal);
-        const result = await fetchSyncStatus();
-        if (result.syncError) continue;
-        state.sync = result.sync;
-        state.syncError = '';
-        showSyncStatus();
-        // The run ended when it is the last finished run, or when nothing runs any more
-        if (result.sync.last_run?.id === watched.id || !result.sync.active_run) break;
-      }
+      while (state.sync?.active_run) await followSyncWorkflowRun(state.sync.active_run, signal);
     } catch (err) {
       if (!isCancelled(err)) throw err;
-      return;
     } finally {
       syncWatch = null;
+      showSyncStatus(); // Unlocks Sync now
     }
-    if (watched.event !== 'workflow_dispatch') {
-      // A scheduled run only redraws the status.
-      // A run that started after it is followed next
-      watchSyncWorkflowRun();
-      return;
-    }
-    if (announcedSyncRunIds.has(watched.id)) return;
-    announcedSyncRunIds.add(watched.id);
-    try {
-      await loadAll(signal);
-      render();
-      liveMetaLoader.reportErrors = true;
-    } catch (err) {
-      if (!isCancelled(err)) setStatus(err.message, { error: true }); // A closed session already told the user, so nothing is written over it
-      return;
-    }
-    const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
-    // The run ran on GitHub, so its counts aren't here.
-    // The new items are found by comparing the archive before and after
-    const newCount = state.starItems.filter((item) => !idsBefore.has(item.id)).length;
-    if (finished?.conclusion === 'cancelled') setStatus('Sync was cancelled');
-    else if (finished && finished.conclusion !== 'success') setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
-    else setStatus(`${finished ? 'Synced' : 'Sync finished'}: ${newCount} new`);
   })();
+}
+
+/**
+ * Follows the sync run `watched` until it ends, reading the status every `SYNC_WATCH_MS` (later `SYNC_WATCH_SLOW_MS`).
+ * When a run started by hand (Sync now) ends, it loads the archive again and reports the new items, the failure or the cancel.
+ *
+ * @param {object} watched The run (`core.SyncWorkflowRun`)
+ * @param {AbortSignal} signal This session's cancel signal
+ * @returns {Promise<void>} Resolves once the run ended and its end was reported. `state.sync` then holds the latest status
+ * @throws {DOMException} `AbortError` if the session closed (`isCancelled`)
+ *
+ * NOTE: It follows one run by its ID, so a run that starts right after it doesn't take its place.
+ * The end is judged only from its own reads.
+ * A failed read says nothing about the run, so the status is read again later.
+ * The archive is loaded again in the same session (`loadAll`), not with `openDashboard`.
+ * A new session would cancel the requests of open dialogs, which then stay locked.
+ */
+async function followSyncWorkflowRun(watched, signal) {
+  const idsBefore = new Set(state.starItems.map((item) => item.id));
+  const startedAt = Date.now();
+  for (;;) {
+    await wait(Date.now() - startedAt < SYNC_WATCH_SLOW_AFTER_MS ? SYNC_WATCH_MS : SYNC_WATCH_SLOW_MS, signal);
+    const result = await fetchSyncStatus();
+    // A read sent before a setting change may hold the old setting, so it is skipped like a failed read
+    if (result.syncError || isSyncStatusOutdated(result)) continue;
+    state.sync = result.sync;
+    state.syncError = '';
+    showSyncStatus();
+    // The run ended when it is the last finished run, or when nothing runs any more
+    if (result.sync.last_run?.id === watched.id || !result.sync.active_run) break;
+  }
+  if (watched.event !== 'workflow_dispatch') return; // A scheduled run only redraws the status
+  if (announcedSyncRunIds.has(watched.id)) return;
+  announcedSyncRunIds.add(watched.id);
+  try {
+    await loadAll(signal);
+    render();
+    liveMetaLoader.reportErrors = true;
+  } catch (err) {
+    if (isCancelled(err)) throw err; // A closed session already told the user, so nothing is written over it
+    setStatus(err.message, { error: true });
+    return;
+  }
+  const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
+  // The run ran on GitHub, so its counts aren't here.
+  // The new items are found by comparing the archive before and after
+  const newCount = state.starItems.filter((item) => !idsBefore.has(item.id)).length;
+  if (finished?.conclusion === 'cancelled') setStatus('Sync was cancelled');
+  else if (finished && finished.conclusion !== 'success') setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
+  else setStatus(`${finished ? 'Synced' : 'Sync finished'}: ${newCount} new`);
 }
 
 /**
@@ -2345,8 +2376,9 @@ async function openDashboard(repo, done = '', preloaded = null) {
     // Wait only for the live details of items drawn on the first screen. After that, workers report failed batches right away
     setStatus('Loading details from GitHub…', { busy: true });
     await waitForLiveMetaIdle(liveMetaLoader);
-    ({ sync: state.sync, syncError: state.syncError } = await syncRequest);
+    const syncResult = await syncRequest;
     signal.throwIfAborted();
+    if (!isSyncStatusOutdated(syncResult)) ({ sync: state.sync, syncError: state.syncError } = syncResult); // A setting changed in Settings while the page loaded is newer than this read
     showSyncStatus();
     watchSyncWorkflowRun(); // A sync may be running, started before the page opened or on another device
     const metaError = liveMetaLoader.error;

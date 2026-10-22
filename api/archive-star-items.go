@@ -113,7 +113,7 @@ func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
 const maxStarredRepoIDsPerRequest = 100_000
 
 // Longest time Add waits for the README of the new repository.
-// Fetching one README (two or three GraphQL queries) usually takes about 1 second.
+// Fetching one README (two or three GraphQL queries, more if a README is binary) usually takes about 1 second.
 // The slowest of 20 tries took 1.6 seconds (measured).
 // One that doesn't come in time, or fails, is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
