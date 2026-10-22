@@ -117,6 +117,7 @@ const (
 	workflowRunCancelled   = "cancelled"         // `Conclusion` of a run that GitHub or a person cancelled
 	workflowRunCompleted   = "completed"         // `Status` of a finished run. Every other status means it hasn't finished
 	workflowRunInProgress  = "in_progress"       // `Status` of a run whose job is running
+	workflowRunQueued      = "queued"            // `Status` of a run waiting for a runner
 	workflowRunManualEvent = "workflow_dispatch" // `Event` of a run started by hand (`TriggerSyncWorkflow`, or a person in the Actions tab)
 )
 
@@ -200,7 +201,7 @@ func readSyncWorkflowRuns(cfg *Config, query string) ([]SyncWorkflowRun, error) 
 	return list.Runs, nil
 }
 
-// Reads the sync workflow runs of any kind started since yesterday (UTC), with one request.
+// Reads the sync workflow runs of any kind created since yesterday (UTC), with one request.
 //
 // Args:
 //   - `now`: Current time
@@ -234,17 +235,34 @@ func readRecentSyncWorkflowRuns(cfg *Config, now time.Time) (*SyncWorkflowRun, *
 	return unfinished, lastFinished, nil
 }
 
-// Reports whether a run started by hand (`workflow_dispatch`) has its job running now.
+// Reports whether the run that sent the current call was started by hand (`workflow_dispatch`).
 //
-// NOTE: While a call from the workflow is handled, the run that sent it is in the list as `in_progress` (measured).
+// Args:
+//   - `now`: Current time, for the runs since yesterday (`readRecentSyncWorkflowRuns`)
+//
+// NOTE: The call doesn't say which run sent it, and the installed workflow can't be changed to say it.
+// While a call from the workflow is handled, the run that sent it is in the list as `in_progress` (measured).
 // The workflow's `concurrency` lets only one run go at a time (docs, measured).
-// So a manual run that is `in_progress` is the run that sent the call.
-func isManualWorkflowRunInProgress(cfg *Config) (bool, error) {
-	runs, err := readSyncWorkflowRuns(cfg, "event="+workflowRunManualEvent+"&status="+workflowRunInProgress+"&per_page=1")
+// So the run that is `in_progress` is the run that sent the call.
+// If the list doesn't show any run as `in_progress` yet, a manual run that hasn't finished counts.
+// Then a Sync now isn't taken for a scheduled run that isn't due, and the worst case is one extra sync.
+func isCallFromManualWorkflowRun(cfg *Config, now time.Time) (bool, error) {
+	since := now.UTC().AddDate(0, 0, -1).Format("2006-01-02")                  // YYYY-MM-DD (the layout is Go's example time)
+	runs, err := readSyncWorkflowRuns(cfg, "per_page=20&created=%3E%3D"+since) // `created=>=<date>`, encoded
 	if err != nil {
 		return false, err
 	}
-	return len(runs) > 0, nil
+	for _, run := range runs {
+		if run.Status == workflowRunInProgress {
+			return run.Event == workflowRunManualEvent, nil
+		}
+	}
+	for _, run := range runs {
+		if run.Status != workflowRunCompleted && run.Event == workflowRunManualEvent {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Starts a run of the sync workflow now (Sync now), and returns it.
@@ -276,7 +294,7 @@ func TriggerSyncWorkflow(cfg *Config) (SyncWorkflowRun, error) {
 	if err := callRepoAPI(cfg, http.MethodPost, syncWorkflowAPIPath+"/dispatches", body, &started); err != nil {
 		return SyncWorkflowRun{}, err
 	}
-	return SyncWorkflowRun{ID: started.ID, Event: workflowRunManualEvent, Status: "queued", URL: started.URL}, nil
+	return SyncWorkflowRun{ID: started.ID, Event: workflowRunManualEvent, Status: workflowRunQueued, URL: started.URL}, nil
 }
 
 // Day boundary used when counting sync days (06:00 UTC)
@@ -326,10 +344,10 @@ func syncDayNumber(now time.Time) int64 {
 // So a running workflow doesn't run for nothing just because the setting alone is off.
 // If the return values change or new ones are added, also fix the workflow content of the setup tool (`syncWorkflowContent`) and raise the major version of `DBRepoFormat`.
 // The call doesn't say which run sent it, and the installed workflow can't be changed to say it.
-// So the run is found in the run list (`isManualWorkflowRunInProgress`).
+// So the run is found in the run list (`isCallFromManualWorkflowRun`).
 // The workflow's `concurrency` runs one run at a time, so syncs don't overlap.
 func SyncOnWorkflowCall(cfg *Config, deadline time.Time, now time.Time) (string, error) {
-	isManual, err := isManualWorkflowRunInProgress(cfg)
+	isManual, err := isCallFromManualWorkflowRun(cfg, now)
 	if err != nil {
 		return "", err
 	}

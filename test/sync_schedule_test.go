@@ -166,7 +166,8 @@ func TestScheduledSync(t *testing.T) {
 //     It still finds it when it isn't on the first page of the list, and when it is older than a week.
 //     A cancelled run doesn't count, and the run before it does
 //   - A call from a run started by hand (Sync now) whose job is running syncs on any day.
-//     A manual run that only waits behind the calling run doesn't make it sync
+//     A manual run that only waits behind the calling run doesn't make it sync.
+//     A manual run still listed as queued, with no run listed as running, counts as the calling run
 func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starringDenied = true
@@ -208,6 +209,7 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		{"the last run was cancelled", []fakeRun{run("schedule", "completed", "success", 48), run("schedule", "completed", "cancelled", 24)}, "not_due"},
 		{"a manual run is going", []fakeRun{run("workflow_dispatch", "in_progress", "", 0), run("schedule", "completed", "success", 24)}, "synced"},
 		{"a manual run waits behind this one", []fakeRun{run("schedule", "in_progress", "", 0), run("workflow_dispatch", "pending", "", 0), run("schedule", "completed", "success", 24)}, "not_due"},
+		{"the calling manual run is still listed as queued", []fakeRun{run("workflow_dispatch", "queued", "", 0), run("schedule", "completed", "success", 24)}, "synced"},
 	} {
 		gh.mu.Lock()
 		gh.runs = c.runs

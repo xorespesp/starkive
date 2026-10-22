@@ -273,19 +273,19 @@ type githubFolderEntry struct {
 // Whether GitHub shows one when it is the only README isn't measured
 var readmeFileNamePattern = regexp.MustCompile(`(?i)^readme(\.[^.]+)?$`)
 
-// Picks the README in this folder, or returns "" if there is none.
-// Among several, it picks a Markdown file (`.md`, `.markdown`) first, then another extension, then no extension.
+// Lists the READMEs in this folder, in the order GitHub picks among them.
+// A Markdown file (`.md`, `.markdown`) comes first, then another extension, then no extension.
 // A tie is broken by byte order, so `README.md` comes before `readme.md`.
 // This matched GitHub's choice in all 9 folders with several READMEs (measured).
 //
 // NOTE: Only plain files count.
 // A folder or a submodule with a README name isn't a README.
 // A symbolic link is skipped too, because its content is the path it points to, not the README.
-// It can be called on a `nil` folder (a folder that doesn't exist), and returns "".
+// It can be called on a `nil` folder (a folder that doesn't exist), and returns nothing.
 // Go allows calling a method on a `nil` pointer, unlike C++, as long as the method doesn't read through it.
-func (folder *githubFolder) pickReadmeFileName() string {
+func (folder *githubFolder) listReadmeFileNames() []string {
 	if folder == nil {
-		return ""
+		return nil
 	}
 	rank := func(name string) int {
 		extension := strings.ToLower(strings.TrimPrefix(path.Ext(name), "."))
@@ -298,31 +298,91 @@ func (folder *githubFolder) pickReadmeFileName() string {
 			return 2
 		}
 	}
-	picked := ""
+	names := []string{}
 	for _, entry := range folder.Entries {
-		if entry.Type != "blob" || entry.Mode == 0o120000 || !readmeFileNamePattern.MatchString(entry.Name) {
-			continue
-		}
-		if picked == "" || rank(entry.Name) < rank(picked) || (rank(entry.Name) == rank(picked) && entry.Name < picked) {
-			picked = entry.Name
+		if entry.Type == "blob" && entry.Mode != 0o120000 && readmeFileNamePattern.MatchString(entry.Name) {
+			names = append(names, entry.Name)
 		}
 	}
-	return picked
+	slices.SortFunc(names, func(a string, b string) int {
+		if rank(a) != rank(b) {
+			return rank(a) - rank(b)
+		}
+		return strings.Compare(a, b)
+	})
+	return names
 }
 
+// Path prefixes of the folders where GitHub looks for a README (docs).
+// A file's path in the repository is the prefix followed by the file name
+const (
+	githubFolderPrefix = ".github/" // The `.github` folder
+	rootFolderPrefix   = ""         // The root folder
+	docsFolderPrefix   = "docs/"    // The `docs` folder
+)
+
+// README candidates of one repository while `FetchReadmesByNodeIDs` picks its README.
+// They are the listings of the folders where GitHub looks, and the files ruled out as binary
+type readmeCandidates struct {
+	githubFolderListing *githubFolder   // Listing of the `.github` folder. `nil` if the folder doesn't exist
+	rootFolderListing   *githubFolder   // Listing of the root folder. `nil` for an empty repository
+	docsFolderListing   *githubFolder   // Listing of the `docs` folder. `nil` if the folder doesn't exist or isn't listed yet
+	isDocsFolderListed  bool            // `true` once `docs` was listed. It is listed later, only when the first two folders have no README left
+	binaryFilePaths     map[string]bool // Paths of README files that GitHub judged binary, which aren't READMEs
+}
+
+// Returns the path of the README that GitHub shows, from what is known so far.
+// It looks in `.github`, then the root, then `docs`, the order GitHub looks in (docs).
+//
+// Returns:
+//   - The path, or "" if no README is left in the three folders
+//   - `true` if the `docs` folder must be listed before the README can be told
+//
+// NOTE: GitHub doesn't count a file it judges binary (`isBinary`) as a README.
+// It shows the next README in the same folder, or one in the next folder (measured).
+// So a binary file is passed over the same way, not taken as "no README".
+func (candidates *readmeCandidates) pickReadmePath() (string, bool) {
+	// Returns the path of the first README in folder `listing` that isn't ruled out as binary, or "" if there is none.
+	// `folderPrefix` is the path prefix of the folder (`githubFolderPrefix` and so on)
+	pickFirstReadmePath := func(folderPrefix string, listing *githubFolder) string {
+		for _, name := range listing.listReadmeFileNames() {
+			if !candidates.binaryFilePaths[folderPrefix+name] {
+				return folderPrefix + name
+			}
+		}
+		return ""
+	}
+	if readmePath := pickFirstReadmePath(githubFolderPrefix, candidates.githubFolderListing); readmePath != "" {
+		return readmePath, false
+	}
+	if readmePath := pickFirstReadmePath(rootFolderPrefix, candidates.rootFolderListing); readmePath != "" {
+		return readmePath, false
+	}
+	if !candidates.isDocsFolderListed {
+		return "", true
+	}
+	return pickFirstReadmePath(docsFolderPrefix, candidates.docsFolderListing), false
+}
+
+// Most content queries one `FetchReadmesByNodeIDs` call sends.
+// A query after the first is sent only for repositories whose picked file was binary, which is rare (none in 1,350 READMEs, measured).
+// This keeps a call short even if a repository has many binary READMEs
+const maxReadmeContentQueries = 3
+
 // Fetches the READMEs of the repositories `nodeIDs` with GitHub GraphQL, ending by `deadline`.
-// It picks each README the way GitHub does (`githubFolder.pickReadmeFileName`), and reads the picked files.
-// That is up to three queries, sent one after another.
+// It picks each README the way GitHub does (`readmeCandidates.pickReadmePath`), and reads the picked files.
+// That is usually up to three queries, sent one after another (the listing, the `docs` listing if needed, the contents).
+// A binary pick is passed over, which takes more queries (`maxReadmeContentQueries`).
 //
 // Args:
 //   - `nodeIDs`: `node_id`s of the repositories. At most `maxReadmeNodeIDs`
 //
 // Returns:
 //   - READMEs in the same order and length as `nodeIDs`.
-//     A README is absent (`isAbsent`) when GitHub says the repository isn't found, when none of the three folders has a README,
-//     or when the README is blank (`buildReadmeSnapshotFile`).
+//     A README is absent (`isAbsent`) when GitHub says the repository isn't found,
+//     when none of the three folders has a README that isn't binary, or when the README is blank (`buildReadmeSnapshotFile`).
 //     `nil` where it can't tell now: an ID that isn't a repository, a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`,
-//     a README that GraphQL gives as binary, or a file gone between the queries.
+//     a file gone between the queries, or a repository still left after `maxReadmeContentQueries` or after a later query failed.
 //     Ask those again later
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached (`callGraphQL`).
 //     Any other error means a query failed or wasn't sent (`errDeadlinePassed`), and says nothing about the READMEs
@@ -330,7 +390,8 @@ func (folder *githubFolder) pickReadmeFileName() string {
 // NOTE: It asks by `node_id`, so a renamed repository needs no lookup (measured).
 // GraphQL gives `text` in UTF-8.
 // GitHub turns older encodings (EUC-KR, Shift_JIS) and UTF-16 with a byte order mark into UTF-8 (measured).
-// UTF-16 without a byte order mark comes as binary (`text` is `null`, measured), so it can't be read here.
+// A file GitHub judges binary by its content (`isBinary`) comes with no `text` (measured).
+// UTF-16 without a byte order mark is binary or not by its content, and when it isn't, its `text` keeps the NUL bytes (measured).
 // Text over 512,000 bytes comes cut (measured), which still holds more than `maxReadmeBytes`.
 func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([]*FetchedReadme, error) {
 	// Lists the `.github` folder and the root folder.
@@ -366,8 +427,7 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 		return nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(listed.Nodes), len(nodeIDs))
 	}
 	readmes := make([]*FetchedReadme, len(nodeIDs))
-	pickedPaths := make([]string, len(nodeIDs)) // Path of the README picked for each repository. Empty if none is picked
-	docsIndexes := []int{}                      // Positions in `nodeIDs` of the repositories whose `docs` folder is listed next
+	candidatesByRepo := make([]*readmeCandidates, len(nodeIDs)) // README candidates of each repository still being picked, or `nil` once its result is settled
 	for i, node := range listed.Nodes {
 		switch {
 		case node == nil:
@@ -376,81 +436,155 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 			}
 		case node.ID == "": // Not a repository (GraphQL gives `{}`). It stays `nil`, and is asked again later
 		case nodeErrs.hasErrorInNode(i): // A folder that failed looks like a missing one, so the README can't be told now. It stays `nil`
-		case node.GitHub.pickReadmeFileName() != "":
-			pickedPaths[i] = ".github/" + node.GitHub.pickReadmeFileName()
-		case node.Root.pickReadmeFileName() != "":
-			pickedPaths[i] = node.Root.pickReadmeFileName()
 		default:
-			docsIndexes = append(docsIndexes, i)
+			candidatesByRepo[i] = &readmeCandidates{githubFolderListing: node.GitHub, rootFolderListing: node.Root, binaryFilePaths: map[string]bool{}}
 		}
 	}
 
-	if len(docsIndexes) > 0 {
-		docsIDs := []string{}
-		for _, i := range docsIndexes {
-			docsIDs = append(docsIDs, nodeIDs[i])
+	for contentQueries := 0; contentQueries < maxReadmeContentQueries; contentQueries++ {
+		// Lists `docs` for the repositories whose first two folders have no README left
+		// A query after the first content query is only for repositories whose pick was binary.
+		// If it fails, those stay `nil` and are asked again later, and the READMEs already settled are kept
+		isFirstRound := contentQueries == 0
+		docsIndexes := []int{} // Positions in `nodeIDs` of the repositories whose `docs` folder is listed now
+		for i, candidates := range candidatesByRepo {
+			if candidates == nil {
+				continue
+			}
+			if _, needsDocs := candidates.pickReadmePath(); needsDocs {
+				docsIndexes = append(docsIndexes, i)
+			}
 		}
-		const docsListingQuery = `query($ids: [ID!]!) {
-			nodes(ids: $ids) {
-				... on Repository {
-					docs: object(expression: "HEAD:docs") { ...folderEntries }
+		if len(docsIndexes) > 0 {
+			docsFolders, isListed, err := listReadmeDocsFolders(cfg, nodeIDs, docsIndexes, deadline)
+			if err != nil && isFirstRound {
+				return nil, err
+			}
+			if err != nil {
+				break
+			}
+			for k, i := range docsIndexes {
+				if !isListed[k] { // The repository or its `docs` folder failed this time, so it stays `nil` and is asked again later
+					candidatesByRepo[i] = nil
+					continue
 				}
+				candidatesByRepo[i].docsFolderListing, candidatesByRepo[i].isDocsFolderListed = docsFolders[k], true
 			}
 		}
-		fragment folderEntries on Tree { entries { name type mode } }`
-		var docsListed struct {
-			Nodes []*struct {
-				Docs *githubFolder `json:"docs"` // The `docs` folder
-			} `json:"nodes"`
+
+		pickedPaths := map[int]string{} // Position in `nodeIDs` -> path of the README picked to read now
+		for i, candidates := range candidatesByRepo {
+			if candidates == nil {
+				continue
+			}
+			pickedPath, _ := candidates.pickReadmePath() // Every folder is listed by now
+			if pickedPath == "" {
+				readmes[i], candidatesByRepo[i] = &FetchedReadme{isAbsent: true}, nil
+				continue
+			}
+			pickedPaths[i] = pickedPath
 		}
-		timeLeft, err := timeLeftUntil(deadline)
+		if len(pickedPaths) == 0 {
+			break
+		}
+		files, err := readReadmeFiles(cfg, nodeIDs, pickedPaths, deadline)
+		if err != nil && isFirstRound {
+			return nil, err
+		}
 		if err != nil {
-			return nil, err
+			break
 		}
-		err = callGraphQL(cfg, docsListingQuery, map[string]any{"ids": docsIDs}, timeLeft, &docsListed)
-		var docsNodeErrs graphQLErrors // A repository that failed is `nil`, and is asked again later
-		if err != nil && !errors.As(err, &docsNodeErrs) {
-			return nil, err
-		}
-		if len(docsListed.Nodes) != len(docsIDs) {
-			return nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(docsListed.Nodes), len(docsIDs))
-		}
-		for k, node := range docsListed.Nodes {
-			i := docsIndexes[k]
+		for i, pickedPath := range pickedPaths {
+			file := files[i]
 			switch {
-			case node == nil: // GraphQL couldn't give the repository this time (for example, it went away after the first query). It is asked again later
-			case docsNodeErrs.hasErrorInNode(k): // The `docs` folder failed, so it can't be told from a missing one. It stays `nil`
-			case node.Docs.pickReadmeFileName() != "":
-				pickedPaths[i] = "docs/" + node.Docs.pickReadmeFileName()
+			case file == nil: // The repository or the file is gone, or GraphQL couldn't give it, so it stays `nil` and is asked again later
+				candidatesByRepo[i] = nil
+			case file.IsBinary: // Not a README to GitHub, so the next pick is read in the next query
+				candidatesByRepo[i].binaryFilePaths[pickedPath] = true
+			case file.Text == nil: // Every file that wasn't binary came with text (measured), so this isn't expected and stays `nil`
+				candidatesByRepo[i] = nil
 			default:
-				readmes[i] = &FetchedReadme{isAbsent: true}
+				readmes[i], candidatesByRepo[i] = buildFetchedReadme(pickedPath, *file.Text), nil
 			}
 		}
 	}
+	return readmes, nil
+}
 
+// Lists the `docs` folder of the repositories at positions `indexes` of `nodeIDs`, with one query that ends by `deadline`.
+//
+// Returns:
+//   - The `docs` folder for each position, in the same order. `nil` if the folder doesn't exist
+//   - `true` for each position that was listed.
+//     `false` where GraphQL couldn't give the repository or the folder this time (for example, it went away after the first query)
+//   - An error if the query failed, as for `FetchReadmesByNodeIDs`
+func listReadmeDocsFolders(cfg *Config, nodeIDs []string, indexes []int, deadline time.Time) ([]*githubFolder, []bool, error) {
+	ids := []string{}
+	for _, i := range indexes {
+		ids = append(ids, nodeIDs[i])
+	}
+	const docsListingQuery = `query($ids: [ID!]!) {
+		nodes(ids: $ids) {
+			... on Repository {
+				docs: object(expression: "HEAD:docs") { ...folderEntries }
+			}
+		}
+	}
+	fragment folderEntries on Tree { entries { name type mode } }`
+	var docsListed struct {
+		Nodes []*struct {
+			Docs *githubFolder `json:"docs"` // The `docs` folder
+		} `json:"nodes"`
+	}
+	timeLeft, err := timeLeftUntil(deadline)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = callGraphQL(cfg, docsListingQuery, map[string]any{"ids": ids}, timeLeft, &docsListed)
+	var nodeErrs graphQLErrors // Errors about some repositories, when the rest of the answer can be used
+	if err != nil && !errors.As(err, &nodeErrs) {
+		return nil, nil, err
+	}
+	if len(docsListed.Nodes) != len(ids) {
+		return nil, nil, Errorf(http.StatusBadGateway, "GitHub GraphQL returned %d nodes for %d ids", len(docsListed.Nodes), len(ids))
+	}
+	folders := make([]*githubFolder, len(ids))
+	isListed := make([]bool, len(ids))
+	for k, node := range docsListed.Nodes {
+		if node != nil && !nodeErrs.hasErrorInNode(k) { // A `docs` folder that failed can't be told from a missing one, so it isn't counted as listed
+			folders[k], isListed[k] = node.Docs, true
+		}
+	}
+	return folders, isListed, nil
+}
+
+// One file as GitHub GraphQL gives it (`Blob`, the fields in use)
+type githubFile struct {
+	IsBinary bool    `json:"isBinary"` // `true` if GitHub judged the file binary by its content. Then `Text` is `nil`
+	Text     *string `json:"text"`     // The text in UTF-8. `nil` for a binary file
+}
+
+// Reads the files at `pickedPaths` (position in `nodeIDs` -> path) with one query that ends by `deadline`.
+//
+// Returns:
+//   - Position -> the file. `nil` where GraphQL couldn't give the repository or the file is gone
+//   - An error if the query failed, as for `FetchReadmesByNodeIDs`
+func readReadmeFiles(cfg *Config, nodeIDs []string, pickedPaths map[int]string, deadline time.Time) (map[int]*githubFile, error) {
 	// Each repository needs its own file path, so each gets its own aliased field (`r<position>`) with its own variables
 	fields := []string{}
 	params := []string{}
 	variables := map[string]any{}
 	for i, pickedPath := range pickedPaths {
-		if pickedPath == "" {
-			continue
-		}
-		fields = append(fields, fmt.Sprintf("r%d: node(id: $id%d) { ... on Repository { object(expression: $path%d) { ... on Blob { text } } } }", i, i, i))
+		fields = append(fields, fmt.Sprintf("r%d: node(id: $id%d) { ... on Repository { object(expression: $path%d) { ... on Blob { isBinary text } } } }", i, i, i))
 		params = append(params, fmt.Sprintf("$id%d: ID!, $path%d: String!", i, i))
 		variables[fmt.Sprintf("id%d", i)] = nodeIDs[i]
 		variables[fmt.Sprintf("path%d", i)] = "HEAD:" + pickedPath
 	}
-	if len(fields) == 0 {
-		return readmes, nil
-	}
 	contentQuery := fmt.Sprintf("query(%s) { %s }", strings.Join(params, ", "), strings.Join(fields, " "))
 	var contents map[string]*struct { // Alias (`r<position>`) -> repository. `nil` if GraphQL can't give it
-		Object *struct { // `nil` if the file is gone
-			Text *string `json:"text"` // `nil` if GraphQL gives the file as binary
-		} `json:"object"`
+		Object *githubFile `json:"object"` // `nil` if the file is gone
 	}
-	timeLeft, err = timeLeftUntil(deadline)
+	timeLeft, err := timeLeftUntil(deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -459,23 +593,26 @@ func FetchReadmesByNodeIDs(cfg *Config, nodeIDs []string, deadline time.Time) ([
 	if err != nil && !errors.As(err, &contentErrs) {
 		return nil, err
 	}
-	for i, pickedPath := range pickedPaths {
-		repo := contents[fmt.Sprintf("r%d", i)]
-		if pickedPath == "" || repo == nil || repo.Object == nil || repo.Object.Text == nil {
-			continue
+	files := map[int]*githubFile{}
+	for i := range pickedPaths {
+		if repo := contents[fmt.Sprintf("r%d", i)]; repo != nil {
+			files[i] = repo.Object
 		}
-		content, isUsable := buildReadmeSnapshotFile(*repo.Object.Text)
-		if !isUsable {
-			readmes[i] = &FetchedReadme{isAbsent: true}
-			continue
-		}
-		extension := strings.ToLower(strings.TrimPrefix(path.Ext(pickedPath), "."))
-		if !readmeExtensionPattern.MatchString(extension) {
-			extension = "" // An extension that isn't allowed is dropped, and the file is saved as `<ID>`
-		}
-		readmes[i] = &FetchedReadme{extension: extension, content: content}
 	}
-	return readmes, nil
+	return files, nil
+}
+
+// Makes the README to save from the text of the file at `readmePath`: absent if the text is blank, otherwise the file content with its extension
+func buildFetchedReadme(readmePath string, text string) *FetchedReadme {
+	content, isUsable := buildReadmeSnapshotFile(text)
+	if !isUsable {
+		return &FetchedReadme{isAbsent: true}
+	}
+	extension := strings.ToLower(strings.TrimPrefix(path.Ext(readmePath), "."))
+	if !readmeExtensionPattern.MatchString(extension) {
+		extension = "" // An extension that isn't allowed is dropped, and the file is saved as `<ID>`
+	}
+	return &FetchedReadme{extension: extension, content: content}
 }
 
 // States of a README snapshot as read back (`ReadmeSnapshotContent.State`)
@@ -655,7 +792,7 @@ var errReadmesAllFailed = errors.New("every README call of a batch failed")
 //     `errReadmesAllFailed` if every call failed, so no more batches are asked.
 //     `nil` if every item was asked and at least one call succeeded
 //
-// NOTE: A call has up to three queries in a row, which usually end in a few seconds each (measured).
+// NOTE: A call usually has up to three queries in a row, each ending in a few seconds as a rule (measured).
 // One that runs past `fetchDeadline` fails, and its items are asked again later.
 // A failure about one repository isn't a failed call: GraphQL answers the others, and that one isn't fetched.
 func fetchReadmesInParallel(cfg *Config, items []StarItem, fetchDeadline time.Time) (map[int64]FetchedReadme, error) {

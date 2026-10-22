@@ -231,6 +231,9 @@ func (f *fakeGitHub) answerReadmeQuery(w http.ResponseWriter, query string, rawB
 				continue
 			}
 			file := map[string]any{}
+			if graphQLQueryAsks(query, "isBinary") {
+				file["isBinary"] = false
+			}
 			if graphQLQueryAsks(query, "text") {
 				file["text"] = readme.content
 			}

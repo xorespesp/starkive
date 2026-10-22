@@ -1748,7 +1748,8 @@ async function openImport() {
 // Settings (sync)
 // ---------------------------------------------------------------------------
 
-// Auto sync intervals (days) to choose from, with their display names. 0 is Manual only (only a run started by hand, such as Sync now, syncs).
+// Auto sync intervals (days) to choose from, with their display names.
+// 0 is Manual only (only a run started by hand, such as Sync now, syncs).
 // They must match the values the server accepts (`core.syncIntervalChoices`)
 const SYNC_INTERVALS = [
   [1, 'Every day'],
@@ -1804,7 +1805,8 @@ function syncProblem(status, readError) {
   }
   const running = status.workflow === 'active';
   if (!status.enabled_since) {
-    // The user turned it off. If the workflow is on, its scheduled runs still call the dashboard every day, against the setting
+    // The user turned it off.
+    // If the workflow is on, its scheduled runs still call the dashboard every day, against the setting
     if (!running) return null;
     return { text: 'Sync is off in Settings, but its workflow is on in GitHub Actions', hint: 'Turn the workflow off, or turn sync on.', fix: 'off' };
   }
@@ -1989,7 +1991,8 @@ function openSettings() {
   fixButton.onclick = () => change({ enabled: syncProblem(state.sync, state.syncError)?.fix === 'on' });
   select.onchange = () => change({ sync_interval_days: Number(select.value) });
 
-  // Sync now starts a run of the sync workflow, which syncs whatever the interval. `watchSyncWorkflowRun` follows it until it ends
+  // Sync now starts a run of the sync workflow, which syncs whatever the interval.
+  // `watchSyncWorkflowRun` follows it until it ends
   syncNow.onclick = async () => {
     state.syncRequested = true; // Locks the button at once, so a second press can't start a second run
     error.hidden = true;
@@ -2010,10 +2013,14 @@ function openSettings() {
   const modal = openModal({ panel, className: 'settings-dialog', onClose: () => syncStatusViews.delete(update) });
   close.onclick = modal.close;
   update();
-  // First draw with the status already held. Redraw when the latest status arrives (it may have changed outside the dashboard).
+  // First draw with the status already held.
+  // Redraw when the latest status arrives (it may have changed outside the dashboard).
   // If the session closes meanwhile (sign-out, or a reload opening a new session), the request is cancelled and nothing changes
   fetchSyncStatus()
     .then((result) => {
+      // A read sent before Sync now was pressed could hide the run it started, so it is dropped.
+      // `watchSyncWorkflowRun` reads the status again while a run goes
+      if (state.syncRequested || syncWatch) return;
       ({ sync: state.sync, syncError: state.syncError } = result);
       showSyncStatus();
       watchSyncWorkflowRun();
@@ -2021,7 +2028,8 @@ function openSettings() {
     .catch(() => {}); // Only a cancel error comes here
 }
 
-// Redraw functions of the open Settings dialogs. `showSyncStatus` calls them when `state.sync` changes
+// Redraw functions of the open Settings dialogs.
+// `showSyncStatus` calls them whenever `state.sync` changes
 const syncStatusViews = new Set();
 
 /** Draws the sync status again: the warning mark (`updateSettingsAttention`) and every open Settings dialog. */
@@ -2039,21 +2047,25 @@ const SYNC_WATCH_MS = 5000;
 const SYNC_WATCH_SLOW_MS = 30 * 1000;
 
 // Time after which a followed run is read every `SYNC_WATCH_SLOW_MS` (milliseconds).
-// A sync normally ends well before it
+// A sync stops starting requests after four minutes (`syncTimeLimit` on the server), so a run past this mostly waits in the queue
 const SYNC_WATCH_SLOW_AFTER_MS = 5 * 60 * 1000;
 
 let syncWatch = null; // The loop of `watchSyncWorkflowRun` while it runs. `null` otherwise
 
+const announcedSyncRunIds = new Set(); // IDs of runs started by hand whose end was reported, so a stale read can't report one twice
+
 /**
  * Follows the running sync (`state.sync.active_run`) until that run ends, reading the status every `SYNC_WATCH_MS` (later `SYNC_WATCH_SLOW_MS`).
  * It does nothing if no sync runs or it already follows one.
- * When a run started by hand (Sync now) ends, it loads the dashboard again and reports the new items or the failure.
+ * When a run started by hand (Sync now) ends, it loads the archive again and reports the new items, the failure or the cancel.
  *
  * NOTE: Call it whenever `state.sync` is set, so a sync that started elsewhere (a scheduled run, another device) is followed too.
  * It keeps going after the Settings dialog closes, and stops when the session closes.
  * It follows one run by its ID, so a run that starts right after it (a scheduled run waiting behind Sync now) doesn't take its place.
  * The end is judged only from its own reads.
  * A failed read, here or elsewhere (`state.sync` set to `null`), says nothing about the run, so the status is read again later.
+ * The archive is loaded again in the same session (`loadAll`), not with `openDashboard`.
+ * A new session would cancel the requests of open dialogs, which then stay locked.
  */
 function watchSyncWorkflowRun() {
   if (syncWatch || !state.sync?.active_run) return;
@@ -2085,16 +2097,23 @@ function watchSyncWorkflowRun() {
       watchSyncWorkflowRun();
       return;
     }
-    const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
-    if (finished && finished.conclusion !== 'success') {
-      await openDashboard(state.repo);
-      setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
+    if (announcedSyncRunIds.has(watched.id)) return;
+    announcedSyncRunIds.add(watched.id);
+    try {
+      await loadAll(signal);
+      render();
+      liveMetaLoader.reportErrors = true;
+    } catch (err) {
+      if (!isCancelled(err)) setStatus(err.message, { error: true }); // A closed session already told the user, so nothing is written over it
       return;
     }
+    const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
     // The run ran on GitHub, so its counts aren't here.
     // The new items are found by comparing the archive before and after
-    const newCount = () => state.starItems.filter((item) => !idsBefore.has(item.id)).length;
-    await openDashboard(state.repo, () => `${finished ? 'Synced' : 'Sync finished'}: ${newCount()} new`);
+    const newCount = state.starItems.filter((item) => !idsBefore.has(item.id)).length;
+    if (finished?.conclusion === 'cancelled') setStatus('Sync was cancelled');
+    else if (finished && finished.conclusion !== 'success') setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
+    else setStatus(`${finished ? 'Synced' : 'Sync finished'}: ${newCount} new`);
   })();
 }
 
@@ -2108,15 +2127,15 @@ function watchSyncWorkflowRun() {
 function wait(ms, signal) {
   return new Promise((resolve, reject) => {
     signal?.throwIfAborted();
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort); // A long follow makes many waits, so each removes its listener
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -2292,8 +2311,7 @@ function moveToDashboardURL(dashboardURL) {
  * Opens a new session, loads the data and opens the dashboard.
  *
  * @param {string} repo DB repository name (`owner/repo`)
- * @param {string|(() => string)} [done] Message to show after loading, instead of "Loaded N repositories" (like the result of Sync now).
- *   A function is called after loading, so the message can count what was loaded
+ * @param {string} [done] Message to show after loading, instead of "Loaded N repositories"
  * @param {{ signal: AbortSignal, archive: Promise, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
  *   and the archive and sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
  *
@@ -2336,7 +2354,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
     const syncTrouble = syncProblem(state.sync, state.syncError);
     if (metaError) setStatus(`Could not load some repository details from GitHub: ${metaError.message}`, { error: true });
     else if (syncTrouble) setStatus(`${syncTrouble.text}. Open Settings for details`, { error: true }); // Warn, so a stopped sync doesn't go unnoticed
-    else setStatus((typeof done === 'function' ? done() : done) || `Loaded ${state.starItems.length} repositories`);
+    else setStatus(done || `Loaded ${state.starItems.length} repositories`);
   } catch (err) {
     if (!isCancelled(err)) setStatus(err.message, { error: true });
   }

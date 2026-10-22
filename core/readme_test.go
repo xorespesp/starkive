@@ -140,40 +140,41 @@ func TestReadReadmeSnapshotPaths(t *testing.T) {
 	}
 }
 
-// Tests which file of a folder is picked as the README.
+// Tests which files of a folder count as READMEs, and the order GitHub picks among them.
 //   - `readme` alone or with one extension counts, in any case. Two dots, other names, folders, submodules and symbolic links don't
 //   - Markdown comes before another extension, which comes before no extension. A tie goes by byte order
-func TestPickReadmeFileName(t *testing.T) {
+//   - A folder that doesn't exist has none
+func TestListReadmeFileNames(t *testing.T) {
 	file := func(name string) githubFolderEntry {
 		return githubFolderEntry{Name: name, Type: "blob", Mode: 0o100644}
 	}
 	cases := []struct {
 		name    string
 		entries []githubFolderEntry
-		want    string
+		want    []string
 	}{
-		{"one", []githubFolderEntry{file("LICENSE"), file("Readme.md")}, "Readme.md"},
-		{"no extension", []githubFolderEntry{file("README")}, "README"},
-		{"other extension before none", []githubFolderEntry{file("README"), file("README.rst")}, "README.rst"},
-		{"Markdown first", []githubFolderEntry{file("README.TXT"), file("README"), file("README.md")}, "README.md"},
-		{"markdown extension", []githubFolderEntry{file("README.rst"), file("readme.markdown")}, "readme.markdown"},
-		{"two dots", []githubFolderEntry{file("README.ko.md"), file("README.zh-CN.md")}, ""},
-		{"two dots beside one", []githubFolderEntry{file("README.Music.md"), file("README.md")}, "README.md"},
-		{"byte order", []githubFolderEntry{file("readme.md"), file("README.md")}, "README.md"},
-		{"other names", []githubFolderEntry{file("READMEFIRST.md"), file("docs-readme.md")}, ""},
+		{"one", []githubFolderEntry{file("LICENSE"), file("Readme.md")}, []string{"Readme.md"}},
+		{"no extension", []githubFolderEntry{file("README")}, []string{"README"}},
+		{"other extension before none", []githubFolderEntry{file("README"), file("README.rst")}, []string{"README.rst", "README"}},
+		{"Markdown first", []githubFolderEntry{file("README.TXT"), file("README"), file("README.md")}, []string{"README.md", "README.TXT", "README"}},
+		{"markdown extension", []githubFolderEntry{file("README.rst"), file("readme.markdown")}, []string{"readme.markdown", "README.rst"}},
+		{"two dots", []githubFolderEntry{file("README.ko.md"), file("README.zh-CN.md")}, []string{}},
+		{"two dots beside one", []githubFolderEntry{file("README.Music.md"), file("README.md")}, []string{"README.md"}},
+		{"byte order", []githubFolderEntry{file("readme.md"), file("README.md")}, []string{"README.md", "readme.md"}},
+		{"other names", []githubFolderEntry{file("READMEFIRST.md"), file("docs-readme.md")}, []string{}},
 		{"folder, submodule, symbolic link", []githubFolderEntry{
 			{Name: "readme", Type: "tree", Mode: 0o40000},
 			{Name: "README.md", Type: "commit", Mode: 0o160000},
 			{Name: "README.rst", Type: "blob", Mode: 0o120000},
-		}, ""},
+		}, []string{}},
 	}
 	for _, c := range cases {
-		if got := (&githubFolder{Entries: c.entries}).pickReadmeFileName(); got != c.want {
+		if got := (&githubFolder{Entries: c.entries}).listReadmeFileNames(); !slices.Equal(got, c.want) {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
 	}
 	var missingFolder *githubFolder
-	if got := missingFolder.pickReadmeFileName(); got != "" {
+	if got := missingFolder.listReadmeFileNames(); len(got) != 0 {
 		t.Errorf("no folder: %q", got)
 	}
 }
@@ -198,7 +199,11 @@ type testReadmeRepo struct {
 //   - The README is picked from `.github`, then the root, then `docs`, and only repositories with none in the first two get `docs` listed
 //   - The picked file is read by its path, cut like any README, and its extension is kept in lower case
 //   - A repository not found, one with no README anywhere, and a blank README are absent
-//   - An ID that isn't a repository, a binary README, a README whose content query alone failed,
+//   - A binary README isn't a README, as on GitHub: the next one in the same folder is read,
+//     or one in the next folder (listing `docs` if needed), and with none left the README is absent.
+//     After `maxReadmeContentQueries` content queries, a repository still left gives `nil`.
+//     If a later query fails, the READMEs already read are kept and the repositories still left give `nil`
+//   - An ID that isn't a repository, a README whose content query alone failed,
 //     a repository with an error inside it (a folder that failed), a repository gone before the `docs` listing,
 //     and a file gone before the content query give `nil`, so they are asked again later.
 //     The test server answers like GitHub: only the fields asked for, each folder by the path in its expression,
@@ -230,13 +235,19 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		"R_fileGone": {root: []string{"README.md"}, texts: map[string]string{"README.md": "# Gone\n"}, fileGone: true},
 		"R_link":     {root: []string{"main.c"}, links: []string{"README.md"}, texts: map[string]string{"README.md": "docs/intro.md"}},
 		"R_upper":    {root: []string{"README.MD"}, texts: map[string]string{"README.MD": "# Upper case\n"}},
+		// Binary READMEs: a file not in `texts` is binary
+		"R_binNext":   {root: []string{"README.md", "README.txt"}, texts: map[string]string{"README.txt": "Text next\n"}},
+		"R_binGitHub": {github: []string{"README.md"}, root: []string{"README.md"}, texts: map[string]string{"README.md": "# Root after binary\n"}},
+		"R_binDocs":   {root: []string{"README.md"}, docs: []string{"README.rst"}, texts: map[string]string{"docs/README.rst": "Docs after binary\n"}},
+		"R_binMany":   {root: []string{"README.md", "README.rst", "README.txt", "README"}},
 	}
 	// Repositories with nothing to read come between the ones with a README, so a position that slips would show
-	ids := []string{"R_md", "R_github", "R_docs", "R_none", "R_empty", "R_gone", "U_user", "R_binary", "R_blank", "R_noext", "R_badext", "R_long", "R_several", "R_denied", "R_rootErr", "R_docsErr", "R_docsGone", "R_fileGone", "R_link", "R_upper"}
+	ids := []string{"R_md", "R_github", "R_docs", "R_none", "R_empty", "R_gone", "U_user", "R_binary", "R_blank", "R_noext", "R_badext", "R_long", "R_several", "R_denied", "R_rootErr", "R_docsErr", "R_docsGone", "R_fileGone", "R_link", "R_upper", "R_binNext", "R_binGitHub", "R_binDocs", "R_binMany"}
 
 	var mu sync.Mutex
 	var failWith func(w http.ResponseWriter) // If not `nil`, every query is answered with it
 	failQuery := ""                          // Kind of the query that `failWith` answers. Empty for every kind
+	failContentFrom := 0                     // If not 0, content queries from this one on (counting from 1) fail with 502
 	queries := []string{}                    // Kind of each query received: `listing`, `docs` or `content`
 	docsAsked := []string{}                  // IDs whose `docs` folder was listed
 	var query string                         // The query being answered. Only the fields it asks for are given, as GitHub does
@@ -318,6 +329,10 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 			failWith(w)
 			return
 		}
+		if kind == "content" && failContentFrom != 0 && countOf(queries, "content")+1 >= failContentFrom {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			return
+		}
 		if !isEveryGraphQLVariableDeclared(query) {
 			fmt.Fprint(w, `{"data":null,"errors":[{"message":"Variable is not declared, is declared with another type, or is declared but not used"}]}`)
 			return
@@ -373,9 +388,13 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 					data[alias] = map[string]any{"object": nil}
 				default:
 					file := map[string]any{}
+					t, isText := repo.texts[strings.TrimPrefix(path, "HEAD:")]
+					if asks("isBinary") {
+						file["isBinary"] = !isText
+					}
 					if asks("text") {
 						var text any // `nil` (JSON `null`) for a binary file
-						if t, ok := repo.texts[strings.TrimPrefix(path, "HEAD:")]; ok {
+						if isText {
 							text = t
 						}
 						file["text"] = text
@@ -397,7 +416,8 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		{extension: "md", content: []byte("# GitHub\n")},
 		{extension: "rst", content: []byte("Docs\n")},
 		absent, absent, absent,
-		nil, nil,
+		nil,
+		absent, // The only README is binary
 		absent,
 		{content: []byte("plain\n")},
 		{content: []byte("old\n")}, // `old-md` isn't allowed, so it has no extension
@@ -406,11 +426,17 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		nil, nil, nil, nil, nil,
 		absent, // A symbolic link isn't picked, and nothing else is a README
 		{extension: "md", content: []byte("# Upper case\n")},
+		{extension: "txt", content: []byte("Text next\n")},
+		{extension: "md", content: []byte("# Root after binary\n")},
+		{extension: "rst", content: []byte("Docs after binary\n")},
+		nil, // Still binary after `maxReadmeContentQueries` content queries
 	}
 	if err != nil || fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes(want)) {
 		t.Errorf("READMEs: %v\n got %v", err, derefReadmes(got))
 	}
-	if !slices.Equal(queries, []string{"listing", "docs", "content"}) || !slices.Equal(docsAsked, []string{"R_docs", "R_none", "R_empty", "R_docsErr", "R_docsGone", "R_link"}) {
+	// The second round lists `docs` for repositories whose first two folders had only binary READMEs, and reads the next picks
+	if !slices.Equal(queries, []string{"listing", "docs", "content", "docs", "content", "content"}) ||
+		!slices.Equal(docsAsked, []string{"R_docs", "R_none", "R_empty", "R_docsErr", "R_docsGone", "R_link", "R_binary", "R_binDocs"}) {
 		t.Errorf("queries %v, docs asked for %v", queries, docsAsked)
 	}
 
@@ -419,6 +445,14 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{absent, nil})) || !slices.Equal(queries, []string{"listing"}) {
 		t.Errorf("nothing to read: %v, %v, queries %v", derefReadmes(got), err, queries)
 	}
+
+	// The second content query fails: the README read in the first is kept, and the repository still left gives `nil`
+	queries, failContentFrom = nil, 2
+	if got, err := FetchReadmesByNodeIDs(cfg, []string{"R_md", "R_binNext"}, time.Now().Add(githubTimeout)); err != nil ||
+		fmt.Sprint(derefReadmes(got)) != fmt.Sprint(derefReadmes([]*FetchedReadme{{extension: "md", content: []byte("# MD\n")}, nil})) {
+		t.Errorf("later query fails: %v, %v, queries %v", derefReadmes(got), err, queries)
+	}
+	failContentFrom = 0
 
 	errorCases := []struct {
 		name          string
@@ -504,6 +538,17 @@ func isEveryGraphQLVariableDeclared(query string) bool {
 		}
 	}
 	return len(used) == len(declared)
+}
+
+// Returns how many times `value` is in `values`
+func countOf(values []string, value string) int {
+	count := 0
+	for _, v := range values {
+		if v == value {
+			count++
+		}
+	}
+	return count
 }
 
 // Returns the READMEs `readmes` as values, so they print with their content. `nil` stays `nil`
