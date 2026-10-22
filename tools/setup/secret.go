@@ -1,4 +1,4 @@
-// Writing Actions secrets in the DB repository. Used to pass the scheduled sync key to the workflow.
+// Writing Actions secrets in the DB repository. Used to pass the sync key to the workflow.
 // GitHub accepts a secret value only after it is encrypted with the repository's public key.
 // So reading the public key and the encryption (sealed box) are here too.
 package main

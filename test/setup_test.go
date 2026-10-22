@@ -13,11 +13,11 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Tests for the paths that are open before sign-in (starting sign-in, the scheduled sync call, the deployment check).
+// Tests for the paths that are open before sign-in (starting sign-in, the call from the sync workflow, the deployment check).
 // Also tests for saving the sign-in GitHub App settings (`core.SaveGitHubApp`), which the setup tool calls.
 // Creating the App (manifest, code exchange, owner check) is tested by the unit tests of the setup tool package (`tools/setup`).
 
-// Tests that API requests without sign-in, and scheduled calls with a missing or wrong sync key, end with 401.
+// Tests that API requests without sign-in, and calls from the sync workflow with a missing or wrong sync key, end with 401.
 // They must not send a single request to GitHub.
 //
 // NOTE: Finding the DB repository requires asking GitHub.

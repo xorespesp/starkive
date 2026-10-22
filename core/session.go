@@ -33,7 +33,7 @@ const ClearSessionCookie = sessionCookie + "=; Max-Age=0; " + cookieAttrs
 //
 // Args:
 //   - `purpose`: Purpose string. "starkive-session" for session signatures, "starkive-github-app" for encrypting the App client secret,
-//     "starkive-sync" for the scheduled sync key, "starkive-check-deployment" for the deployment check proof
+//     "starkive-sync" for the sync key, "starkive-check-deployment" for the deployment check proof
 //
 // Returns:
 //   - A 32-byte key

@@ -1,6 +1,6 @@
 // The starkive setup tool.
 // It puts the installation work a person would otherwise do by hand into one flow:
-// preparing the DB repository, deploying the dashboard to Vercel with its environment variable value, the sign-in GitHub App, and the auto sync workflow.
+// preparing the DB repository, deploying the dashboard to Vercel with its environment variable value, the sign-in GitHub App, and the sync workflow.
 // All of this runs on the user's computer, so the dashboard server has no setup path that is open before sign-in.
 //
 // Usage.
@@ -31,7 +31,7 @@
 //     If it is a foreign repository or has another major format version, it stops.
 //     Then it adds the initial files that are missing (`addInitialFiles`).
 //     Next it checks the Workflows and Actions permissions (this needs a branch, so it runs after initialization).
-//     Then it writes the scheduled sync key (`core.DeriveSyncKey`) to the DB repository's Actions secret (`core.SyncKeySecretName`)
+//     Then it writes the sync key (`core.DeriveSyncKey`) to the DB repository's Actions secret (`core.SyncKeySecretName`)
 //  2. Deploy dashboard: Checks that the deployment at the dashboard address is set up with this repository and the current token (`checkDashboard`).
 //     The address is the one registered in the App, or the default address of the dashboard name (`buildDashboardName`) if there is no App.
 //     If the check passes, it moves on.
@@ -40,7 +40,7 @@
 //     While waiting for the Vercel deployment, it checks that address in the background and moves on by itself once it passes (`askDashboardURL`).
 //     If the person chooses to enter it by hand, it stops the check and takes the address
 //  3. Create sign-in app: If there is no App, or it can't be read, it creates the sign-in GitHub App
-//  4. Install workflow: Records the dashboard address in `config.json`, and installs the auto sync workflow if it is missing
+//  4. Install workflow: Records the dashboard address in `config.json`, and installs the sync workflow if it is missing
 //
 // For testing, the same environment variables as the server (`STARKIVE_GH_API_URL`, `STARKIVE_GH_WEB_URL`) can point the GitHub addresses to a fake server.
 package main
@@ -306,7 +306,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 		return err
 	}
 
-	// Scheduled sync key.
+	// Sync key.
 	// A secret value can't be read back and compared, so it is overwritten every time (the same token gives the same value)
 	if err := writeSecret(cfg, publicKey, core.SyncKeySecretName, core.DeriveSyncKey(cfg)); err != nil {
 		return err
@@ -394,7 +394,7 @@ func run(u ui, server *localServer, vercelDeployCommit commitRef) error {
 	if err := finishDBRepo(cfg, app.SiteURL); err != nil {
 		return err
 	}
-	u.say("The automatic sync workflow is set up in `" + cfg.DBRepoFullName + "`.")
+	u.say("The sync workflow is set up in `" + cfg.DBRepoFullName + "`.")
 	u.done("Sign in to the dashboard with GitHub as `"+owner.Login+"`.", "Open the dashboard", app.SiteURL)
 	return nil
 }

@@ -1036,7 +1036,7 @@ dialog.settings-dialog {
   }
 }
 
-/* Dot on the account button and on Settings in its menu when auto sync has a problem to report (`syncProblem`) */
+/* Dot on the account button and on Settings in its menu when sync has a problem to report (`syncProblem`) */
 #account-button.attention::after,
 #settings-button.attention::after {
   content: '';

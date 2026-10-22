@@ -3,7 +3,7 @@
 //	GET              -> { repo, username }: `repo` is the DB repository `owner/repo`, `username` is the username of the account that signed in
 //	                 (an empty string if it can't be read).
 //	                 401 if not signed in. 409 if the DB repository can't be used.
-//	                 The auto sync status is in `/api/sync-status`
+//	                 The sync status is in `/api/sync-status`
 //	POST             -> { url }: The GitHub authorization address the browser goes to. Also sets the state cookie.
 //	                 409 { error } if the sign-in GitHub App is missing, can't be decrypted, or `config.json` is broken (tells you to run the setup tool).
 //	                 409 { error, dashboard_url } if called from an address that isn't the dashboard's canonical address (the page moves there)

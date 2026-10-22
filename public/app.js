@@ -43,8 +43,9 @@ const state = {
   sort: 'newest', // Sort order: `newest`, `oldest` (both by `starred_at`) or `name`
   shown: PAGE_SIZE, // Items to draw in the list. It grows when you scroll down or press "Load more"
   repo: '', // DB repository name (owner/repo). Comes with the sign-in response
-  sync: null, // Auto sync status (`core.SyncStatus`: interval, workflow state, last scheduled run) from `fetchSyncStatus`. `null` if not received yet, or if it couldn't be read
-  syncError: '', // Why the auto sync status couldn't be read (`fetchSyncStatus`). An empty string if it was read
+  sync: null, // Sync status (`core.SyncStatus`: interval, workflow state, last scheduled run, running and last runs) from `fetchSyncStatus`. `null` if not received yet, or if it couldn't be read
+  syncError: '', // Why the sync status couldn't be read (`fetchSyncStatus`). An empty string if it was read
+  syncRequested: false, // `true` from pressing Sync now until the server answers. After that, `sync.active_run` shows the run
   noteDrafts: new Map(), // Item ID -> note being edited `{ draft, saving }`. Several items can be edited at once. It lives here, not in the DOM, so a redraw keeps the text
 };
 
@@ -173,7 +174,7 @@ const SESSION_EXPIRED = 'Session expired. Please sign in again'; // Text shown w
  * After the session closes, no data from it stays behind the sign-in screen.
  */
 function clearLoadedData() {
-  Object.assign(state, { starItems: [], starLists: [], liveMeta: new Map(), missing: new Set(), archivedMeta: new Map(), noteDrafts: new Map(), sync: null, syncError: '' });
+  Object.assign(state, { starItems: [], starLists: [], liveMeta: new Map(), missing: new Set(), archivedMeta: new Map(), noteDrafts: new Map(), sync: null, syncError: '', syncRequested: false });
   liveMetaLoader = newLiveMetaLoader(null);
 }
 
@@ -188,7 +189,7 @@ function fetchArchiveFiles(beforeSignIn = false) {
 }
 
 /**
- * Requests the auto sync status (`sync-status`).
+ * Requests the sync status (`sync-status`).
  *
  * @param {boolean} [beforeSignIn] Whether the request is sent before we know the user is signed in (the option of the same name in `api`)
  * @returns {Promise<{ sync: object|null, syncError: string }>} The status (`core.SyncStatus`), or why it couldn't be read.
@@ -1744,30 +1745,31 @@ async function openImport() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings (auto sync)
+// Settings (sync)
 // ---------------------------------------------------------------------------
 
-// Auto sync intervals (days) to choose from, with their display names.
+// Auto sync intervals (days) to choose from, with their display names. 0 is Manual only (only a run started by hand, such as Sync now, syncs).
 // They must match the values the server accepts (`core.syncIntervalChoices`)
 const SYNC_INTERVALS = [
   [1, 'Every day'],
   [2, 'Every 2 days'],
   [3, 'Every 3 days'],
   [7, 'Every week'],
+  [0, 'Manual only'],
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000; // One day (milliseconds)
 
-// With no scheduled run for this long, auto sync is treated as stopped.
-// The workflow runs every day whatever the interval.
+// With no scheduled run for this long, sync is treated as stopped.
+// The workflow runs every day whatever the interval, even with Manual only.
 // But GitHub can delay or skip scheduled runs when busy (docs, measured).
 // So this is three days, to avoid warning about one skipped day
 const SYNC_STALL_MS = 3 * DAY_MS;
 
 /**
- * Checks whether auto sync has a problem the user should know about.
+ * Checks whether sync has a problem the user should know about.
  *
- * @param {object|null} status Auto sync status from the server (the `state.sync` shape, `core.SyncStatus`):
+ * @param {object|null} status Sync status from the server (the `state.sync` shape, `core.SyncStatus`):
  *   `enabled_since` (when the user turned it on, `null` if off), `workflow` (GitHub's workflow state, or `missing`),
  *   `last_scheduled_run` (`run_started_at`, `conclusion`, `html_url`), `interval_days`
  * @param {string} readError Why the status couldn't be read (the `state.syncError` shape). An empty string if it was read
@@ -1789,7 +1791,7 @@ function syncProblem(status, readError) {
   if (readError) {
     // Don't treat "couldn't read" as "no problem". Don't guess the cause, and show the error message as is
     return {
-      text: "Couldn't read the auto sync status",
+      text: "Couldn't read the sync status",
       hint: `If this keeps happening, check the access token's Actions permission. Details: ${readError}`,
       fix: null,
     };
@@ -1798,19 +1800,19 @@ function syncProblem(status, readError) {
   if (status.workflow === 'missing') {
     // GitHub can answer the same 404 when the workflow file is missing and when the token has no Actions permission.
     // So the cause is not guessed. The fix for both is the setup tool
-    return { text: "Couldn't find the auto sync workflow in your archive repository", hint: 'Run the starkive setup tool again.', fix: null };
+    return { text: "Couldn't find the sync workflow in your archive repository", hint: 'Run the starkive setup tool again.', fix: null };
   }
   const running = status.workflow === 'active';
   if (!status.enabled_since) {
-    // The user turned it off. If the workflow is on, it still syncs every day, against the setting
+    // The user turned it off. If the workflow is on, its scheduled runs still call the dashboard every day, against the setting
     if (!running) return null;
-    return { text: 'Auto sync is off in Settings, but its workflow is on in GitHub Actions', hint: 'Turn the workflow off, or turn auto sync on.', fix: 'off' };
+    return { text: 'Sync is off in Settings, but its workflow is on in GitHub Actions', hint: 'Turn the workflow off, or turn sync on.', fix: 'off' };
   }
   if (status.workflow === 'disabled_inactivity') {
-    return { text: 'GitHub turned off auto sync after 60 days without activity in your archive repository', hint: 'Turn it on again here.', fix: 'on' };
+    return { text: 'GitHub turned off the sync workflow after 60 days without activity in your archive repository', hint: 'Turn it on again here.', fix: 'on' };
   }
   if (!running) {
-    return { text: 'Auto sync is on in Settings, but its workflow is off in GitHub Actions', hint: 'Turn it on again, or turn auto sync off.', fix: 'on' };
+    return { text: 'Sync is on in Settings, but its workflow is off in GitHub Actions', hint: 'Turn it on again, or turn sync off.', fix: 'on' };
   }
   // Runs before the time it was turned on belong to before it was off, so they are ignored
   const enabledAt = new Date(status.enabled_since).getTime();
@@ -1824,7 +1826,7 @@ function syncProblem(status, readError) {
   const from = last ? new Date(last.run_started_at).getTime() : enabledAt;
   if (!(Date.now() - from > SYNC_STALL_MS)) return null;
   return {
-    text: `Auto sync hasn't run since ${DATE.format(new Date(from))}`,
+    text: `Sync hasn't run since ${DATE.format(new Date(from))}`,
     hint: 'Open the Actions tab of your archive repository and check that GitHub Actions is allowed to run the starkive sync workflow.',
     fix: null,
   };
@@ -1882,7 +1884,7 @@ function updateSettingsAttention() {
 
 /**
  * Opens the Settings dialog. It has two sections.
- * Auto sync: on or off, the interval, the last scheduled run, a message and fix button when the setting and the real state differ, and Sync now.
+ * Sync: on or off, the auto sync interval (or Manual only), the last scheduled run, a message and fix button when the setting and the real state differ, and Sync now.
  * Quick add: the bookmarklet link (`bookmarkletLink`).
  *
  * NOTE: The checkbox shows the state the user set (`enabled_since`).
@@ -1891,11 +1893,12 @@ function updateSettingsAttention() {
  * So the dialog shows a message and a button to match them (`fix` of `syncProblem`).
  * Scheduled runs and Actions tab changes happen outside the dashboard, so the latest status is fetched again on open.
  * Just opening it writes nothing.
- * One function, `update`, sets locking and display from the current values (`state.sync`, `state.syncError`, `busy`).
+ * One function, `update`, sets locking and display from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `busy`).
  * The dialog keeps no copy of the status, so a reload of the dashboard (`openDashboard`) and the dialog never disagree.
+ * Sync now is drawn from the runs on GitHub (`active_run`), so it shows a running sync after the dialog or the page is opened again.
  */
 function openSettings() {
-  let busy = false;
+  let busy = false; // `true` while a setting change is sent
   const enabled = el('input', { type: 'checkbox' });
   const select = el('select', {}, ...SYNC_INTERVALS.map(([days, label]) => el('option', { value: String(days), textContent: label })));
   const lastRun = el('span'); // The last scheduled run. It links to the run on GitHub when there is one, so it stays on one line
@@ -1913,15 +1916,15 @@ function openSettings() {
     el(
       'section',
       { className: 'settings-section' },
-      el('h3', { textContent: 'Auto sync' }),
-      el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details on a schedule. A repository deleted before the next sync isn't recorded." }),
-      row('Enabled', el('label', { className: 'check-option' }, enabled, 'On')),
-      row('How often', select),
+      el('h3', { textContent: 'Sync' }),
+      el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details with GitHub Actions in your archive repository, on a schedule or when you press Sync now. A repository deleted before the next sync isn't recorded." }),
+      row('Sync with GitHub', el('label', { className: 'check-option' }, enabled, 'On')),
+      row('Schedule', select),
       row('Last scheduled sync', lastRun),
       problemNote,
       fixButton,
       el('div', { className: 'settings-action' }, syncNow),
-      error, // Every action that can fail in this dialog is an auto sync action, so its error shows in this section
+      error, // Every action that can fail in this dialog is a sync action, so its error shows in this section
     ),
     el(
       'section',
@@ -1932,18 +1935,21 @@ function openSettings() {
     ),
     el('div', { className: 'actions' }, close),
   );
-  const modal = openModal({ panel, className: 'settings-dialog' });
-  close.onclick = modal.close;
-
-  // Sets locking, selected values and messages again from the current values (`state.sync`, `state.syncError`, `busy`). Event handlers don't change them directly
+  // Sets locking, selected values and messages again from the current values (`state.sync`, `state.syncError`, `state.syncRequested`, `busy`).
+  // Event handlers don't change them directly
   const update = () => {
     const status = state.sync;
     const installed = Boolean(status) && status.workflow !== 'missing';
+    const running = state.syncRequested || Boolean(status?.active_run);
+    const active = status?.workflow === 'active';
     enabled.checked = Boolean(status?.enabled_since);
     enabled.disabled = busy || !installed;
     select.value = String(status?.interval_days ?? 1);
     select.disabled = busy || !enabled.checked;
-    syncNow.disabled = busy;
+    syncNow.disabled = busy || running || !active; // GitHub refuses to start a workflow that is off (`core.TriggerSyncWorkflow`)
+    syncNow.title = !status ? "Couldn't read the sync status" : active ? '' : 'Sync now needs the sync workflow to be on';
+    if (running) syncNow.replaceChildren(spinner(), 'Processing…');
+    else syncNow.textContent = 'Sync now';
     const runUrl = safeUrl(status?.last_scheduled_run?.html_url);
     const lastRunText = status ? describeLastRun(status.last_scheduled_run) : 'Unknown';
     if (busy) lastRun.replaceChildren(spinner(), 'Processing…');
@@ -1976,43 +1982,142 @@ function openSettings() {
       showError(err);
     }
     busy = false;
-    update();
+    showSyncStatus();
+    watchSyncWorkflowRun();
   };
   enabled.onchange = () => change({ enabled: enabled.checked });
   fixButton.onclick = () => change({ enabled: syncProblem(state.sync, state.syncError)?.fix === 'on' });
   select.onchange = () => change({ sync_interval_days: Number(select.value) });
 
-  // A manual sync by the signed-in user runs right away, whatever the interval. On success, the list is loaded again
+  // Sync now starts a run of the sync workflow, which syncs whatever the interval. `watchSyncWorkflowRun` follows it until it ends
   syncNow.onclick = async () => {
-    busy = true;
+    state.syncRequested = true; // Locks the button at once, so a second press can't start a second run
     error.hidden = true;
-    update();
-    const indicator = spinner();
-    syncNow.prepend(indicator); // A sync can take a while, so the button itself shows that it is working
+    showSyncStatus();
     try {
-      const result = await api('sync-archive', { method: 'POST' });
-      // Show the new items. The dialog stays open.
-      // The result is passed on, so the reload's status message doesn't cover the sync result.
-      // The reload also fetches the auto sync status again, so the dialog is drawn again when it ends
-      openDashboard(state.repo, `Synced: ${result.added} new`).then(update);
+      const { run } = await api('sync-archive', { method: 'POST' });
+      state.sync = { ...state.sync, active_run: run }; // The server answers once the run exists (measured), so it is shown before the next read lists it
     } catch (err) {
-      if (isCancelled(err)) return;
-      showError(err);
+      if (!isCancelled(err)) showError(err);
+    } finally {
+      state.syncRequested = false;
     }
-    indicator.remove();
-    busy = false;
-    update();
+    showSyncStatus();
+    watchSyncWorkflowRun();
   };
 
+  syncStatusViews.add(update);
+  const modal = openModal({ panel, className: 'settings-dialog', onClose: () => syncStatusViews.delete(update) });
+  close.onclick = modal.close;
   update();
   // First draw with the status already held. Redraw when the latest status arrives (it may have changed outside the dashboard).
-  // If the session closes meanwhile (sign-out, or Sync now opening a new session), the request is cancelled and nothing changes
+  // If the session closes meanwhile (sign-out, or a reload opening a new session), the request is cancelled and nothing changes
   fetchSyncStatus()
     .then((result) => {
       ({ sync: state.sync, syncError: state.syncError } = result);
-      update();
+      showSyncStatus();
+      watchSyncWorkflowRun();
     })
     .catch(() => {}); // Only a cancel error comes here
+}
+
+// Redraw functions of the open Settings dialogs. `showSyncStatus` calls them when `state.sync` changes
+const syncStatusViews = new Set();
+
+/** Draws the sync status again: the warning mark (`updateSettingsAttention`) and every open Settings dialog. */
+function showSyncStatus() {
+  updateSettingsAttention();
+  for (const update of syncStatusViews) update();
+}
+
+// Time between reads of the sync status while a sync runs (milliseconds).
+// One read is about four GitHub requests on the server
+const SYNC_WATCH_MS = 5000;
+
+// Time between reads once a run has been followed for `SYNC_WATCH_SLOW_AFTER_MS` (milliseconds).
+// A run waiting in the queue for long (a GitHub outage) then doesn't use up the rate limit
+const SYNC_WATCH_SLOW_MS = 30 * 1000;
+
+// Time after which a followed run is read every `SYNC_WATCH_SLOW_MS` (milliseconds).
+// A sync normally ends well before it
+const SYNC_WATCH_SLOW_AFTER_MS = 5 * 60 * 1000;
+
+let syncWatch = null; // The loop of `watchSyncWorkflowRun` while it runs. `null` otherwise
+
+/**
+ * Follows the running sync (`state.sync.active_run`) until that run ends, reading the status every `SYNC_WATCH_MS` (later `SYNC_WATCH_SLOW_MS`).
+ * It does nothing if no sync runs or it already follows one.
+ * When a run started by hand (Sync now) ends, it loads the dashboard again and reports the new items or the failure.
+ *
+ * NOTE: Call it whenever `state.sync` is set, so a sync that started elsewhere (a scheduled run, another device) is followed too.
+ * It keeps going after the Settings dialog closes, and stops when the session closes.
+ * It follows one run by its ID, so a run that starts right after it (a scheduled run waiting behind Sync now) doesn't take its place.
+ * The end is judged only from its own reads.
+ * A failed read, here or elsewhere (`state.sync` set to `null`), says nothing about the run, so the status is read again later.
+ */
+function watchSyncWorkflowRun() {
+  if (syncWatch || !state.sync?.active_run) return;
+  const signal = sessionScope?.signal;
+  const watched = state.sync.active_run;
+  const idsBefore = new Set(state.starItems.map((item) => item.id));
+  const startedAt = Date.now();
+  syncWatch = (async () => {
+    try {
+      for (;;) {
+        await wait(Date.now() - startedAt < SYNC_WATCH_SLOW_AFTER_MS ? SYNC_WATCH_MS : SYNC_WATCH_SLOW_MS, signal);
+        const result = await fetchSyncStatus();
+        if (result.syncError) continue;
+        state.sync = result.sync;
+        state.syncError = '';
+        showSyncStatus();
+        // The run ended when it is the last finished run, or when nothing runs any more
+        if (result.sync.last_run?.id === watched.id || !result.sync.active_run) break;
+      }
+    } catch (err) {
+      if (!isCancelled(err)) throw err;
+      return;
+    } finally {
+      syncWatch = null;
+    }
+    if (watched.event !== 'workflow_dispatch') {
+      // A scheduled run only redraws the status.
+      // A run that started after it is followed next
+      watchSyncWorkflowRun();
+      return;
+    }
+    const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
+    if (finished && finished.conclusion !== 'success') {
+      await openDashboard(state.repo);
+      setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
+      return;
+    }
+    // The run ran on GitHub, so its counts aren't here.
+    // The new items are found by comparing the archive before and after
+    const newCount = () => state.starItems.filter((item) => !idsBefore.has(item.id)).length;
+    await openDashboard(state.repo, () => `${finished ? 'Synced' : 'Sync finished'}: ${newCount()} new`);
+  })();
+}
+
+/**
+ * Waits `ms` milliseconds.
+ *
+ * @param {number} ms Time to wait (milliseconds)
+ * @param {AbortSignal} [signal] If it aborts, the wait ends at once with its reason (an `AbortError`, `isCancelled`)
+ * @returns {Promise<void>}
+ */
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,13 +2292,14 @@ function moveToDashboardURL(dashboardURL) {
  * Opens a new session, loads the data and opens the dashboard.
  *
  * @param {string} repo DB repository name (`owner/repo`)
- * @param {string} [done] Message to show after loading, instead of "Loaded N repositories" (like the result of Sync now)
+ * @param {string|(() => string)} [done] Message to show after loading, instead of "Loaded N repositories" (like the result of Sync now).
+ *   A function is called after loading, so the message can count what was loaded
  * @param {{ signal: AbortSignal, archive: Promise, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
- *   and the archive and auto sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
+ *   and the archive and sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
  *
  * NOTE: Opening a new session cancels the previous session's loading, so it doesn't overwrite this page.
  * After loading, the status line shows only the first of these:
- * an error from failed live details, an auto sync problem, or the done message.
+ * an error from failed live details, a sync problem, or the done message.
  */
 async function openDashboard(repo, done = '', preloaded = null) {
   const signal = preloaded?.signal ?? beginSession();
@@ -2223,13 +2329,14 @@ async function openDashboard(repo, done = '', preloaded = null) {
     await waitForLiveMetaIdle(liveMetaLoader);
     ({ sync: state.sync, syncError: state.syncError } = await syncRequest);
     signal.throwIfAborted();
-    updateSettingsAttention();
+    showSyncStatus();
+    watchSyncWorkflowRun(); // A sync may be running, started before the page opened or on another device
     const metaError = liveMetaLoader.error;
     liveMetaLoader.reportErrors = true;
     const syncTrouble = syncProblem(state.sync, state.syncError);
     if (metaError) setStatus(`Could not load some repository details from GitHub: ${metaError.message}`, { error: true });
     else if (syncTrouble) setStatus(`${syncTrouble.text}. Open Settings for details`, { error: true }); // Warn, so a stopped sync doesn't go unnoticed
-    else setStatus(done || `Loaded ${state.starItems.length} repositories`);
+    else setStatus((typeof done === 'function' ? done() : done) || `Loaded ${state.starItems.length} repositories`);
   } catch (err) {
     if (!isCancelled(err)) setStatus(err.message, { error: true });
   }
@@ -2242,7 +2349,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
  * If the address has a repository to add (`add`), it is remembered.
  * Before sign-in, a message says it will be added after signing in.
  *
- * NOTE: It requests the sign-in state (`login-session`), the three archive files and the auto sync status at the same time.
+ * NOTE: It requests the sign-in state (`login-session`), the three archive files and the sync status at the same time.
  * Requesting the rest only after the sign-in state arrives would make the page appear that much later.
  * Before sign-in, those other requests end with 401.
  * So they are sent with `beforeSignIn`, which keeps them from counting as session expiry, and their results are dropped.

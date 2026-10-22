@@ -213,7 +213,7 @@ func TestWriteAndDeleteInOneCommit(t *testing.T) {
 
 // Tests that a write to the config file doesn't treat it as changed when only its layout differs and the values are the same.
 // It checks the compact test config file, and the same values with the keys in another order.
-//   - Recording that auto sync is on when it is already on makes no commit and leaves the file as it is
+//   - Recording that sync is on when it is already on makes no commit and leaves the file as it is
 //   - A write that changes a value commits, in the layout the server writes
 func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
 	for _, layout := range []string{"compact", "keys in another order"} {

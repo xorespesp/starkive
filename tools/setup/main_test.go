@@ -470,14 +470,14 @@ func TestAddInitialFiles(t *testing.T) {
 }
 
 // Guards the workflow installation (fake GitHub).
-//   - A missing workflow is installed with this version's content, in one commit, `user(workflow): install auto sync workflow`
+//   - A missing workflow is installed with this version's content, in one commit, `user(workflow): install sync workflow`
 //   - A workflow that is already there isn't replaced, even if its content differs
 func TestInstallWorkflowIfAbsent(t *testing.T) {
 	cfg, got := newFakeDBRepo(t, nil)
 	if err := installWorkflowIfAbsent(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got.written[core.SyncWorkflowPath] != syncWorkflowContent || len(got.written) != 1 || got.message != "user(workflow): install auto sync workflow" {
+	if got.written[core.SyncWorkflowPath] != syncWorkflowContent || len(got.written) != 1 || got.message != "user(workflow): install sync workflow" {
 		t.Errorf("missing workflow: wrote %d files with message %q", len(got.written), got.message)
 	}
 
@@ -491,7 +491,7 @@ func TestInstallWorkflowIfAbsent(t *testing.T) {
 }
 
 // Guards the contract between the workflow and the server.
-// Only the server's scheduled response `status` (the return values of `core.RunScheduledSync`) counts as success.
+// Only the `status` of the server's answer to the workflow's call (the return values of `core.SyncOnWorkflowCall`) counts as success.
 // It sends the key from the `core.SyncKeySecretName` secret in `Authorization: Bearer`, and reads `dashboard_url` from `config.json`.
 // There is no way to end in success without the dashboard's answer (`exit 0`)
 func TestSyncWorkflowContract(t *testing.T) {
@@ -518,7 +518,7 @@ func TestSyncWorkflowContract(t *testing.T) {
 // and the minor version for a script bug fix.
 // After that, update the value below to the new hash
 func TestSyncWorkflowChangeIsReviewed(t *testing.T) {
-	const reviewed = "f5a5d731966d118d902f431ec1a308eaaf765f8c17032cd80f8294ab0615782c"
+	const reviewed = "4dc0229b27add053783d7ae4482b70db94d6a826770139f01401707d35b4d991"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(syncWorkflowContent))); got != reviewed {
 		t.Errorf("the workflow changed (sha256 %s). Decide whether core.DBRepoFormat must go up, then update the hash in this test", got)
 	}

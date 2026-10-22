@@ -112,7 +112,7 @@ func parseDBRepoAccessKey(value string) (repoID int64, token string, err error) 
 //   - The server config. A 500 `HTTPError` if the environment variable is missing or malformed
 //
 // NOTE: The sign-in cookie and the sync key are checked with this config alone.
-// So a request without sign-in, or a scheduled call without the key, causes no GitHub request.
+// So a request without sign-in, or a call from the sync workflow without the key, causes no GitHub request.
 // Even if someone calls it again and again, it doesn't use the server token's rate limit.
 // After the check, `useDBRepo` fills in the repository.
 func LoadEnvConfig() (*Config, error) {

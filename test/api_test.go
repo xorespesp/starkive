@@ -91,9 +91,9 @@ type fakeGitHub struct {
 	contentsHangup      bool                          // If `true`, file read requests are cut off without a response (network error)
 	branchReadsLag      bool                          // If `true`, files read by branch name have the previous commit's content (GitHub briefly shows a just-moved branch at the old commit). Reads by commit sha are correct
 	requests            int                           // Number of all requests received
-	workflowState       string                        // State of the auto sync workflow (`active`, `disabled_manually`, `disabled_inactivity`, etc.)
+	workflowState       string                        // State of the sync workflow (`active`, `disabled_manually`, `disabled_inactivity`, etc.)
 	workflowToggles     int                           // Number of requests to turn the workflow on or off
-	runs                []fakeRun                     // Runs of the auto sync workflow
+	runs                []fakeRun                     // Runs of the sync workflow
 	badCommitSubjects   []string                      // Commit subjects that break the format (`commitSubjectRule`). Collected when each commit is made, so none are missed even if a test clears `commits`
 }
 
@@ -113,7 +113,7 @@ func (f *fakeGitHub) recordCommit(message string) {
 // One workflow run on the fake GitHub
 type fakeRun struct {
 	event      string    // Why it ran: `schedule` (scheduled) or `workflow_dispatch` (manual)
-	status     string    // `completed` or `in_progress`
+	status     string    // `queued`, `pending`, `in_progress` or `completed`
 	conclusion string    // Result when finished: `success`, `failure`, etc. Empty while in progress
 	started    time.Time // Start time
 }
@@ -380,6 +380,30 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.workflowState = "active"
 		}
 		w.WriteHeader(http.StatusNoContent)
+
+	case r.URL.Path == workflow+"/dispatches" && r.Method == http.MethodPost:
+		// Starting a run by hand. A workflow that is off refuses with 422 (measured), and so does a ref other than the default branch.
+		// With `return_run_details`, the answer has the new run's ID and page (measured)
+		var body struct {
+			Ref              string `json:"ref"`
+			ReturnRunDetails bool   `json:"return_run_details"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if f.workflowState != "active" {
+			http.Error(w, `{"message":"Cannot trigger a 'workflow_dispatch' on a disabled workflow"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		if body.Ref != "main" {
+			http.Error(w, `{"message":"No ref found for: `+body.Ref+`"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		f.runs = append(f.runs, fakeRun{event: "workflow_dispatch", status: "queued", started: time.Now()})
+		if !body.ReturnRunDetails {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		id := len(f.runs)
+		fmt.Fprintf(w, `{"workflow_run_id":%d,"run_url":"https://api.github.com/repos/me/archive/actions/runs/%d","html_url":"https://github.com/me/archive/actions/runs/%d"}`, id, id, id)
 
 	case r.URL.Path == workflow+"/runs" && r.Method == http.MethodGet:
 		// Workflow run list. Filtered by `event`, `status` and `created` (`>=<date>` only) in the query,
@@ -823,7 +847,7 @@ var fakeGitHubServers atomic.Int64
 
 // Starts a fake GitHub with a DB repository that has no sign-in GitHub App yet (before the setup tool creates the App), and sets the environment variables.
 // The repository has the marker for this version (`.starkive`),
-// a config file with the sync interval and a time turned on one hour ago, and an auto sync workflow file that is on.
+// a config file with the auto sync interval and a time turned on one hour ago, and a sync workflow file that is on.
 // To test with an empty or foreign repository, change `files` or turn on `repoEmpty` after calling it.
 //
 // Args:
@@ -862,7 +886,7 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 }
 
 // Format of DB repository commit subjects: `<who>(<file>): <summary>`.
-// Who is `user` (a person's edit) or `sync` (auto sync).
+// Who is `user` (a person's edit) or `sync` (a sync).
 // File is the DB repository file that the commit changed, or the folder `readmes` (`core.ReadmesDBDir`)
 var commitSubjectRule = regexp.MustCompile(`^(user|sync)\((star-items|star-lists|repo-meta|readmes|config|workflow)\): \S`)
 
@@ -883,7 +907,7 @@ func checkCommitSubjects(t *testing.T, gh *fakeGitHub) {
 }
 
 // Makes the content of the config file (`config.json`).
-// The sync interval is daily (1), and auto sync was turned on one hour ago (`enabled_since`).
+// The auto sync interval is daily (1), and sync was turned on one hour ago (`enabled_since`).
 //
 // Args:
 //   - `dashboardURL`: Dashboard address. Left out if empty
@@ -1202,7 +1226,7 @@ func TestDBRepoAccessKey(t *testing.T) {
 
 // Tests that the server writes nothing to a repository that isn't a starkive repository
 // (a foreign repository without the marker, or an empty repository not prepared yet).
-// Reading the config, the scheduled sync, Sync now, adding directly and turning off auto sync must all give 409.
+// Reading the config, the scheduled sync, Sync now, adding directly and turning off sync must all give 409.
 // There must be no commits and no requests to turn the workflow on or off.
 //
 // NOTE: The test uses a live session.
@@ -1237,7 +1261,7 @@ func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
 				t.Errorf("add: %d %s", rec.Code, rec.Body)
 			}
 			if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", `{"enabled":false}`, cookie); rec.Code != http.StatusConflict {
-				t.Errorf("turn off auto sync: %d %s", rec.Code, rec.Body)
+				t.Errorf("turn off sync: %d %s", rec.Code, rec.Body)
 			}
 			gh.mu.Lock()
 			defer gh.mu.Unlock()

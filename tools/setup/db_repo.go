@@ -66,7 +66,7 @@ This is your personal archive repository for the [starkive](https://github.com/x
 
 - Keep this repository private unless you want your archive to be public.
 - Don't edit, move or delete the files here, or the ` + "`" + core.SyncKeySecretName + "`" + ` secret in Settings. The dashboard and the starkive setup tool manage them.
-- Turn auto sync on or off in the dashboard's Settings, not in the Actions tab.
+- Turn sync on or off in the dashboard's Settings, not in the Actions tab.
 - Deleting this repository deletes your archive.
 `
 
@@ -98,8 +98,8 @@ func addInitialFiles(cfg *core.Config) error {
 }
 
 // The last step of the setup.
-// Records the dashboard address in `config.json`, and installs the auto sync workflow if it is missing.
-// Only when it installs the workflow, it writes to the config file that auto sync is on (`core.RecordSyncEnabled`).
+// Records the dashboard address in `config.json`, and installs the sync workflow if it is missing.
+// Only when it installs the workflow, it writes to the config file that sync is on (`core.RecordSyncEnabled`).
 //
 // Args:
 //   - `site`: The dashboard address registered in the sign-in GitHub App (the dashboard's canonical address).
@@ -121,7 +121,7 @@ func finishDBRepo(cfg *core.Config, site string) error {
 	if workflow != nil {
 		return nil // Keeps the sync options the person chose
 	}
-	// Records auto sync as on in the sync options, because GitHub turns a new workflow on (measured).
+	// Records sync as on in the sync options, because GitHub turns a new workflow on (measured).
 	// This comes before the install.
 	// Otherwise, if this failed after the install, the next run would see the workflow and never record it
 	if err := core.RecordSyncEnabled(cfg); err != nil {

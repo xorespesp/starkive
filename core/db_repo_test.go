@@ -30,7 +30,7 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 		describeJSONShape(reflect.TypeOf(StarList{})),
 		describeJSONShape(reflect.TypeOf(RepoMeta{})),
 	}, "\n")
-	const reviewed = "beae911d33375bd8f6f26d19eb0ab604af3f9f7a8bc894ec3e79983e6ce8b541"
+	const reviewed = "92527a64acfc9fde37ddffc3214feeb94bbb4f7236928d20fea754abc2c998c0"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(shape))); got != reviewed {
 		t.Errorf("the DB repository format changed (sha256 %s). Decide whether core.DBRepoFormat must go up, then update the hash in this test:\n%s", got, shape)
 	}

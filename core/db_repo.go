@@ -22,7 +22,7 @@ import (
 //	config.json                           settings and the sign-in GitHub App
 //	db/                                   the archive
 //	db/readmes/                           README snapshots, one file per repository (`ReadmesDBDir`)
-//	.github/workflows/starkive-sync.yml   auto sync workflow (installed by the setup tool)
+//	.github/workflows/starkive-sync.yml   sync workflow (installed by the setup tool)
 //	README.md                             readme (installed by the setup tool)
 const (
 	MarkerDBPath    = ".starkive"          // Content is `{"format":{"major":1,"minor":0}}` (`EncodeMarker`). Only a repository with this file is used by starkive
@@ -66,7 +66,7 @@ func (v DBRepoFormatVersion) String() string {
 
 // Reads the environment variables, fills in the DB repository, and builds the server config.
 // Used when the repository is needed without a session.
-// Signed-in requests start with `Authorize`, and scheduled syncs with `AuthorizeScheduledSync`.
+// Signed-in requests start with `Authorize`, and calls from the sync workflow with `AuthorizeSyncWorkflowCall`.
 //
 // Returns:
 //   - Server config with the DB repository filled in.
@@ -172,7 +172,7 @@ func ResolveDBRepo(cfg *Config) (DBRepoState, error) {
 //     `ErrDBRepoNotSetUp` for an empty repository, `ErrDBRepoNotStarkive` for a repository with no marker,
 //     otherwise the error from `ResolveDBRepo`
 //
-// NOTE: Every path where the server reaches the DB repository (`Authorize`, `LoadConfig`, `AuthorizeScheduledSync`) passes through this function.
+// NOTE: Every path where the server reaches the DB repository (`Authorize`, `LoadConfig`, `AuthorizeSyncWorkflowCall`) passes through this function.
 // So there can't be a write path that skips the check.
 // The server writes nothing to a foreign repository or to an empty repository that hasn't been set up.
 // The token has permission to write workflows.
@@ -309,7 +309,7 @@ func IsValidRepoFullName(fullName string) bool {
 }
 
 // Shape of the config file `config.json` at the root of the DB repository.
-// One file holds the values a person changes in Settings (whether auto sync is on, and the interval),
+// One file holds the values a person changes in Settings (whether sync is on, and the auto sync interval),
 // the value the setup tool records (the dashboard address), and the sign-in GitHub App settings.
 // The field order is the key order in the file.
 //
@@ -320,28 +320,32 @@ func IsValidRepoFullName(fullName string) bool {
 // So changing one value never resets another value to a default or changes it.
 type dbConfigFile struct {
 	DashboardURL string         `json:"dashboard_url,omitempty"` // Dashboard address for the workflow to call. The setup tool records the address registered in the GitHub App (`GitHubApp.SiteURL`)
-	Sync         syncConfig     `json:"sync"`                    // Auto sync settings
+	Sync         syncConfig     `json:"sync"`                    // Sync settings
 	SignInApp    *githubAppFile `json:"sign_in_app,omitempty"`   // Sign-in GitHub App (the client secret is ciphertext). A pointer, so it is `nil` if there is none yet, and the key is not written
 }
 
-// Auto sync settings in the config file
+// Sync settings in the config file
 type syncConfig struct {
-	IntervalDays int        `json:"interval_days,omitempty"` // Sync interval (days). If missing or not a valid choice, `defaultSyncIntervalDays` is used (`intervalDays`)
-	EnabledSince *time.Time `json:"enabled_since,omitempty"` // When a person turned auto sync on (UTC). A pointer: `nil` (no key) means the state set by the person is off
+	IntervalDays *int       `json:"interval_days,omitempty"` // Auto sync interval (days), or `manualOnlyIntervalDays`. A pointer, so a missing key (`nil`) differs from 0. A missing or invalid value reads as `defaultSyncIntervalDays` (`intervalDays`)
+	EnabledSince *time.Time `json:"enabled_since,omitempty"` // When a person turned sync on (UTC). A pointer: `nil` (no key) means the state set by the person is off
 }
 
-// Auto sync intervals that can be chosen (days). The page's `SYNC_INTERVALS` (`public/app.js`) uses the same values
-var syncIntervalChoices = []int{1, 2, 3, 7}
+// Auto sync interval value meaning "Manual only": no scheduled sync, and only a run started by hand (Sync now) syncs
+const manualOnlyIntervalDays = 0
 
-// Sync interval when the config file has none.
+// Auto sync intervals that can be chosen (days), and `manualOnlyIntervalDays`.
+// The page's `SYNC_INTERVALS` (`public/app.js`) uses the same values
+var syncIntervalChoices = []int{manualOnlyIntervalDays, 1, 2, 3, 7}
+
+// Auto sync interval when the config file has none.
 // The point of this tool is "keep it before it disappears", so it is daily
 const defaultSyncIntervalDays = 1
 
-// Returns the sync interval (days).
-// If it is missing or not a valid choice, it returns the default (so one config value can't stop the sync)
+// Returns the auto sync interval (days), or `manualOnlyIntervalDays`.
+// If it is missing or not a valid choice, it returns the default (so one broken config value can't stop auto sync)
 func (c syncConfig) intervalDays() int {
-	if slices.Contains(syncIntervalChoices, c.IntervalDays) {
-		return c.IntervalDays
+	if c.IntervalDays != nil && slices.Contains(syncIntervalChoices, *c.IntervalDays) {
+		return *c.IntervalDays
 	}
 	return defaultSyncIntervalDays
 }
@@ -417,10 +421,10 @@ func updateConfig(cfg *Config, change func(file *dbConfigFile) (CommitMessage, e
 	})
 }
 
-// Reads the auto sync settings from the config file in the DB repository.
+// Reads the sync settings from the config file in the DB repository.
 //
 // Returns:
-//   - The auto sync settings.
+//   - The sync settings.
 //     Empty settings (default interval, off) if the config file is missing or can't be read as JSON.
 //     An error if the file can't be fetched
 //

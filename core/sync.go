@@ -297,13 +297,13 @@ func ArchiveStarredRepos(cfg *Config, starredRepos []StarredRepo, starListIDs []
 	return added, err
 }
 
-// Result of one sync. It is the answer to Sync now in the dashboard, and it is also written to the server log
+// Counts of one sync, written to the server log
 type SyncResult struct {
-	NumStarredRepos     int `json:"starred"`         // Number of repositories starred on GitHub
-	NumAddedRepos       int `json:"added"`           // Number newly archived this time
-	NumMetaCheckedRepos int `json:"meta_checked"`    // Number of repositories whose metadata snapshot was checked
-	NumUnavailableRepos int `json:"unavailable"`     // Number of repositories that can't be found on GitHub
-	NumCheckedReadmes   int `json:"readmes_checked"` // Number of READMEs fetched and compared with the saved ones this time
+	NumStarredRepos     int // Number of repositories starred on GitHub
+	NumAddedRepos       int // Number newly archived this time
+	NumMetaCheckedRepos int // Number of repositories whose metadata snapshot was checked
+	NumUnavailableRepos int // Number of repositories that can't be found on GitHub
+	NumCheckedReadmes   int // Number of READMEs fetched and compared with the saved ones this time
 }
 
 // Brings the archive in line with GitHub.

@@ -8,7 +8,7 @@
 # So a fork that pushes a tag gets executables that deploy the fork to Vercel.
 #
 # This is the code repository's own workflow.
-# It is not the auto sync workflow that the setup tool installs in the DB repository (`syncWorkflowContent`).
+# It is not the sync workflow that the setup tool installs in the DB repository (`syncWorkflowContent`).
 name: release
 
 on:

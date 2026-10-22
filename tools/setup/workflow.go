@@ -1,7 +1,7 @@
-// Content of the auto sync workflow put in the DB repository.
+// Content of the sync workflow put in the DB repository.
 // Also its installation and the check of the permissions it needs (Workflows, Actions).
 // Only this tool installs the workflow.
-// The dashboard server only reads the workflow's state and run history through the Actions API, and turns the workflow on and off.
+// The dashboard server only reads the workflow's state and run history through the Actions API, turns the workflow on and off, and starts a run (Sync now).
 package main
 
 import (
@@ -10,12 +10,12 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Content of the DB repository's auto sync workflow (`core.SyncWorkflowPath`).
-// Every day at 18:17 UTC, it reads `dashboard_url` from `config.json`.
+// Content of the DB repository's sync workflow (`core.SyncWorkflowPath`).
+// Every day at 18:17 UTC, and in each run started by hand (`workflow_dispatch`), it reads `dashboard_url` from `config.json`.
 // It then calls `GET <dashboard_url>/api/sync-archive`, with the sync key from the Actions secret (`core.SyncKeySecretName`) in `Authorization: Bearer`.
 //
 // NOTE: These are the contract with the server: the config key `dashboard_url`, the secret name, the request shape,
-// and the response that counts as success (200 with `status` `not_due` or `synced`, the return values of `core.RunScheduledSync`).
+// and the response that counts as success (200 with `status` `not_due` or `synced`, the return values of `core.SyncOnWorkflowCall`).
 // Raise the major version of `core.DBRepoFormat` for a contract change.
 // Then a repository with a server and a workflow of different contracts stops with a clear error.
 // Raise the minor version for a change that keeps the contract but installed workflows need, such as a script bug fix.
@@ -29,17 +29,17 @@ import (
 // Such cases are a redirect to a sign-in page, a page that isn't the dashboard, a failed config file read, and a rejected key.
 // It uses no external action, only the GitHub CLI, `jq` and `curl` in the runner.
 // The script was checked case by case for success and failure on Linux, with a fake `gh` and a fake dashboard (measured).
-const syncWorkflowContent = `# Calls your starkive dashboard once a day so it archives new stars and refreshes repository snapshots.
+const syncWorkflowContent = `# Calls your starkive dashboard so it archives new stars and refreshes repository snapshots:
+# once a day on schedule, and when you press Sync now in the dashboard's Settings.
 #
 # The dashboard does the work. This workflow only knocks on its door: it reads the dashboard address
 # from config.json and calls /api/sync-archive with the key in the STARKIVE_SYNC_KEY secret,
 # so the dashboard accepts the call from this workflow and no one else. The starkive setup tool stores both.
-# The dashboard decides whether a sync is due, based on the interval you choose in its Settings,
-# so you never need to edit this file. Turning auto sync on or off in the dashboard's Settings turns this workflow on or off.
+# The dashboard decides whether a scheduled sync is due, based on the schedule you choose in its Settings,
+# so you never need to edit this file. Turning sync on or off in the dashboard's Settings turns this workflow on or off.
+# A run started by hand (Sync now, or Run workflow here) syncs right away.
 #
 # If a call fails, this run fails and GitHub notifies you, so a stopped sync doesn't go unnoticed.
-# To sync right away, use Sync now in the dashboard's Settings. Running this workflow by hand syncs only on a due day,
-# or when the last scheduled run failed.
 name: starkive sync
 
 on:
@@ -138,7 +138,7 @@ func checkWorkflowsPermission(cfg *core.Config) error {
 }
 
 // Checks that the token can read the DB repository's Actions (the workflow list and run history).
-// With this permission, the dashboard reads the auto sync workflow's state and run history, and turns the workflow on and off.
+// With this permission, the dashboard reads the sync workflow's state and run history, turns the workflow on and off, and starts a run (Sync now).
 // Without the permission, it returns GitHub's 403 error as is.
 //
 // NOTE: There is no way to check the write permission without side effects, so only reading is checked.
@@ -148,7 +148,7 @@ func checkActionsPermission(cfg *core.Config) error {
 	return getGitHubJSON(cfg, "/repos/"+cfg.DBRepoFullName+"/actions/workflows?per_page=1", &list)
 }
 
-// Installs the auto sync workflow (`syncWorkflowContent`) if the DB repository doesn't have it.
+// Installs the sync workflow (`syncWorkflowContent`) if the DB repository doesn't have it.
 // It leaves a workflow that is already there as it is, even if its content differs.
 // Without the permission, it returns GitHub's 403 error as is (the needed permission `workflows=write` is added to the message).
 //
@@ -161,7 +161,7 @@ func installWorkflowIfAbsent(cfg *core.Config) error {
 			return core.FileChangesCommit{}, nil // Nothing to write, so no commit
 		}
 		filesToWrite := map[string][]byte{core.SyncWorkflowPath: []byte(syncWorkflowContent)} // Path -> content
-		message := core.NewCommitMessage("user(workflow)", "install auto sync workflow")
+		message := core.NewCommitMessage("user(workflow)", "install sync workflow")
 		return core.FileChangesCommit{FilesToWrite: filesToWrite, Message: message}, nil
 	})
 }

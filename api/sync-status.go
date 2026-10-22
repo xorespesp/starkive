@@ -1,8 +1,9 @@
-// `/api/sync-status`: API that reads the auto sync status.
+// `/api/sync-status`: API that reads the sync status.
 //
-//	GET   -> `core.SyncStatus`: the auto sync setting in `config.json`, and the workflow state and last scheduled run on GitHub Actions
+//	GET   -> `core.SyncStatus`: the sync setting in `config.json`, and the workflow state and runs on GitHub Actions
+//	         (last scheduled run, the run that hasn't finished, the last finished run)
 //
-// Turning auto sync on and off, changing the interval and syncing right away are in `/api/sync-archive`.
+// Turning sync on and off, changing the auto sync interval and Sync now are in `/api/sync-archive`.
 
 package handler
 
@@ -12,7 +13,7 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Returns the auto sync status to a signed-in user.
+// Returns the sync status to a signed-in user.
 // Answers 401 if not signed in.
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 // If GitHub refuses a read (for example, the token lacks the Actions permission), answers 502 with GitHub's message.

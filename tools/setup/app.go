@@ -144,11 +144,11 @@ func normalizeDashboardURL(input string) (string, error) {
 //
 // NOTE: If the proof matches, the deployment's environment variable is exactly this repository and token.
 // A dashboard may be deployed with another repository's value, or with the value from before a token change.
-// If it were registered, sign-in and the scheduled sync would look at the wrong repository or fail.
+// If it were registered, sign-in and the sync workflow's calls would look at the wrong repository or fail.
 // So it stops here.
 // It doesn't follow redirects, and rejects them.
 // The addresses Vercel gives to each deployment (`*-<hash>.vercel.app`) are behind login protection and redirect to Vercel's sign-in page (measured).
-// If such an address were registered in the App, both GitHub's sign-in callback and the workflow's scheduled calls would be blocked.
+// If such an address were registered in the App, both GitHub's sign-in callback and the sync workflow's calls would be blocked.
 func checkDashboard(cfg *core.Config, site string) error {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {

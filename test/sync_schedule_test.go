@@ -51,7 +51,7 @@ func loadTestConfig(t *testing.T) *core.Config {
 	return cfg
 }
 
-// Reads the auto sync status (`GET /api/sync-status`).
+// Reads the sync status (`GET /api/sync-status`).
 // Stops the test if the response isn't 200.
 //
 // Args:
@@ -80,7 +80,7 @@ var scheduledAt = time.Date(2026, 10, 14, 18, 17, 0, 0, time.UTC)
 func findSyncDay(t *testing.T, cfg *core.Config) int {
 	due := -1
 	for day := 0; day < 3; day++ { // Runs each of the three days and finds the day that synced
-		got, err := core.RunScheduledSync(cfg, testDeadline(), scheduledAt.AddDate(0, 0, day))
+		got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), scheduledAt.AddDate(0, 0, day))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +101,9 @@ func findSyncDay(t *testing.T, cfg *core.Config) int {
 //   - With a daily interval (the default), every call syncs and adds new Stars to the archive
 //   - Changing the interval to 3 days is saved in `config.json` (App settings stay as they are), and only one day in three syncs
 //   - A scheduled run that is a few hours late and passes midnight UTC still counts as the same day
-//   - An interval that can't be chosen (0, 5, -1) and an empty request get 400
+//   - Manual only (0) is saved as `"interval_days": 0` with the commit `user(config): sync manually only`, and then a scheduled run doesn't sync even on a sync day.
+//     A call from a run started by hand still syncs
+//   - An interval that can't be chosen (5, -1) and an empty request get 400
 func TestScheduledSync(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/one"}
@@ -125,12 +127,29 @@ func TestScheduledSync(t *testing.T) {
 	cfg := loadTestConfig(t)
 	due := findSyncDay(t, cfg)
 	late := scheduledAt.AddDate(0, 0, due).Add(10 * time.Hour)
-	if got, err := core.RunScheduledSync(cfg, testDeadline(), late); err != nil || got != "synced" {
+	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "synced" {
 		t.Errorf("a run delayed past midnight UTC: %q %v", got, err)
 	}
 
+	// Manual only
+	if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", `{"sync_interval_days":0}`, cookie); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"interval_days":0`) {
+		t.Fatalf("manual only: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(gh.readFile(core.ConfigDBPath), `"interval_days": 0`) || !strings.HasPrefix(gh.commits[len(gh.commits)-1], "user(config): sync manually only") {
+		t.Errorf("manual only config: %s, commit %q", gh.readFile(core.ConfigDBPath), gh.commits[len(gh.commits)-1])
+	}
+	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "not_due" {
+		t.Errorf("manual only on a sync day: %q %v", got, err)
+	}
+	gh.mu.Lock()
+	gh.runs = []fakeRun{{event: "workflow_dispatch", status: "in_progress", started: late}}
+	gh.mu.Unlock()
+	if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), late); err != nil || got != "synced" {
+		t.Errorf("manual only, a call from Sync now: %q %v", got, err)
+	}
+
 	// Intervals that can't be chosen
-	for _, body := range []string{`{"sync_interval_days":0}`, `{"sync_interval_days":5}`, `{"sync_interval_days":-1}`, `{}`} {
+	for _, body := range []string{`{"sync_interval_days":5}`, `{"sync_interval_days":-1}`, `{}`} {
 		if rec := call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", body, cookie); rec.Code != 400 {
 			t.Errorf("%s: %d", body, rec.Code)
 		}
@@ -142,9 +161,12 @@ func TestScheduledSync(t *testing.T) {
 //     The response doesn't include details such as the repository name
 //   - If the last finished scheduled run failed, it syncs again even on a day that doesn't match the interval
 //   - Only finished scheduled runs count for that check.
-//     It leaves out the run in progress (the run that sent the scheduled call) and manual runs (`workflow_dispatch`),
+//     It leaves out the run in progress (the run that sent the call) and manual runs (`workflow_dispatch`),
 //     and looks at the one that started last, whatever the order of the list.
-//     It still finds it when it isn't on the first page of the list, and when it is older than a week
+//     It still finds it when it isn't on the first page of the list, and when it is older than a week.
+//     A cancelled run doesn't count, and the run before it does
+//   - A call from a run started by hand (Sync now) whose job is running syncs on any day.
+//     A manual run that only waits behind the calling run doesn't make it sync
 func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starringDenied = true
@@ -183,11 +205,14 @@ func TestScheduledSyncRetriesAfterFailure(t *testing.T) {
 		{"a manual run failed", []fakeRun{run("workflow_dispatch", "completed", "failure", 1), run("schedule", "completed", "success", 24)}, "not_due"},
 		{"the newest run isn't on the first page", pastFirstPage, "synced"},
 		{"the last run failed 10 days ago", []fakeRun{run("schedule", "completed", "failure", 240)}, "synced"},
+		{"the last run was cancelled", []fakeRun{run("schedule", "completed", "success", 48), run("schedule", "completed", "cancelled", 24)}, "not_due"},
+		{"a manual run is going", []fakeRun{run("workflow_dispatch", "in_progress", "", 0), run("schedule", "completed", "success", 24)}, "synced"},
+		{"a manual run waits behind this one", []fakeRun{run("schedule", "in_progress", "", 0), run("workflow_dispatch", "pending", "", 0), run("schedule", "completed", "success", 24)}, "not_due"},
 	} {
 		gh.mu.Lock()
 		gh.runs = c.runs
 		gh.mu.Unlock()
-		if got, err := core.RunScheduledSync(cfg, testDeadline(), notDue); err != nil || got != c.want {
+		if got, err := core.SyncOnWorkflowCall(cfg, testDeadline(), notDue); err != nil || got != c.want {
 			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
 		}
 	}
@@ -200,7 +225,7 @@ func countCommits(gh *fakeGitHub) int {
 	return len(gh.commits)
 }
 
-// Reads the time auto sync was turned on (`sync.enabled_since`) from the config file. `nil` if it is off (no key)
+// Reads the time sync was turned on (`sync.enabled_since`) from the config file. `nil` if it is off (no key)
 func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 	var file struct {
 		Sync struct {
@@ -213,11 +238,11 @@ func readEnabledSince(t *testing.T, gh *fakeGitHub) *time.Time {
 	return file.Sync.EnabledSince
 }
 
-// Tests the answer of the auto sync status (`GET /api/sync-status`) when it can't be read.
+// Tests the answer of the sync status (`GET /api/sync-status`) when it can't be read.
 //   - If GitHub refuses a read (no Actions permission), it is 502 with GitHub's message and the needed permission.
 //     (The page uses this message to warn that the status couldn't be read.)
 //   - An error that isn't GitHub's answer (a cut connection) is 500 "Internal server error", without internal details such as the request address
-//   - The sign-in status (`GET /api/login-session`) doesn't carry the auto sync status, so it still answers when only this can't be read
+//   - The sign-in status (`GET /api/login-session`) doesn't carry the sync status, so it still answers when only this can't be read
 func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
@@ -246,7 +271,7 @@ func TestSyncStatusReadFailureIsReported(t *testing.T) {
 	}
 }
 
-// Tests that turning auto sync on or off (`enabled` in `PATCH /api/sync-archive`) changes two things:
+// Tests that turning sync on or off (`enabled` in `PATCH /api/sync-archive`) changes two things:
 // the time it was turned on in the config file, and the workflow itself in the DB repository.
 //   - Turning it off disables the workflow and removes the time it was turned on.
 //     Turning it off again when it is already off writes nothing to GitHub or the repository.
@@ -256,7 +281,7 @@ func TestSyncStatusReadFailureIsReported(t *testing.T) {
 //   - A workflow that GitHub disabled for inactivity (`disabled_inactivity`) only shows in the status.
 //     Turning it on again records a new time
 //   - If the setting is off but the workflow is on, turning it off disables only the workflow and makes no commit
-//   - If there is no workflow, the status is `missing`, and turning it on gets 409 asking to run the setup tool
+//   - If there is no workflow, the status is `missing`, and turning it on or Sync now gets 409 asking to run the setup tool
 func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 	gh := setup(t, "", "")
 	cookie := login(t)
@@ -333,12 +358,17 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 	if rec := patch(`{"enabled":true}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "setup tool") {
 		t.Errorf("turn on without the workflow: %d %s", rec.Code, rec.Body)
 	}
+	if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "setup tool") {
+		t.Errorf("sync now without the workflow: %d %s", rec.Code, rec.Body)
+	}
 }
 
-// Tests Sync now (`POST /api/sync-archive`) and the auto sync status that the Settings dialog gets from `GET /api/sync-status`.
+// Tests Sync now (`POST /api/sync-archive`) and the sync status that the Settings dialog gets from `GET /api/sync-status`.
 //   - Status: interval, time turned on, workflow state, and the last finished scheduled run (start time, result, GitHub run page address)
-//   - Sync now needs sign-in and a same-site request. It syncs on every call, whatever the interval.
-//     It answers with the counts of every step
+//   - Sync now needs sign-in and a same-site request.
+//     It starts a run of the workflow on the default branch and answers with it, without syncing in the request
+//   - The status shows that run as running until it finishes, and then as the last run with its result
+//   - With the workflow off, Sync now gets 409 and starts no run
 func TestSyncNowAndStatus(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/one"}
@@ -368,21 +398,40 @@ func TestSyncNowAndStatus(t *testing.T) {
 	if cross.Code != 403 {
 		t.Errorf("cross-origin: %d", cross.Code)
 	}
-	for i, want := range []string{`"added":1`, `"added":0`} { // The second call syncs too. There are no new Stars, so it is 0
-		rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie)
-		var counts map[string]any
-		json.Unmarshal(rec.Body.Bytes(), &counts)
-		_, hasReadmesChecked := counts["readmes_checked"]
-		if rec.Code != 200 || !strings.Contains(rec.Body.String(), want) || len(counts) != 5 || !hasReadmesChecked {
-			t.Errorf("sync now %d: %d %s", i, rec.Code, rec.Body)
-		}
+	commits := countCommits(gh)
+	rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie)
+	var started struct {
+		Run core.SyncWorkflowRun `json:"run"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &started)
+	if rec.Code != 200 || started.Run.ID == 0 || started.Run.Event != "workflow_dispatch" || started.Run.Status != "queued" ||
+		!strings.HasPrefix(started.Run.URL, "https://github.com/") || countCommits(gh) != commits {
+		t.Fatalf("sync now: %d %s, commits %d -> %d", rec.Code, rec.Body, commits, countCommits(gh))
+	}
+	if status := readSyncStatus(t, cookie); status.ActiveRun == nil || status.ActiveRun.ID != started.Run.ID {
+		t.Errorf("running: %+v", status.ActiveRun)
+	}
+
+	gh.mu.Lock()
+	gh.runs[len(gh.runs)-1].status, gh.runs[len(gh.runs)-1].conclusion = "completed", "success"
+	gh.mu.Unlock()
+	if status := readSyncStatus(t, cookie); status.ActiveRun != nil || status.LastRun == nil || status.LastRun.ID != started.Run.ID || status.LastRun.Conclusion != "success" {
+		t.Errorf("finished: running %+v, last %+v", status.ActiveRun, status.LastRun)
+	}
+
+	gh.mu.Lock()
+	gh.workflowState = "disabled_manually"
+	runsBefore := len(gh.runs)
+	gh.mu.Unlock()
+	if rec := call(api.HandleSyncArchive, "POST", "/api/sync-archive", "", cookie); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Turn it on in Settings") || len(gh.runs) != runsBefore {
+		t.Errorf("sync off: %d %s, runs %d -> %d", rec.Code, rec.Body, runsBefore, len(gh.runs))
 	}
 }
 
 // Tests that each function that writes the config file changes only its own field.
 // It checks the two functions the setup tool uses (`SetDashboardURL`, `RecordSyncEnabled`).
 //   - Recording the dashboard address keeps an interval that can't be chosen (5), and adds no time turned on
-//   - Recording that auto sync is on adds only the time turned on. Calling it again makes no commit
+//   - Recording that sync is on adds only the time turned on. Calling it again makes no commit
 //   - An interval that can't be chosen reads as the default (1)
 func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 	gh := setup(t, "", "")
@@ -408,7 +457,7 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 	}
 	config = gh.readFile(core.ConfigDBPath)
 	if readEnabledSince(t, gh) == nil || !strings.Contains(config, `"interval_days": 5`) || countCommits(gh) != commits {
-		t.Errorf("after recording auto sync on twice (%d new commits): %s", countCommits(gh)-commits, config)
+		t.Errorf("after recording sync on twice (%d new commits): %s", countCommits(gh)-commits, config)
 	}
 
 	if status, err := core.ReadSyncStatus(cfg); err != nil || status.IntervalDays != 1 {
@@ -416,7 +465,7 @@ func TestConfigWritesTouchOnlyTheirField(t *testing.T) {
 	}
 }
 
-// Tests that the response to an auto sync settings change has the new settings.
+// Tests that the response to a sync settings change has the new settings.
 // This must hold even while GitHub briefly shows the just-moved branch at the old commit.
 //   - Reading again by branch name at the same moment shows the old settings.
 //     (This confirms that the fake GitHub's `branchReadsLag` creates that situation)
@@ -444,7 +493,7 @@ func TestSyncSettingsAnswerWithWhatWasWritten(t *testing.T) {
 	}
 	gh.mu.Lock()
 	defer gh.mu.Unlock()
-	if n := len(gh.commits) - commits; n != 1 || !strings.HasPrefix(gh.commits[len(gh.commits)-1], "user(config): sync every 3 days, turn on auto sync") {
+	if n := len(gh.commits) - commits; n != 1 || !strings.HasPrefix(gh.commits[len(gh.commits)-1], "user(config): sync every 3 days, turn on sync") {
 		t.Errorf("%d commits, last %q", n, gh.commits[len(gh.commits)-1])
 	}
 }
