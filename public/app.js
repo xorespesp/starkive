@@ -2027,7 +2027,7 @@ function updateSettingsAttention() {
  * Sync: on or off, the auto sync interval (or Manual only), the last scheduled run, a message and fix button when the setting and the real state differ, and Sync now.
  * Quick add: the bookmarklet link (`bookmarkletLink`).
  *
- * NOTE: The checkbox shows the state the user set (`enabled_since`).
+ * NOTE: The switch shows the state the user set (`enabled_since`).
  * Changing it makes the server turn both that setting and the workflow in the DB repository on or off.
  * A change to the workflow in GitHub's Actions tab makes it differ from the setting.
  * So the dialog shows a message and a button to match them (`fix` of `syncProblem`).
@@ -2039,7 +2039,9 @@ function updateSettingsAttention() {
  */
 function openSettings() {
   let busy = false; // `true` while a setting change is sent
-  const enabled = el('input', { type: 'checkbox' });
+  const enabled = el('input', { type: 'checkbox', className: 'switch' });
+  enabled.setAttribute('role', 'switch'); // Screen readers then say "on" or "off" instead of "checked"
+  enabled.setAttribute('aria-label', 'Sync with GitHub');
   const select = el('select', {}, ...SYNC_INTERVALS.map(([days, label]) => el('option', { value: String(days), textContent: label })));
   const lastRun = el('span'); // The last scheduled run. It links to the run on GitHub when there is one, so it stays on one line
   const problemNote = el('p', { className: 'note' });
@@ -2058,7 +2060,7 @@ function openSettings() {
       { className: 'settings-section' },
       el('h3', { textContent: 'Sync' }),
       el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details with GitHub Actions in your archive repository, on a schedule or when you press Sync now. A repository deleted before the next sync isn't recorded." }),
-      row('Sync with GitHub', el('label', { className: 'check-option' }, enabled, 'On')),
+      row('Sync with GitHub', enabled),
       row('Schedule', select),
       row('Last scheduled sync', lastRun),
       problemNote,
@@ -2110,7 +2112,7 @@ function openSettings() {
 
   // Changes a setting and redraws with the latest status the server returns.
   // `body` is `{ enabled }` or `{ sync_interval_days }`.
-  // On failure, it redraws with the previous status, so the checkbox and select box don't drift from the real state
+  // On failure, it redraws with the previous status, so the switch and select box don't drift from the real state
   const change = async (body) => {
     busy = true;
     error.hidden = true;
@@ -2344,6 +2346,8 @@ async function run(task, pending, done) {
  */
 function showLogin() {
   closeMenu();
+  document.title = 'Starkive';
+  $('title-detail').hidden = true;
   $('login').hidden = false;
   $('dashboard').hidden = true;
   for (const id of ['add-menu', 'account-menu']) $(id).hidden = true;
@@ -2559,7 +2563,7 @@ async function start() {
 }
 
 /**
- * Fills the account menu with the `username` of the account that signed in.
+ * Fills the account menu with the `username` of the account that signed in, and puts it in the tab title and the top bar title.
  * The username and the profile link are hidden if the username is empty (it couldn't be read),
  * and the profile link also if it doesn't make a GitHub address (`safeUrl`).
  */
@@ -2567,6 +2571,9 @@ function showAccount(username) {
   const name = $('account-username');
   name.textContent = username;
   name.hidden = !username;
+  document.title = username ? `Starkive (${username})` : 'Starkive';
+  $('title-detail').textContent = `/ ${username}`;
+  $('title-detail').hidden = !username;
   const link = $('profile-link');
   const url = username ? safeUrl(`https://github.com/${encodeURIComponent(username)}`) : null;
   link.hidden = !url;

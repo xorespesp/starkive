@@ -6,7 +6,7 @@
 // The tool does all the step work.
 // This page only shows things and sends answers.
 //
-// Security: all text from the tool goes in only through `textContent` (backtick parts in sentences also go in as text of `code` elements).
+// Security: all text from the tool goes in only through `textContent` or the `value` of an input box (backtick parts in sentences also go in as text of `code` elements).
 // Links are made only for `https://` addresses and addresses of this server.
 
 const POLL_MS = 700; // Interval between progress requests (milliseconds)
@@ -108,6 +108,67 @@ function copyButton(label, text, className) {
 }
 
 /**
+ * Creates an eye icon: open if `open`, crossed out otherwise.
+ */
+function eyeIcon(open) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-hidden', 'true');
+  const paths = ['M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z', 'M10 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'];
+  if (!open) paths.push('M2 2l12 12');
+  for (const d of paths) {
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+/**
+ * Creates an input box for a secret with an eye button that shows and hides the characters, and returns its frame.
+ * `props` go on the input box as is.
+ *
+ * NOTE: The input box is a text box, and CSS hides its characters (`.masked`).
+ * The browser doesn't see it as a sign-in form, so it doesn't offer to save a password (measured).
+ * So the secret doesn't stay in the browser or its sync account.
+ * The marks that keep password manager extensions from filling or saving it (`data-1p-ignore`, `data-lpignore`) are on it too.
+ */
+function newSecretField(props) {
+  const input = el('input', { type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: false, ...props });
+  input.setAttribute('data-1p-ignore', '');
+  input.setAttribute('data-lpignore', 'true');
+  const button = el('button', { type: 'button', className: 'icon-button' });
+  button.onclick = () => {
+    setMasked(input, !input.classList.contains('masked'));
+    if (!input.readOnly) input.focus(); // The person can keep typing after the click
+  };
+  const field = el('span', { className: 'secret-field' }, input, button); // `setMasked` and `setSecret` find the button right after the input box
+  setMasked(input, true);
+  return field;
+}
+
+/**
+ * Hides or shows the characters of `input` (made by `newSecretField`), and sets its eye button to match.
+ */
+function setMasked(input, masked) {
+  const button = input.nextElementSibling;
+  input.classList.toggle('masked', masked);
+  button.replaceChildren(eyeIcon(!masked));
+  button.title = masked ? 'Show' : 'Hide';
+  button.setAttribute('aria-label', button.title);
+}
+
+/**
+ * Sets whether `input` (made by `newSecretField`) holds a secret.
+ * Other text shows as is, without the eye button.
+ */
+function setSecret(input, secret) {
+  input.nextElementSibling.hidden = !secret;
+  setMasked(input, secret);
+}
+
+/**
  * Creates the vertical step list once, from the step names `titles`.
  * Each step has a header that expands and collapses it when clicked, and a body that holds the lines of that step.
  *
@@ -159,6 +220,7 @@ function updateStepHeight(step) {
  * The same decision must come out when a reloaded page draws the lines again.
  * So if an answer line comes after it, or the next step started, its task counts as done.
  * The copy button of a value to copy (`value`) copies only the value, without the name (the name field on the other side is already filled in).
+ * A value to copy can hold the token, so it is shown in a secret input box (`newSecretField`).
  */
 function renderLine(line) {
   switch (line.kind) {
@@ -173,7 +235,7 @@ function renderLine(line) {
         'div',
         { className: 'value' },
         el('span', { className: 'name', textContent: line.label }),
-        el('code', { className: 'value-text', textContent: line.text }),
+        newSecretField({ className: 'value-text', readOnly: true, value: line.text }),
         copyButton('Copy', line.text, ''),
       );
     case 'link':
@@ -275,11 +337,6 @@ function showResult(state) {
  * A prompt that was already answered or switched to typing isn't shown.
  *
  * @param {{ id: number, text: string, hint: string, secret: boolean, waiting: string, manual_entry: string } | null} prompt The prompt waiting for an answer. `null` if none
- *
- * NOTE: The input box of a secret prompt is a text box, and CSS hides its characters (`.masked`).
- * The browser doesn't see it as a sign-in form, so it doesn't offer to save a password (measured).
- * So the secret doesn't stay in the browser or its sync account.
- * The marks that keep password manager extensions from filling or saving it (`data-1p-ignore`, `data-lpignore`), and spell check off, are on the input box in the HTML.
  */
 function updatePrompt(prompt) {
   const form = $('prompt');
@@ -301,7 +358,7 @@ function updatePrompt(prompt) {
   }
   $('prompt-label').replaceChildren(...richText(prompt.text));
   const input = $('prompt-input');
-  input.classList.toggle('masked', prompt.secret);
+  setSecret(input, prompt.secret);
   input.placeholder = prompt.hint;
   input.value = '';
   $('prompt-error').hidden = true;
@@ -446,6 +503,7 @@ async function switchToTyping() {
   }
 }
 
+$('prompt-row').prepend(newSecretField({ id: 'prompt-input' }));
 $('prompt').onsubmit = submitAnswer;
 $('switch-to-typing').onclick = switchToTyping;
 poll();

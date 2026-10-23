@@ -75,6 +75,29 @@ button {
   cursor: pointer;
 }
 
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.icon-button:hover {
+  color: var(--text);
+}
+
+.icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* Button style for the main action.
    Also used on links (`a`) */
 .primary {
@@ -306,9 +329,8 @@ button {
 }
 
 .value .value-text {
-  flex: 1;
-  padding: 0;
-  background: none;
+  font-family: var(--mono);
+  font-size: 12px;
 }
 
 /* Prompt */
@@ -330,10 +352,17 @@ button {
   gap: 8px;
 }
 
-.prompt input {
+.secret-field {
+  position: relative;
+  display: flex;
   flex: 1;
   min-width: 0;
-  padding: 5px 12px;
+}
+
+.secret-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 36px 5px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
@@ -341,13 +370,19 @@ button {
   font: inherit;
 }
 
-/* Input box of a secret prompt.
-   It hides the characters of a text box */
-.prompt input.masked {
+/* It hides the characters of a text box */
+.secret-field input.masked {
   -webkit-text-security: disc;
 }
 
-.prompt button {
+.secret-field .icon-button {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+}
+
+.prompt-row > button {
   background: var(--button-primary);
   border-color: transparent;
   color: #fff;
