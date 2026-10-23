@@ -193,8 +193,7 @@ func TestReadmeCallCutAtDeadlineIsOutOfTime(t *testing.T) {
 }
 
 // Tests that a single request that hits `githubTimeout` counts as a failed call, not as running out of time.
-// Both can give an error that matches `context.DeadlineExceeded`, depending on the Go version, so running out of time is told by the context.
-// So this test guards only on a Go version where they match
+// Both give an error that matches `context.DeadlineExceeded` (measured), so running out of time is told by the context
 func TestReadmeCallTimeoutIsFailure(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body) // The server notices a closed connection only after the body is read

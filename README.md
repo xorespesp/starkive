@@ -46,7 +46,7 @@ It focuses on keeping a private, lasting record of the repositories you care abo
      curl -LO https://github.com/xorespesp/starkive/releases/latest/download/starkive-setup_linux_amd64 && chmod +x starkive-setup_linux_amd64 && ./starkive-setup_linux_amd64
      ```
 
-   - macOS: Run the following command in a terminal:
+   - macOS (Apple Silicon, macOS 13 or later): Run the following command in a terminal:
 
      ```
      curl -LO https://github.com/xorespesp/starkive/releases/latest/download/starkive-setup_darwin_arm64 && chmod +x starkive-setup_darwin_arm64 && ./starkive-setup_darwin_arm64
@@ -72,7 +72,7 @@ If you ever replace the token, run the setup tool again, put the new value in Ve
 
 ## Running from source
 
-To build and run the setup tool from source, run it from a clone. You need [Git](https://git-scm.com/) and [Go](https://go.dev/dl/) 1.22 or later:
+To build and run the setup tool from source, run it from a clone. You need [Git](https://git-scm.com/) and [Go](https://go.dev/dl/) 1.27 or later:
 
 ```
 git clone https://github.com/xorespesp/starkive

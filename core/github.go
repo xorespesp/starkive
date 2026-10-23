@@ -57,7 +57,7 @@ type GitHubAPIRequest struct {
 //     after `githubTimeout` or at the deadline of `ctx`.
 //     It wraps the cause.
 //     To tell whether the deadline of `ctx` cut it, check `ctx.Err()`, not the error.
-//     A request that hit `githubTimeout` can match `context.DeadlineExceeded` too, depending on the Go version (measured)
+//     A request that hit `githubTimeout` matches `context.DeadlineExceeded` too (measured)
 func CallGitHubAPI(ctx context.Context, cfg *EnvConfig, path string, opt GitHubAPIRequest) (*http.Response, error) {
 	if opt.Method == "" {
 		opt.Method = http.MethodGet
