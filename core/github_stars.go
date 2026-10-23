@@ -4,7 +4,6 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -40,6 +39,7 @@ var lastPageLink = regexp.MustCompile(`[?&]page=(\d+)>; rel="last"`)
 // Returns:
 //   - Stars on that page (most recently starred first)
 //   - The last page number. Same as `page` if there is only one page
+//   - An error that wraps `errGitHubRateLimited` if GitHub answers with the rate limit
 //
 // NOTE: Each page can be read on its own.
 // So even thousands of Stars can be split into several requests and read at the same time.
@@ -51,7 +51,7 @@ func FetchStarredPage(ctx context.Context, cfg *EnvConfig, page int) ([]StarredR
 		return nil, 0, err
 	}
 	defer res.Body.Close()
-	if err := CheckGitHubResponse(res); err != nil {
+	if err := checkGitHubResponseWithRateLimit(res); err != nil {
 		return nil, 0, err
 	}
 	starredRepos := []StarredRepo{}
@@ -71,13 +71,14 @@ const starredPagesParallel = 6
 // Reads all my GitHub Stars.
 // The first page tells the last page number.
 // Then the rest is read `starredPagesParallel` pages at a time.
-// If any page fails, it returns an error.
+// If any page fails, it reads no more pages and returns that error.
 //
 // Returns:
 //   - The Stars, in GitHub's order (most recently starred first). Each repository appears only once
 //
 // NOTE: If Stars are added or removed while reading, the page boundaries shift.
 // Then the same repository can come on two pages, so duplicates are removed by repository ID.
+// The result needs every page, so after one page fails, reading the rest would only use up the rate limit.
 func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, error) {
 	first, lastPage, err := FetchStarredPage(ctx, cfg, 1)
 	if err != nil {
@@ -85,9 +86,9 @@ func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, e
 	}
 	pages := make([][]StarredRepo, lastPage)
 	pages[0] = first
-	errs := make([]error, lastPage)
-	var mu sync.Mutex // Goroutines (lightweight threads) share `next`, so it is locked
+	var mu sync.Mutex // Goroutines (lightweight threads) share `next` and `failure`, so they are locked
 	next := 2
+	var failure error     // The error of the first page that failed. Once it is set, no more pages are read
 	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
 	for w := 0; w < starredPagesParallel; w++ {
 		wg.Add(1)
@@ -95,19 +96,28 @@ func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, e
 			defer wg.Done()
 			for {
 				mu.Lock()
+				if failure != nil || next > lastPage {
+					mu.Unlock()
+					return
+				}
 				page := next
 				next++
 				mu.Unlock()
-				if page > lastPage {
-					return
+				starredRepos, _, err := FetchStarredPage(ctx, cfg, page)
+				pages[page-1] = starredRepos // Each page has its own slot, so writing without a lock doesn't overlap
+				if err != nil {
+					mu.Lock()
+					if failure == nil {
+						failure = err
+					}
+					mu.Unlock()
 				}
-				pages[page-1], _, errs[page-1] = FetchStarredPage(ctx, cfg, page) // Each page has its own slot, so writing without a lock doesn't overlap
 			}
 		}()
 	}
 	wg.Wait()
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
+	if failure != nil {
+		return nil, failure
 	}
 
 	seen := map[int64]bool{}

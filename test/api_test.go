@@ -91,6 +91,8 @@ type fakeGitHub struct {
 	repoEmpty           bool                          // If `true`, it is an empty repository with no commits. Writing the first file with the Contents API clears it
 	workflowsDenied     bool                          // If `true`, the token has no Workflows permission. Writes that change `.github/workflows/` are refused with 403
 	starringDenied      bool                          // If `true`, the token has no Starring permission. Reading Stars gives 403
+	starredPageReads    int                           // Number of requests for a page of my Stars
+	starredFailFrom     int                           // If not 0, pages of my Stars from this one on fail with 502
 	actionsDenied       bool                          // If `true`, the token has no Actions permission. The Actions API gives 403 with the needed permission in a header
 	ownerCalls          int                           // Number of `/user` requests with the server token
 	contentsHangup      bool                          // If `true`, file read requests are cut off without a response (network error)
@@ -734,6 +736,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case r.URL.Path == "/user/starred" && r.Method == http.MethodGet:
 		// One page of my Stars (`per_page`, `page`)
+		f.starredPageReads++
 		if f.starringDenied {
 			http.Error(w, `{"message":"Resource not accessible by personal access token"}`, http.StatusForbidden)
 			return
@@ -742,6 +745,10 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var perPage int
 		fmt.Sscan(r.URL.Query().Get("page"), &page)
 		fmt.Sscan(r.URL.Query().Get("per_page"), &perPage)
+		if f.starredFailFrom != 0 && page >= f.starredFailFrom {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			return
+		}
 		items := []string{}
 		for i := (page - 1) * perPage; i < min(page*perPage, len(f.starred)); i++ {
 			name := f.starred[i]
@@ -1691,6 +1698,24 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	// With no time, nothing is checked
 	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, 0); err != nil || result.NumCheckedRepos != 0 {
 		t.Errorf("no budget: %+v %v", result, err)
+	}
+}
+
+// Tests that reading all Stars stops at the first page that fails.
+// 3,000 Stars are 30 pages of 100. The first page is read alone, then 6 pages at a time.
+// Page 3 and later fail, so of the 6 pages sent together only page 2 succeeds.
+// That goroutine may read one more page before it sees the failure, so at most 1 + 6 + 1 pages are asked.
+// The error is that of the page that failed, and nothing is added to the archive
+func TestSyncStopsReadingStarsAtTheFirstFailedPage(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	for i := 1; i <= 3000; i++ {
+		gh.starred = append(gh.starred, fmt.Sprintf("owner/starred%d", i))
+	}
+	gh.starredFailFrom = 3
+	result, err := core.SyncArchiveWithGitHub(context.Background(), openTestDBRepo(t), testLongStepsEndBy(), false)
+	var apiErr *core.GitHubAPIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadGateway || result.NumAddedRepos != 0 || gh.starredPageReads > 1+6+1 {
+		t.Errorf("%+v %v, page reads %d", result, err, gh.starredPageReads)
 	}
 }
 
