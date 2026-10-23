@@ -1702,10 +1702,8 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 }
 
 // Tests that reading all Stars stops at the first page that fails.
-// 3,000 Stars are 30 pages of 100. The first page is read alone, then 6 pages at a time.
-// Page 3 and later fail, so of the 6 pages sent together only page 2 succeeds.
-// That goroutine may read one more page before it sees the failure, so at most 1 + 6 + 1 pages are asked.
-// The error is that of the page that failed, and nothing is added to the archive
+// Of 30 pages, the first is read alone, then 6 at a time, and page 3 and later fail.
+// The goroutine that read page 2 may read one more before it sees the failure, so at most 1 + 6 + 1 pages are asked
 func TestSyncStopsReadingStarsAtTheFirstFailedPage(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	for i := 1; i <= 3000; i++ {

@@ -176,8 +176,7 @@ func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables ma
 	if err := mark.checkNotLimited(); err != nil {
 		return err
 	}
-	// `defer` runs this when the function returns.
-	// `err` is the named result, so it sees the error being returned
+	// Runs at return with the error being returned (`err` is the named result)
 	defer func() { mark.recordIfRateLimited(err) }()
 	body := map[string]any{"query": query, "variables": variables}
 	res, err := CallGitHubAPI(ctx, cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: body})
@@ -272,15 +271,12 @@ var errGitHubRateLimited = errors.New("GitHub rate limit reached")
 // `ServeAPIRequest` puts a new one in the `ctx` of each request (`addGitHubRateLimitMark`), so it lives as long as that request.
 // Once it is set, `callGraphQL` sends no more queries in that request.
 //
-// NOTE: GitHub counts its rate limits per account, not per step of our work (docs).
-// So after one rate limit answer, the later queries of every step in the request would be refused too.
-// GitHub says that sending more after a rate limit answer can make the limit last longer or get the integration banned (docs).
-// The mark holds them back in one place, so no step or goroutine has to stop on its own to keep this.
-// Only GraphQL queries are held back.
-// REST requests still go out, so a commit can still save what was already fetched.
-// Its methods also work on a `nil` mark (a `ctx` that wasn't made by `ServeAPIRequest`), which holds nothing back.
+// NOTE: GitHub counts rate limits per account, and sending more after a rate limit answer can make the limit last longer (docs).
+// One mark for the whole request holds back every step and goroutine, so none has to stop on its own.
+// Only GraphQL is held back, so a commit can still save what was already fetched.
+// Its methods also work on a `nil` mark (a `ctx` not made by `ServeAPIRequest`), which holds nothing back.
 type gitHubRateLimitMark struct {
-	mu            sync.Mutex // Lock for `firstLimitErr`. Goroutines of the same request read and set it at the same time
+	mu            sync.Mutex // Lock for `firstLimitErr`, which the goroutines of a request share
 	firstLimitErr error      // The first rate limit answer. `nil` until one comes
 }
 
@@ -289,7 +285,6 @@ type gitHubRateLimitMark struct {
 type gitHubRateLimitMarkKey struct{}
 
 // Keeps `err` if it is the first rate limit answer of the request.
-// Any other error is ignored.
 func (m *gitHubRateLimitMark) recordIfRateLimited(err error) {
 	if m == nil || !errors.Is(err, errGitHubRateLimited) {
 		return
@@ -301,11 +296,8 @@ func (m *gitHubRateLimitMark) recordIfRateLimited(err error) {
 	}
 }
 
-// Checks that no rate limit answer came yet in this request, so a query may be sent.
-//
-// Returns:
-//   - `nil` if no rate limit answer came yet in this request.
-//     Otherwise an error that wraps the first one, so `errors.Is(err, errGitHubRateLimited)` is true and the time to retry stays in the message
+// Checks that no rate limit answer came yet in this request.
+// If one came, the error wraps it, so it is still a rate limit error and keeps the time to retry.
 func (m *gitHubRateLimitMark) checkNotLimited() error {
 	if m == nil {
 		return nil
@@ -329,13 +321,8 @@ func readGitHubRateLimitMark(ctx context.Context) *gitHubRateLimitMark {
 	return mark
 }
 
-// Formats when to retry, as the headers `header` of a rate limit answer give it, for the server log.
-// `Retry-After` gives the seconds to wait.
-// With no requests left (`X-RateLimit-Remaining` is 0), `X-RateLimit-Reset` gives the time the limit resets in Unix seconds (docs).
-//
-// Returns:
-//   - A text like ` (retry after 60s)` or ` (resets at 18:17:00 UTC)`.
-//     An empty string if the headers give neither
+// Formats when to retry from the headers `header` of a rate limit answer, like ` (retry after 60s)`, or returns an empty string.
+// `Retry-After` is in seconds, and `X-RateLimit-Reset` (with no requests left) is a time in Unix seconds (docs).
 func formatGitHubRetryTime(header http.Header) string {
 	if after := header.Get("Retry-After"); after != "" {
 		if seconds, err := strconv.Atoi(after); err == nil {
