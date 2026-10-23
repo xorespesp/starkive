@@ -209,7 +209,7 @@ func TestHasGitHubStatusBetween(t *testing.T) {
 		t.Error("hasGitHubStatus doesn't match the exact status")
 	}
 }
-
+
 // Tests how `DecodeGitHubResponse` tells a body that stopped coming from one that can't be read.
 //   - JSON that ends in the middle (a dropped connection) is an answer that never came (`gitHubUnreachableError`)
 //   - A body that isn't JSON (an HTML error page) is an answer that can't be read, not `gitHubUnreachableError`.
