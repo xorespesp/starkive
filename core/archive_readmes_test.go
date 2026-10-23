@@ -20,7 +20,7 @@ import (
 //     A UTF-8 byte order mark is removed
 //   - Blank text isn't usable
 //   - Long text is cut after its last line break within `maxReadmeBytes`,
-//     or at a character boundary if there is no line break or it would keep less than half of it, and the cut line is added
+//     or at a character boundary if there is no line break or it would keep less than half of it, and the truncation line is added
 //   - Text over the limit only by blank space at its end loses that space and isn't cut
 //   - Text of exactly `maxReadmeBytes` isn't cut
 func TestBuildReadmeSnapshotFile(t *testing.T) {
@@ -33,13 +33,13 @@ func TestBuildReadmeSnapshotFile(t *testing.T) {
 		{"UTF-8 byte order mark", "\xEF\xBB\xBF# Title\n", "# Title\n"},
 		{"blank", " \n\t\n", ""},
 		{"exactly the limit", strings.Repeat("a", maxReadmeBytes), strings.Repeat("a", maxReadmeBytes)},
-		{"cut at a line break", strings.Repeat(strings.Repeat("x", 99)+"\n", 100),
-			strings.Repeat(strings.Repeat("x", 99)+"\n", 81) + readmeCutLine + "\n"},
-		{"cut at a character boundary", strings.Repeat("가", 3000), strings.Repeat("가", 2730) + "\n" + readmeCutLine + "\n"},
-		{"line break at the start", "\n" + strings.Repeat("x", 9000), "\n" + strings.Repeat("x", maxReadmeBytes-1) + "\n" + readmeCutLine + "\n"},
+		{"cut at a line break", strings.Repeat(strings.Repeat("x", 99)+"\n", maxReadmeBytes/100+20),
+			strings.Repeat(strings.Repeat("x", 99)+"\n", maxReadmeBytes/100) + readmeTruncationLine + "\n"},
+		{"cut at a character boundary", strings.Repeat("가", maxReadmeBytes/3+300), strings.Repeat("가", maxReadmeBytes/3) + "\n" + readmeTruncationLine + "\n"},
+		{"line break at the start", "\n" + strings.Repeat("x", maxReadmeBytes+1000), "\n" + strings.Repeat("x", maxReadmeBytes-1) + "\n" + readmeTruncationLine + "\n"},
 		{"short first line, then one long line", "# Title\n" + strings.Repeat("y", 50000),
-			"# Title\n" + strings.Repeat("y", maxReadmeBytes-8) + "\n" + readmeCutLine + "\n"},
-		{"over the limit only by blank space at the end", strings.Repeat("a", 8000) + strings.Repeat(" \n", 500), strings.Repeat("a", 8000)},
+			"# Title\n" + strings.Repeat("y", maxReadmeBytes-8) + "\n" + readmeTruncationLine + "\n"},
+		{"over the limit only by blank space at the end", strings.Repeat("a", maxReadmeBytes-200) + strings.Repeat(" \n", 500), strings.Repeat("a", maxReadmeBytes-200)},
 	}
 	for _, c := range cases {
 		got, usable := buildReadmeSnapshotFile(c.readmeText)
@@ -48,13 +48,13 @@ func TestBuildReadmeSnapshotFile(t *testing.T) {
 		}
 	}
 
-	// Reading back gives the text without the cut line, and whether it was cut
-	content, _ := buildReadmeSnapshotFile(strings.Repeat(strings.Repeat("x", 99)+"\n", 100))
-	if text, isCut := parseReadmeSnapshotFile(content); !isCut || text != strings.Repeat(strings.Repeat("x", 99)+"\n", 81) {
-		t.Errorf("parse cut file: cut %v, %d bytes", isCut, len(text))
+	// Reading back gives the text without the truncation line, and whether it is truncated
+	content, _ := buildReadmeSnapshotFile(strings.Repeat(strings.Repeat("x", 99)+"\n", maxReadmeBytes/100+20))
+	if text, isTruncated := parseReadmeSnapshotFile(content); !isTruncated || text != strings.Repeat(strings.Repeat("x", 99)+"\n", maxReadmeBytes/100) {
+		t.Errorf("parse truncated file: truncated %v, %d bytes", isTruncated, len(text))
 	}
-	if text, isCut := parseReadmeSnapshotFile([]byte("# Title\n")); isCut || text != "# Title\n" {
-		t.Errorf("parse whole file: cut %v, %q", isCut, text)
+	if text, isTruncated := parseReadmeSnapshotFile([]byte("# Title\n")); isTruncated || text != "# Title\n" {
+		t.Errorf("parse whole file: truncated %v, %q", isTruncated, text)
 	}
 }
 

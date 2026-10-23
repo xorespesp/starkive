@@ -14,7 +14,7 @@ import (
 )
 
 // Catches changes that may require raising the format version.
-// It writes out the DB repository layout (path constants and sample README paths), the marker, the line that marks a cut README,
+// It writes out the DB repository layout (path constants and sample README paths), the marker, the line that marks a truncated README,
 // and the JSON shape of the config file (`dbConfigFile`) and the data files (`StarItem`, `StarList`, `RepoMeta`), and pins their hash.
 // When they change, the test fails.
 // Then decide whether `DBRepoFormat` must go up (a layout or shape change is a major change),
@@ -26,7 +26,7 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 	absentMarkerPath := FetchedReadme{isAbsent: true}.buildSnapshotPath(12345)
 	shape := strings.Join([]string{
 		MarkerDBPath, ConfigDBPath, StarItemsDBPath, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
-		ReadmesDBDir, readmePath, absentMarkerPath, readmeCutLine,
+		ReadmesDBDir, readmePath, absentMarkerPath, readmeTruncationLine,
 		string(EncodeDBRepoMarker()),
 		describeJSONShape(reflect.TypeOf(dbConfigFile{})),
 		describeJSONShape(reflect.TypeOf(StarItem{})),

@@ -23,7 +23,7 @@ It focuses on keeping a private, lasting record of the repositories you care abo
 
 - **Save without starring.** Add any repository from the dashboard, or from any GitHub repository page with the **Add to starkive** bookmarklet. Nothing shows up on your public profile.
 - **Entries outlive the repository.** Starkive keeps each repository's description, language, topics and license. Once a repository is in your archive (right away when you add it, at the next sync for a new star), unstarring it, or having it deleted or made private, doesn't take it away: the entry stays readable, and a repository that is gone is marked as unavailable. Renames are followed.
-- **README included.** Starkive also saves the first 8 KB of each repository's README, when you add it or at the next sync, so you can still read what a repository was about after it is gone.
+- **README included.** Starkive also saves a copy of each repository's README (long ones are truncated), when you add it or at the next sync, so you can still read what a repository was about after it is gone.
 - **Yours, in your own repository.** The archive is plain JSON and text files in a repository on your GitHub account (private by default), and every change is a commit, so you have the full history and can take it anywhere. Lists and notes are yours alone, and only your GitHub account can sign in.
 - **No server to run, no bill.** It runs on Vercel's free plan and GitHub, with no database to host or maintain.
 - **One place on every device.** A web dashboard you can open from your laptop or phone, with search, lists and notes.

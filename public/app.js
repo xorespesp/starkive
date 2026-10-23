@@ -982,8 +982,8 @@ async function openDeleteStarList(starList) {
  * @param {object} item Archive item
  *
  * NOTE: The README is someone else's text, so it goes in with `textContent` only, never as HTML.
- * A README cut at 8 KB ends with a line that says so.
- * Copy puts only the README text on the clipboard, without that line.
+ * If the README was truncated, a note under it says so.
+ * Copy puts only the README text on the clipboard, without that note.
  * Sync doesn't ask for the README of a repository that is gone, so one gone before its first check never gets one.
  * The message for a README not checked yet says so for those, instead of promising the next sync.
  */
@@ -1016,7 +1016,7 @@ function openReadme(item) {
         // CSP blocks inline `style` attributes, so it is set through CSSOM
         pre.style.setProperty('--line-digits', String(String(lines.length).length));
         content.replaceChildren(pre);
-        if (readme.truncated) content.append(el('p', { className: 'readme-cut', textContent: '(Truncated at 8 KB)' }));
+        if (readme.truncated) content.append(el('p', { className: 'readme-truncated', textContent: '(Truncated)' }));
         copy.hidden = false;
         // Timer that puts back the "Copy" label.
         // A new click restarts it, so the label stays 1.5 seconds after the last click

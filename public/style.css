@@ -994,8 +994,8 @@ dialog.readme-dialog {
   user-select: none;
 }
 
-/* The line under a README cut at 8 KB */
-.readme-cut {
+/* The note under a truncated README */
+.readme-truncated {
   margin: 8px 0 0;
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;

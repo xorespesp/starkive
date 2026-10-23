@@ -28,13 +28,12 @@ import (
 )
 
 // Largest README text kept, in bytes.
-// It holds the whole README for about 70% of repositories (measured on 729 READMEs, median 4.3KB).
-const maxReadmeBytes = 8 * 1024
+const maxReadmeBytes = 16 * 1024
 
 // Line added at the end of a README that was cut at `maxReadmeBytes`.
 // It isn't counted in `maxReadmeBytes`.
 // It looks like a git merge conflict marker, so it stands out from the README text
-const readmeCutLine = ">>>>>>> starkive: truncated <<<<<<<"
+const readmeTruncationLine = ">>>>>>> starkive: truncated <<<<<<<"
 
 // End of the file name of the absent marker, which says a repository was checked and its README is absent (`<ID>.no-readme`, empty content).
 // It contains `-`, so it never matches a README extension (`readmeExtensionPattern`)
@@ -172,7 +171,7 @@ func planReadmeSnapshotUpdate(itemID int64, fetched FetchedReadme, saved []readm
 //   - A UTF-8 byte order mark at the start is removed
 //   - Text over `maxReadmeBytes` is cut after its last line break in that range,
 //     or at a character boundary if there is no line break or it would keep less than half of it.
-//     Then `readmeCutLine` is added on a line of its own, ending with `\n`
+//     Then `readmeTruncationLine` is added on a line of its own, ending with `\n`
 //   - Text that is over `maxReadmeBytes` only because of whitespace at its end loses that whitespace instead of being cut
 //
 // Returns:
@@ -185,8 +184,8 @@ func buildReadmeSnapshotFile(readmeText string) ([]byte, bool) {
 	if len(text) > maxReadmeBytes && len(bytes.TrimRight(text, " \t\r\n")) <= maxReadmeBytes {
 		text = bytes.TrimRight(text, " \t\r\n") // Only blank space is over the limit, so nothing but blank space is lost
 	}
-	isCut := len(text) > maxReadmeBytes
-	if isCut {
+	isTruncated := len(text) > maxReadmeBytes
+	if isTruncated {
 		cutAt := maxReadmeBytes
 		for i := 1; i < utf8.UTFMax && cutAt > 0 && !utf8.RuneStart(text[cutAt]); i++ { // Moves back to the first byte of the UTF-8 character at `cutAt`, so no character is split
 			cutAt--
@@ -204,22 +203,22 @@ func buildReadmeSnapshotFile(readmeText string) ([]byte, bool) {
 	if len(bytes.TrimSpace(text)) == 0 {
 		return nil, false
 	}
-	if !isCut {
+	if !isTruncated {
 		return text, true
 	}
 	if !bytes.HasSuffix(text, []byte("\n")) {
 		text = append(text, '\n')
 	}
-	return append(append(text, readmeCutLine...), '\n'), true
+	return append(append(text, readmeTruncationLine...), '\n'), true
 }
 
-// Splits the content of a README file into the README text and whether it was cut (`buildReadmeSnapshotFile` added `readmeCutLine`).
+// Splits the content of a README file into the README text and whether it is truncated (`buildReadmeSnapshotFile` added `readmeTruncationLine`).
 //
-// NOTE: A README that isn't cut but itself ends with `readmeCutLine` reads as cut.
+// NOTE: A README that wasn't cut but itself ends with `readmeTruncationLine` reads as truncated.
 // The line names starkive, so no real README is expected to end with it.
 func parseReadmeSnapshotFile(content []byte) (string, bool) {
-	text, endsWithCutLine := bytes.CutSuffix(content, []byte(readmeCutLine+"\n"))
-	if !endsWithCutLine || (len(text) > 0 && !bytes.HasSuffix(text, []byte("\n"))) {
+	text, endsWithTruncationLine := bytes.CutSuffix(content, []byte(readmeTruncationLine+"\n"))
+	if !endsWithTruncationLine || (len(text) > 0 && !bytes.HasSuffix(text, []byte("\n"))) {
 		return string(content), false
 	}
 	return string(text), true
@@ -236,7 +235,7 @@ const (
 type ReadmeSnapshotContent struct {
 	State     string `json:"state"`               // `saved`, `absent` or `unchecked` (`readmeStateSaved` and so on)
 	Format    string `json:"format,omitempty"`    // Extension of the saved file (e.g. `md`). Empty if the file has none
-	Text      string `json:"text,omitempty"`      // The saved README text, without `readmeCutLine`. Bytes that aren't UTF-8 (only in a file the server didn't write, such as a hand edit) become U+FFFD in JSON
+	Text      string `json:"text,omitempty"`      // The saved README text, without `readmeTruncationLine`. Bytes that aren't UTF-8 (only in a file the server didn't write, such as a hand edit) become U+FFFD in JSON
 	Truncated bool   `json:"truncated,omitempty"` // `true` if the README was cut at `maxReadmeBytes`
 }
 
@@ -289,9 +288,9 @@ func ReadReadmeSnapshot(ctx context.Context, repo *DBRepo, itemID int64) (Readme
 const readmeRefreshGroups = 61
 
 // Most READMEs written in one commit.
-// Making a tree of 300 files of 4.7KB took about 4 seconds, and 2,000 files took 18.6 seconds (measured).
-// This keeps one commit far below the time limit of one GitHub request (`githubTimeout`)
-const maxReadmesPerCommit = 300
+// Making a tree of 2,000 files of 4.7KB (about 9.4MB) took 18.6 seconds (measured).
+// So even with every README at `maxReadmeBytes`, one commit stays far below the time limit of one GitHub request (`githubTimeout`)
+const maxReadmesPerCommit = 200
 
 // Number of `FetchReadmesByNodeIDs` calls sent at the same time during sync.
 // One call for `maxReadmeNodeIDs` repositories took 5.6 to 8.3 seconds (measured).
@@ -300,7 +299,7 @@ const maxReadmesPerCommit = 300
 const readmeFetchParallel = 3
 
 // Time kept before `endBy` of `SyncReadmeSnapshotsWithGitHub` for the commit after the last README call of a batch.
-// A commit of `maxReadmesPerCommit` READMEs makes a tree that took about 4 seconds (measured),
+// A commit of `maxReadmesPerCommit` READMEs stays far below one request time limit (`githubTimeout`),
 // so this leaves room for a slow commit
 const readmeCommitReserve = 2 * githubTimeout
 

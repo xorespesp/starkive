@@ -206,7 +206,7 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 }
 
 // Tests reading README snapshots through `GET /api/archive-repo-meta?id=`.
-//   - A saved README gives `saved`, its extension as `format`, and its text without the cut line, with `truncated`
+//   - A saved README gives `saved`, its extension as `format`, and its text without the truncation line, with `truncated`
 //   - A file with no extension has no `format`
 //   - A README and an absent marker together give the README
 //   - Only the absent marker gives `absent`, and no file gives `unchecked`
@@ -214,10 +214,10 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 func TestReadingReadmeSnapshotsThroughAPI(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
-	// Spelled out instead of `readmeCutLine`, because it is the format of files kept in DB repositories.
+	// Spelled out instead of `readmeTruncationLine`, because it is the format of files kept in DB repositories.
 	// A change to the line must fail this test
-	const cutLine = ">>>>>>> starkive: truncated <<<<<<<\n"
-	gh.files[core.ReadmesDBDir+"/01/1.rst"] = "# One\n" + cutLine // Sorted after `1.no-readme`, so the README must win on purpose
+	const truncationLine = ">>>>>>> starkive: truncated <<<<<<<\n"
+	gh.files[core.ReadmesDBDir+"/01/1.rst"] = "# One\n" + truncationLine // Sorted after `1.no-readme`, so the README must win on purpose
 	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
 	gh.files[core.ReadmesDBDir+"/02/2"] = "Two\n"
 	gh.files[core.ReadmesDBDir+"/03/3.no-readme"] = ""
@@ -431,7 +431,7 @@ func TestSyncReadmeSnapshotsWithGitHubKeepsSnapshotsWithoutTheItemFile(t *testin
 }
 
 // Tests the limits of the README sync step.
-//   - More than `maxReadmesPerCommit` (300) items go in several commits
+//   - More than `maxReadmesPerCommit` (200) items go in several commits
 //   - A rate limit answer stops it early without an error, and the READMEs fetched before it are committed
 //   - With too little time before `endBy`, it sends no README query.
 //     A call starts only if one request time limit is left before the time kept for the commit.
@@ -499,8 +499,8 @@ func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryCallFails(t *testing.T) {
 	gh := setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
 	repo := openTestDBRepo(t)
 	gh.readmeQueryFails = func(queryNumber int) bool { return true }
-	// The first batch of 300 items is 10 calls, and each fails at its first query
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 10 {
+	// The first batch (`maxReadmesPerCommit`, 200 items) is 7 calls of up to 30 items, and each fails at its first query
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 7 {
 		t.Errorf("every call fails: %d %v, README queries %d", checked, err, gh.readmeQueries)
 	}
 
