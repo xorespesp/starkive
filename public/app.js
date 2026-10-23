@@ -2071,7 +2071,7 @@ function openSettings() {
       'section',
       { className: 'settings-section' },
       el('h3', { textContent: 'Sync' }),
-      el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details with GitHub Actions in your archive repository, on a schedule or when you press Sync now. A repository deleted before the next sync isn't recorded." }),
+      el('p', { className: 'muted', textContent: "Archives new stars and refreshes repository details and READMEs with GitHub Actions in your archive repository, on a schedule or when you press Sync now. Each run refreshes as many as it has time for, so a large archive is fully refreshed over several runs. A repository deleted before the next sync isn't recorded." }),
       row('Sync with GitHub', enabled),
       row('Schedule', select),
       row('Last scheduled sync', lastRun),
