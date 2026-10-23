@@ -184,8 +184,8 @@ func buildReadmeSnapshotFile(readmeText string) ([]byte, bool) {
 	if len(text) > maxReadmeBytes && len(bytes.TrimRight(text, " \t\r\n")) <= maxReadmeBytes {
 		text = bytes.TrimRight(text, " \t\r\n") // Only blank space is over the limit, so nothing but blank space is lost
 	}
-	isTruncated := len(text) > maxReadmeBytes
-	if isTruncated {
+	needsCut := len(text) > maxReadmeBytes
+	if needsCut {
 		cutAt := maxReadmeBytes
 		for i := 1; i < utf8.UTFMax && cutAt > 0 && !utf8.RuneStart(text[cutAt]); i++ { // Moves back to the first byte of the UTF-8 character at `cutAt`, so no character is split
 			cutAt--
@@ -203,7 +203,7 @@ func buildReadmeSnapshotFile(readmeText string) ([]byte, bool) {
 	if len(bytes.TrimSpace(text)) == 0 {
 		return nil, false
 	}
-	if !isTruncated {
+	if !needsCut {
 		return text, true
 	}
 	if !bytes.HasSuffix(text, []byte("\n")) {
@@ -306,6 +306,8 @@ const readmeCommitReserve = 2 * githubTimeout
 // Brings the README snapshots of the archive in line with the READMEs on GitHub, until `endBy`.
 //  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`),
 //     then every other item with only the absent marker, each in random order.
+//     With `refreshEarly`, the other items with a saved README come last, in random order.
+//     Their turn to be refreshed hasn't come yet.
 //     Items in `skippedIDs` aren't asked
 //  2. Fetches up to `maxReadmesPerCommit` READMEs (`fetchReadmesInParallel`), and writes them in one commit (`writeFetchedReadmesInSingleCommit`)
 //  3. Goes on with the next batch while time is left
@@ -315,22 +317,36 @@ const readmeCommitReserve = 2 * githubTimeout
 //     A README call starts only if its first query can end `readmeCommitReserve` before this
 //   - `skippedIDs`: IDs of repositories that GitHub can't find now. Asking them would only make absent markers
 //   - `now`: Time that picks today's group. Taken as an argument so tests can set the day
+//   - `refreshEarly`: Whether to also use the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet
 //
 // Returns:
 //   - The number of READMEs fetched and compared with the saved ones. Only the changes are committed
-//   - An error from reading the archive or from a commit.
-//     Running out of time, reaching the rate limit or every call of a batch failing isn't an error: what was fetched is committed if time is left for the commit,
-//     it is logged, and the next sync goes on
+//   - An error that needs a person (`isTemporaryGitHubError` is false), from reading the archive, from a commit,
+//     or from a batch whose calls all failed (wrapping `errReadmesAllFailed` and the failure of one call).
+//     Running out of time, reaching the rate limit, and a GitHub failure that passes on its own aren't errors:
+//     what was fetched is committed if time is left for the commit, it is logged, and the next sync goes on
 //
 // NOTE: Absent markers are asked again in every sync, because a missing record is worse than an old one.
 // A README added later, or one that an older rule failed to find, is then saved by the next sync.
 // They come after today's group, so they only use the time left.
 // However many there are, each item is still checked at least once in `readmeRefreshGroups` syncs.
+// The items that `refreshEarly` adds come after them for the same reason.
 //
 // Snapshots of items no longer in the archive are deleted in every commit it makes.
 // With nothing to check, it still runs the commit step for them, and a commit is made only if there is something to delete.
 // So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
-func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time) (int, error) {
+func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time, refreshEarly bool) (int, error) {
+	checked, err := syncReadmeSnapshotBatches(ctx, repo, endBy, skippedIDs, now, refreshEarly)
+	if err != nil && isTemporaryGitHubError(ctx, err) {
+		log.Printf("readmes: stopped by a GitHub failure that passes on its own, the next sync goes on: %v", err)
+		return checked, nil
+	}
+	return checked, err
+}
+
+// Does the work of `SyncReadmeSnapshotsWithGitHub`, with the same arguments.
+// It returns every error, including the ones that pass on their own
+func syncReadmeSnapshotBatches(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time, refreshEarly bool) (int, error) {
 	commitSHA, err := readBranchCommit(ctx, repo)
 	if err != nil {
 		return 0, err
@@ -351,6 +367,7 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 	uncheckedItems := []StarItem{}
 	todaysItems := []StarItem{}
 	absentItems := []StarItem{}
+	otherItems := []StarItem{} // Items with a saved README outside today's group. Checked only with `refreshEarly`
 	for _, item := range starItems {
 		snapshots := snapshotsByID[item.ID]
 		switch {
@@ -362,6 +379,8 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 			todaysItems = append(todaysItems, item)
 		case !slices.ContainsFunc(snapshots, func(snapshot readmeSnapshot) bool { return !snapshot.isAbsent }): // No saved README
 			absentItems = append(absentItems, item)
+		default:
+			otherItems = append(otherItems, item)
 		}
 	}
 	// Shuffled, so a run that can't check them all leaves different items for the next run
@@ -369,6 +388,10 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 	rand.Shuffle(len(todaysItems), func(i int, j int) { todaysItems[i], todaysItems[j] = todaysItems[j], todaysItems[i] })
 	rand.Shuffle(len(absentItems), func(i int, j int) { absentItems[i], absentItems[j] = absentItems[j], absentItems[i] })
 	queue := slices.Concat(uncheckedItems, todaysItems, absentItems)
+	if refreshEarly {
+		rand.Shuffle(len(otherItems), func(i int, j int) { otherItems[i], otherItems[j] = otherItems[j], otherItems[i] })
+		queue = append(queue, otherItems...)
+	}
 
 	fetchEndBy := endBy.Add(-readmeCommitReserve) // Time by which the README calls of a batch end, so the commit has time left
 	checked := 0
@@ -386,6 +409,9 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 		}
 		checked += len(fetched)
 		queue = queue[len(batch):]
+		if errors.Is(stopErr, errReadmesAllFailed) {
+			return checked, stopErr
+		}
 		if stopErr != nil {
 			log.Printf("readmes: stopped with %d READMEs left for the next sync: %v", len(queue)+len(batch)-len(fetched), stopErr)
 			return checked, nil
@@ -400,7 +426,8 @@ func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time
 var errReadmesOutOfTime = errors.New("out of time")
 
 // Error for a batch whose README calls all failed.
-// GitHub is likely failing as a whole, so asking more would only use up the rate limit
+// GitHub is likely failing as a whole, or the setup is broken, so asking more would only use up the rate limit.
+// It is wrapped together with the failure of one call, which tells whether it passes on its own (`isTemporaryGitHubError`)
 var errReadmesAllFailed = errors.New("every README call of a batch failed")
 
 // Fetches the READMEs of the items `items`, `maxReadmeNodeIDs` in each `FetchReadmesByNodeIDs` call and `readmeFetchParallel` calls at a time.
@@ -412,7 +439,8 @@ var errReadmesAllFailed = errors.New("every README call of a batch failed")
 //     An item that GitHub can't tell about now, or whose call failed, isn't in it, and is asked again later
 //   - Why not every call was answered: `errReadmesOutOfTime` (not sent in time, or cut at `fetchEndBy`),
 //     or an error that wraps `errGitHubRateLimited`.
-//     `errReadmesAllFailed` if every call failed, so no more batches are asked.
+//     If every call failed, an error that wraps `errReadmesAllFailed` and the failure of one call, so no more batches are asked.
+//     A failure that needs a person is picked over one that passes on its own.
 //     `nil` if every call ended and at least one succeeded
 //
 // NOTE: A call usually has up to three queries in a row, each ending in a few seconds as a rule (measured).
@@ -434,6 +462,7 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 	fetched := map[int64]FetchedReadme{}
 	failed := 0
 	succeeded := 0
+	var failure error // The failure of one call, kept for `errReadmesAllFailed`
 	var stopErr error
 	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
 	for w := 0; w < readmeFetchParallel; w++ {
@@ -472,6 +501,9 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 					}
 				case err != nil:
 					failed++
+					if failure == nil || isTemporaryGitHubError(ctx, failure) {
+						failure = err
+					}
 				default:
 					succeeded++
 					for i, readme := range readmes {
@@ -489,7 +521,7 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 		log.Printf("readmes: %d of %d calls failed, their items are asked again later", failed, failed+succeeded)
 	}
 	if stopErr == nil && failed > 0 && succeeded == 0 {
-		stopErr = errReadmesAllFailed
+		stopErr = fmt.Errorf("%w: %w", errReadmesAllFailed, failure) // Two `%w`: `errors.Is` and `errors.As` find both errors
 	}
 	return fetched, stopErr
 }

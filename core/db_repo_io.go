@@ -46,6 +46,8 @@ func ReadDBRepoFile(ctx context.Context, repo *DBRepo, path string) ([]byte, err
 //
 // Returns:
 //   - The file content. `nil` if the file doesn't exist (404)
+//   - A `GitHubAPIError` if GitHub answers with another failure.
+//     It is wrapped with `errGitHubRateLimited` if it is a rate limit answer
 //
 // NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
 // Archive files can grow larger than that, so they are fetched in raw format.
@@ -59,7 +61,7 @@ func readDBRepoFileAt(ctx context.Context, repo *DBRepo, path string, ref string
 	if res.StatusCode == http.StatusNotFound {
 		return nil, nil
 	}
-	if err := CheckGitHubResponse(res); err != nil {
+	if err := checkGitHubResponseWithRateLimit(res); err != nil {
 		return nil, err
 	}
 	content, err := io.ReadAll(res.Body)
@@ -463,14 +465,15 @@ func isCommitInBranch(ctx context.Context, repo *DBRepo, branchCommit string, ne
 //   - `dst`: Pointer to the value to fill from the JSON response. If `nil`, the response body is discarded
 //
 // Returns:
-//   - `GitHubAPIError` if GitHub answers with a failure
+//   - `GitHubAPIError` if GitHub answers with a failure.
+//     It is wrapped with `errGitHubRateLimited` if it is a rate limit answer
 func callDBRepoAPI(ctx context.Context, repo *DBRepo, method string, path string, body any, dst any) error {
 	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildAPIPath(path), GitHubAPIRequest{Method: method, Body: body})
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if err := CheckGitHubResponse(res); err != nil {
+	if err := checkGitHubResponseWithRateLimit(res); err != nil {
 		return err
 	}
 	if dst == nil {

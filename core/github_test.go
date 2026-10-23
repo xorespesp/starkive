@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -142,4 +144,92 @@ func hasGitHubStatusOrNone(err error, status int) bool {
 		return !errors.As(err, &apiErr)
 	}
 	return hasGitHubStatus(err, status)
+}
+
+// Tests which errors `isTemporaryGitHubError` counts as passing on their own.
+//   - Passing on their own: the deadline of `ctx` cut the work, no answer came, GitHub failing on its side (5xx),
+//     the rate limit, and other commits that kept moving the branch. Also when wrapped in another error
+//   - Needing a person: a refused token (401), a missing permission (403), a rejected request (422),
+//     an answer that can't be read, and any other error
+//   - A status that GitHub answered is judged by the status even after the deadline of `ctx` has passed
+func TestIsTemporaryGitHubError(t *testing.T) {
+	ctx := context.Background()
+	cutCtx, cancel := context.WithCancel(ctx)
+	cancel() // Already ended, as if its deadline had passed
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"deadline cut the work", cutCtx, errors.New("any error"), true},
+		{"no answer", ctx, newGitHubUnreachableError(errors.New("connection reset")), true},
+		{"GitHub failing", ctx, &GitHubAPIError{Status: http.StatusBadGateway}, true},
+		{"wrapped", ctx, fmt.Errorf("refresh readmes: %w", &GitHubAPIError{Status: http.StatusServiceUnavailable}), true},
+		{"rate limit", ctx, fmt.Errorf("%w: %w", errGitHubRateLimited, &GitHubAPIError{Status: http.StatusForbidden}), true},
+		{"branch kept moving", ctx, errBranchMoved, true},
+		{"token refused", ctx, &GitHubAPIError{Status: http.StatusUnauthorized, Message: "Bad credentials"}, false},
+		{"missing permission", ctx, &GitHubAPIError{Status: http.StatusForbidden, Message: "Resource not accessible by personal access token"}, false},
+		{"rejected request", ctx, &GitHubAPIError{Status: http.StatusUnprocessableEntity}, false},
+		{"answer can't be read", ctx, newGitHubUnreadableError(errors.New("invalid character")), false},
+		{"other error", ctx, errors.New("broken file"), false},
+		{"token refused before the deadline passed", cutCtx, &GitHubAPIError{Status: http.StatusUnauthorized}, false},
+		{"GitHub failing before the deadline passed", cutCtx, &GitHubAPIError{Status: http.StatusBadGateway}, true},
+	}
+	for _, c := range cases {
+		if got := isTemporaryGitHubError(c.ctx, c.err); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
+// Tests which errors `hasGitHubStatusBetween` and `hasGitHubStatus` match.
+//   - A status inside the range matches, both ends included, also when wrapped in another error
+//   - A status outside the range, and an error that isn't a `GitHubAPIError`, don't match
+//   - `hasGitHubStatus` matches only the exact status
+func TestHasGitHubStatusBetween(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"lowest end", &GitHubAPIError{Status: 500}, true},
+		{"highest end", &GitHubAPIError{Status: 599}, true},
+		{"wrapped", fmt.Errorf("refresh readmes: %w", &GitHubAPIError{Status: 503}), true},
+		{"below", &GitHubAPIError{Status: 499}, false},
+		{"above", &GitHubAPIError{Status: 600}, false},
+		{"not from GitHub", Errorf(http.StatusBadGateway, "GitHub didn't answer in time"), false},
+	}
+	for _, c := range cases {
+		if got := hasGitHubStatusBetween(c.err, 500, 599); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+	if !hasGitHubStatus(&GitHubAPIError{Status: 404}, 404) || hasGitHubStatus(&GitHubAPIError{Status: 404}, 403) {
+		t.Error("hasGitHubStatus doesn't match the exact status")
+	}
+}
+
+// Tests how `DecodeGitHubResponse` tells a body that stopped coming from one that can't be read.
+//   - JSON that ends in the middle (a dropped connection) is an answer that never came (`gitHubUnreachableError`)
+//   - A body that isn't JSON (an HTML error page) is an answer that can't be read, not `gitHubUnreachableError`.
+//     Both are 502 `HTTPError`s
+func TestDecodeGitHubResponse(t *testing.T) {
+	cases := []struct {
+		name            string
+		body            string
+		wantUnreachable bool
+	}{
+		{"stopped in the middle", `{"name":"rep`, true},
+		{"HTML in place of JSON", "<html>Unicorn!</html>", false},
+	}
+	for _, c := range cases {
+		var dst map[string]any
+		err := DecodeGitHubResponse(&http.Response{Body: io.NopCloser(strings.NewReader(c.body))}, &dst)
+		var unreachable *gitHubUnreachableError
+		var httpErr *HTTPError
+		if errors.As(err, &unreachable) != c.wantUnreachable || !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
 }

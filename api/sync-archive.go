@@ -3,7 +3,7 @@
 //	GET              Call from the sync workflow. The DB repository's workflow (`starkive-sync.yml`) calls it every day on schedule,
 //	                 and in each run started by hand, with the sync key in `Authorization: Bearer` -> { status }.
 //	                 `status` is `not_due` (not a day to sync, or Manual only) or `synced` (synced). 401 if the key is missing or wrong.
-//	                 A run started by hand syncs whatever the interval.
+//	                 A run started by hand syncs whatever the interval, and also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet.
 //	                 If the sync fails, it answers 502, so the workflow fails and GitHub notifies the user (docs)
 //	POST             Sync now: a signed-in user starts a run of the sync workflow -> { run } (`core.SyncWorkflowRun`, queued).
 //	                 It answers once the run exists, without waiting for the sync. 409 if the workflow is off or missing

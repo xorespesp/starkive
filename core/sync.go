@@ -25,7 +25,8 @@ type ArchiveSyncResult struct {
 //  2. Refreshes the metadata snapshots within `repoMetaSyncBudget`, or the time left before `longStepsEndBy` if that is shorter (`SyncRepoMetaSnapshotsWithGitHub`)
 //  3. Refreshes the README snapshots with the time left before `longStepsEndBy` (`SyncReadmeSnapshotsWithGitHub`).
 //     Repositories that the metadata step found missing aren't asked.
-//     If that step failed, none are skipped
+//     If that step failed, none are skipped.
+//     With `refreshReadmesEarly`, it also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet
 //
 // Args:
 //   - `ctx`: Deadline of the whole sync. Every request, commits included, ends by it
@@ -33,10 +34,12 @@ type ArchiveSyncResult struct {
 //     A commit or read they start before it can end after it, by the deadline of `ctx`.
 //     They leave what is left for the next sync.
 //     Adding new Stars doesn't check it, but its requests end by the deadline of `ctx`
+//   - `refreshReadmesEarly`: Whether the README step also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet
 //
 // Returns:
 //   - The counts (`ArchiveSyncResult`). Even if a step failed, the counts of the steps that succeeded are filled in
-//   - The errors of the failed steps joined together, each with its step name ("archive new stars", "refresh repo meta", "refresh readmes")
+//   - The errors of the failed steps joined together, each with its step name ("archive new stars", "refresh repo meta", "refresh readmes").
+//     The README step leaves out GitHub failures that pass on their own (`SyncReadmeSnapshotsWithGitHub`)
 //
 // NOTE: The steps are independent, so even if one fails the others run to the end.
 // Adding comes first, so new items usually get their metadata and README snapshots in the same run.
@@ -44,7 +47,7 @@ type ArchiveSyncResult struct {
 // Each run compares all Stars with the archive.
 // So overlapping runs or a skipped day give the same result.
 // GitHub Stars are never changed.
-func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy time.Time) (ArchiveSyncResult, error) {
+func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy time.Time, refreshReadmesEarly bool) (ArchiveSyncResult, error) {
 	result := ArchiveSyncResult{}
 	var errs []error
 	syncStart := time.Now() // For the total time in the log
@@ -70,7 +73,7 @@ func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy tim
 	metaTime := time.Since(stepStart)
 	stepStart = time.Now()
 
-	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(ctx, repo, longStepsEndBy, meta.UnavailableRepoIDs, time.Now())
+	result.NumCheckedReadmes, err = SyncReadmeSnapshotsWithGitHub(ctx, repo, longStepsEndBy, meta.UnavailableRepoIDs, time.Now(), refreshReadmesEarly)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("refresh readmes: %w", err))
 	}

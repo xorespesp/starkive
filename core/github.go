@@ -2,7 +2,8 @@
 // It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubResponse`, `GitHubAPIError`),
 // tells rate limit answers apart (`checkGitHubResponseWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
 // reads GitHub's JSON answers (`DecodeGitHubResponse`),
-// and turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`).
+// turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`),
+// and tells failures that pass on their own from ones that need a person (`isTemporaryGitHubError`).
 // Calls for each feature (saving the archive, sync, sign-in) are in their own files.
 package core
 
@@ -97,7 +98,7 @@ func CallGitHubAPI(ctx context.Context, cfg *EnvConfig, path string, opt GitHubA
 // Wraps `err`, a failure to get an answer from GitHub, as a 502 `HTTPError`, so `ServeAPIRequest` answers 502 as for any GitHub failure.
 // The message tells a timeout from other failures.
 // The message, which the browser gets, leaves out the text of `err`, which has the request address.
-// The returned error keeps `err` for the server log.
+// The returned error keeps `err` for the server log, inside a `gitHubUnreachableError`.
 // Two `%w` keep both errors findable with `errors.Is` and `errors.As`.
 func newGitHubUnreachableError(err error) error {
 	message := "Couldn't reach GitHub"
@@ -105,14 +106,35 @@ func newGitHubUnreachableError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		message = "GitHub didn't answer in time"
 	}
-	return fmt.Errorf("%w: %w", Errorf(http.StatusBadGateway, "%s", message), err)
+	return fmt.Errorf("%w: %w", Errorf(http.StatusBadGateway, "%s", message), &gitHubUnreachableError{cause: err})
 }
+
+// Error for a GitHub request that got no answer or whose answer stopped coming
+// (a dropped connection, `githubTimeout` or the deadline of `ctx`).
+// It marks the failure, so it can be told apart from other 502 errors (`HTTPError`).
+// It prints only its cause, so the server log reads the same as the cause.
+type gitHubUnreachableError struct {
+	cause error // The error from sending the request or reading the answer
+}
+
+// Implements Go's `error` interface.
+// The message is the cause's
+func (e *gitHubUnreachableError) Error() string { return e.cause.Error() }
+
+// Returns the cause, so `errors.Is` and `errors.As` look into it
+func (e *gitHubUnreachableError) Unwrap() error { return e.cause }
 
 // Reads the JSON body of the GitHub answer `res` into `dst`.
 // A body that can't be read (such as an HTML error page in place of JSON) gives a 502 `HTTPError`,
-// so `ServeAPIRequest` answers 502 as for any GitHub failure, not 500
+// so `ServeAPIRequest` answers 502 as for any GitHub failure, not 500.
+// A body that stops coming (a dropped connection, `githubTimeout` or the deadline of `ctx`)
+// gives the same error as an answer that never came (`newGitHubUnreachableError`), because GitHub's answer is missing in both.
 func DecodeGitHubResponse(res *http.Response, dst any) error {
 	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
+		var netErr net.Error
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return newGitHubUnreachableError(err)
+		}
 		return newGitHubUnreadableError(err)
 	}
 	return nil
@@ -256,7 +278,7 @@ func checkGitHubResponseWithRateLimit(res *http.Response) error {
 // Failures of the sign-in code exchange endpoint, which answers in JSON, are the same.
 //
 // NOTE: The status code belongs to GitHub, so it isn't used as the status code of our API (`ServeAPIRequest` always answers 502).
-// To decide by GitHub's status code inside the server, use `hasGitHubStatus`.
+// To decide by GitHub's status code inside the server, use `hasGitHubStatus`, or `hasGitHubStatusBetween` for a range.
 // Sometimes GitHub answers success (200) but the content can't be used (GraphQL `errors`, an empty user, and so on).
 // That is not this type.
 // It is a 502 `HTTPError` that we make after looking at the content.
@@ -272,8 +294,44 @@ func (e *GitHubAPIError) Error() string { return fmt.Sprintf("GitHub %d: %s", e.
 // Reports whether error `err` is a failure that GitHub answered with status code `status` (e.g. 404).
 // It also looks inside errors wrapped with `%w` (`errors.As`)
 func hasGitHubStatus(err error, status int) bool {
+	return hasGitHubStatusBetween(err, status, status)
+}
+
+// Reports whether error `err` is a failure that GitHub answered with a status code from `lowest` to `highest`, both included
+// (e.g. 500 to 599 for any failure on GitHub's side).
+// It also looks inside errors wrapped with `%w` (`errors.As`)
+func hasGitHubStatusBetween(err error, lowest int, highest int) bool {
 	var apiErr *GitHubAPIError
-	return errors.As(err, &apiErr) && apiErr.Status == status
+	return errors.As(err, &apiErr) && apiErr.Status >= lowest && apiErr.Status <= highest
+}
+
+// Reports whether error `err` is a GitHub failure that passes on its own, so trying again later is enough.
+// These are: the deadline of `ctx` cut the work, no answer came (`gitHubUnreachableError`),
+// GitHub failed on its side (5xx), the rate limit was reached (`errGitHubRateLimited`),
+// or other commits kept moving the branch (`errBranchMoved`).
+//
+// NOTE: Any other error counts as one that needs a person, so a broken setup isn't missed.
+// For example: a refused token (401), a missing permission (403), a missing repository (404),
+// a request GitHub rejects (422), an answer that can't be read, or a file of ours that is broken.
+// A 4xx or 5xx status that GitHub answered is judged by the status, even if the deadline of `ctx` has passed since then.
+// GitHub did answer it, so the deadline didn't cut it.
+// For other errors, whether the deadline cut the work is told by `ctx.Err()`, not by the error,
+// because a single slow request (`githubTimeout`) can give the same error (measured).
+func isTemporaryGitHubError(ctx context.Context, err error) bool {
+	var unreachable *gitHubUnreachableError
+	switch {
+	case errors.Is(err, errGitHubRateLimited), errors.Is(err, errBranchMoved):
+		return true
+	case hasGitHubStatusBetween(err, 500, 599): // GitHub failed on its side
+		return true
+	case hasGitHubStatusBetween(err, 400, 499): // GitHub answered, so the deadline didn't cut it
+		return false
+	case errors.As(err, &unreachable):
+		return true
+	case ctx.Err() != nil:
+		return true
+	}
+	return false
 }
 
 // Checks whether a GitHub answer is a failure (not 2xx).

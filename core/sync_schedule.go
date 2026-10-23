@@ -97,6 +97,7 @@ func syncDayNumber(now time.Time) int64 {
 
 // Handles a call from the sync workflow in the DB repository.
 // A call from a run started by hand (Sync now) runs `SyncArchiveWithGitHub` right away, whatever the interval.
+// It also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet (`refreshReadmesEarly`).
 // A call from a scheduled run runs `SyncArchiveWithGitHub` on a sync day, and otherwise does nothing.
 // If the last finished scheduled run failed, a scheduled run syncs again whatever the interval, unless it is Manual only.
 // With "Manual only" (`manualOnlyIntervalDays`), a scheduled run never syncs.
@@ -126,7 +127,8 @@ func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.T
 	if err != nil {
 		return "", err
 	}
-	if !isCallFromManualWorkflowRun(runList.pickRecentRuns(now)) {
+	isManualRun := isCallFromManualWorkflowRun(runList.pickRecentRuns(now))
+	if !isManualRun {
 		settings, err := readSyncConfig(ctx, repo)
 		if err != nil {
 			return "", err
@@ -144,7 +146,7 @@ func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.T
 			return "not_due", nil
 		}
 	}
-	if _, err := SyncArchiveWithGitHub(ctx, repo, longStepsEndBy); err != nil {
+	if _, err := SyncArchiveWithGitHub(ctx, repo, longStepsEndBy, isManualRun); err != nil {
 		return "", err
 	}
 	return "synced", nil

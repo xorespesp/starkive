@@ -5,6 +5,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,7 +106,7 @@ func findSyncDay(t *testing.T, repo *core.DBRepo) int {
 //   - Changing the interval to 3 days is saved in `config.json` (App settings stay as they are), and only one day in three syncs
 //   - A scheduled run that is 10 hours late and passes midnight UTC still counts as the same day
 //   - Manual only (0) is saved as `"interval_days": 0` with the commit `user(config): sync manually only`, and then a scheduled run doesn't sync even on a sync day.
-//     A call from a run started by hand still syncs
+//     A call from a run started by hand still syncs, and also refreshes the saved READMEs whose turn to be refreshed hasn't come yet
 //   - An interval that can't be chosen (5, -1) and an empty request get 400
 func TestScheduledSync(t *testing.T) {
 	ctx := context.Background()
@@ -145,11 +146,32 @@ func TestScheduledSync(t *testing.T) {
 	if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late); err != nil || got != "not_due" {
 		t.Errorf("manual only on a sync day: %q %v", got, err)
 	}
+	// Two saved READMEs in different groups (`ID % 61`).
+	// The README step picks today's group from the real date, so at least one of them isn't in it
+	names := []string{"a/one", "a/two"}
+	if makeRepoID(names[0])%61 == makeRepoID(names[1])%61 {
+		t.Fatalf("%v are in the same README group", names)
+	}
+	readmePaths := []string{}
 	gh.mu.Lock()
 	gh.runs = []fakeRun{{event: "workflow_dispatch", status: "in_progress", started: late}}
+	gh.starred = names // `a/two` is archived in the same sync, before the README step
+	for _, name := range names {
+		id := makeRepoID(name)
+		readmePath := fmt.Sprintf("%s/%02d/%d.md", core.ReadmesDBDir, id%100, id)
+		readmePaths = append(readmePaths, readmePath)
+		gh.files[readmePath] = "# Old\n"
+		gh.readmes[id] = fakeReadme{name: "README.md", content: "# New\n"}
+	}
 	gh.mu.Unlock()
-	if got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late); err != nil || got != "synced" {
+	got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), late)
+	if err != nil || got != "synced" {
 		t.Errorf("manual only, a call from Sync now: %q %v", got, err)
+	}
+	for _, readmePath := range readmePaths {
+		if gh.readFile(readmePath) != "# New\n" {
+			t.Errorf("manual only, a call from Sync now: README %s %q", readmePath, gh.readFile(readmePath))
+		}
 	}
 
 	// Intervals that can't be chosen

@@ -105,7 +105,7 @@ func TestServerCodeKeepsTheRequestDeadline(t *testing.T) {
 // Both stop fetching at that time, so the rest of the request is left for commits and the answer
 func TestSyncLongStepsStopAtTheirEnd(t *testing.T) {
 	setup(t, sampleStarItems, sampleStarLists)
-	result, err := core.SyncArchiveWithGitHub(context.Background(), openTestDBRepo(t), time.Now())
+	result, err := core.SyncArchiveWithGitHub(context.Background(), openTestDBRepo(t), time.Now(), false)
 	if err != nil || result.NumMetaCheckedRepos != 0 || result.NumCheckedReadmes != 0 {
 		t.Errorf("long steps after their end: %+v, %v", result, err)
 	}

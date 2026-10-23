@@ -64,7 +64,8 @@ type RepoMetaSyncResult struct {
 //     If nothing changed, no commit is made
 //   - For a repository that GitHub answered as "not found", the snapshot content stays.
 //     Only the time of the first such answer is kept (`UnavailableSince`)
-//   - A batch whose request failed changes nothing
+//   - A batch whose request failed changes nothing.
+//     If every batch sent failed with a failure that needs a person (`isTemporaryGitHubError` is false), it stops with that error
 //   - The result is written in one commit.
 //     The subject has the number checked and the number not found.
 //     The body lists disappeared, visible again and renamed repositories, and the number whose details changed
@@ -74,6 +75,8 @@ type RepoMetaSyncResult struct {
 //
 // Returns:
 //   - The number checked and the IDs not found
+//   - An error from reading the archive or from the commit, or the failure of one batch when every batch sent failed with a failure that needs a person.
+//     When every batch sent failed with a GitHub failure that passes on its own, it isn't an error, and the next sync goes on
 //
 // NOTE: Because of the random order, different repositories get checked in each run, even when there are too many to check at once.
 // Items have no check time, so the file doesn't change when the content is the same.
@@ -104,6 +107,8 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 	var mu sync.Mutex
 	next := 0
 	checked := 0
+	failedBatches := 0
+	var failure error             // The failure of one batch. One that needs a person is kept over one that passes on its own
 	fresh := map[int64]RepoMeta{} // New snapshots of the repositories found (repository info only)
 	gone := map[int64]bool{}      // Repositories that GitHub answered it can't find
 	var wg sync.WaitGroup         // Counter that waits until all goroutines end (like `std::thread::join`)
@@ -129,6 +134,12 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 				nodes, missing, err := FetchRepoMetaByNodeIDs(ctx, repo.cfg, ids)
 				if err != nil {
 					log.Printf("repo details failed (%d repos left unchanged): %v", len(batch), err)
+					mu.Lock()
+					failedBatches++
+					if failure == nil || isTemporaryGitHubError(ctx, failure) {
+						failure = err
+					}
+					mu.Unlock()
 					continue // A batch whose request failed changes nothing. This keeps a temporary outage from being recorded as a disappearance
 				}
 				mu.Lock()
@@ -149,6 +160,12 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 		}()
 	}
 	wg.Wait()
+	// Every batch sent failed, so nothing was checked.
+	// If a person must fix the cause (for example, GitHub no longer accepts the query), the refresh and the disappearance checks would stop silently.
+	// So that case is an error
+	if failedBatches > 0 && checked == 0 && !isTemporaryGitHubError(ctx, failure) {
+		return RepoMetaSyncResult{}, fmt.Errorf("every repository details request failed: %w", failure)
+	}
 
 	now := FormatNow()
 	updated, err := UpdateArchive(ctx, repo, func(a *Archive) (CommitMessage, error) {

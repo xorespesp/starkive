@@ -70,7 +70,8 @@ type fakeGitHub struct {
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
 	readmeQueries       int                           // Number of README queries by GraphQL (folder listings and file contents)
 	readmeListedIDs     [][]string                    // `node_id`s of each README folder listing query, in the order the queries came
-	readmeQueryFails    func(queryNumber int) bool    // If not `nil`, README queries by GraphQL for which it returns `true` fail with 502. `queryNumber` counts from 1
+	readmeQueryFails    func(queryNumber int) bool    // If not `nil`, README queries by GraphQL for which it returns `true` fail with `readmeFailStatus`. `queryNumber` counts from 1
+	readmeFailStatus    int                           // Status code of the failures that `readmeQueryFails` picks. 502 if 0
 	readmeRateLimitFrom int                           // If not 0, README queries by GraphQL from this one on (counting from 1) get the rate limit answer (200 with an error)
 	refStatus           int                           // If not 0, the branch move fails with this status code and `refMessage`. The branch doesn't move
 	refMessage          string                        // GitHub message used when failing with `refStatus`
@@ -78,7 +79,8 @@ type fakeGitHub struct {
 	otherAfterLostReply bool                          // If `true`, one more commit from another device lands right after the lost response. Used with `refLostReply`
 	gone                map[string]bool               // `node_id`s that GraphQL answers with `NOT_FOUND` (repositories deleted or made private)
 	githubStarLists     map[string][]string           // My GitHub star lists: name -> repositories in it (owner/repo)
-	graphqlDown         bool                          // If `true`, all GraphQL requests fail with 502 (a temporary outage)
+	graphqlDown         bool                          // If `true`, all GraphQL requests fail with `graphqlDownStatus`
+	graphqlDownStatus   int                           // Status code of the failures that `graphqlDown` makes. 502 (a temporary outage) if 0
 	githubStarListsDown bool                          // If `true`, only the GitHub star list query (`viewer.lists`) fails with 502
 	ownerDown           bool                          // If `true`, `/user` with the server token (the token owner check) fails with 502
 	tokenRejected       bool                          // If `true`, every request with the server token is refused with 401 "Bad credentials" (token expired or revoked)
@@ -141,7 +143,11 @@ type fakeReadme struct {
 func (f *fakeGitHub) answerReadmeQuery(w http.ResponseWriter, query string, rawBody []byte) {
 	f.readmeQueries++
 	if f.readmeQueryFails != nil && f.readmeQueryFails(f.readmeQueries) {
-		http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		status := f.readmeFailStatus
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		http.Error(w, `{"message":"Server Error"}`, status)
 		return
 	}
 	if f.readmeRateLimitFrom != 0 && f.readmeQueries >= f.readmeRateLimitFrom {
@@ -751,7 +757,11 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/graphql":
 		// GraphQL: the DB repository state (`isEmpty` and the marker), the GitHub star list query (`viewer`), and repository info by `node_id` (`nodes`)
 		if f.graphqlDown {
-			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			status := f.graphqlDownStatus
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			http.Error(w, `{"message":"Server Error"}`, status)
 			return
 		}
 		var body struct {
@@ -1569,7 +1579,7 @@ func TestSync(t *testing.T) {
 		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
 
 	repo := openTestDBRepo(t)
-	result, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy())
+	result, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,7 +1610,7 @@ func TestSync(t *testing.T) {
 
 	// Running it again has nothing to add, no changed metadata and no changed README, so no commit is made.
 	// The absent markers and the READMEs of today's group are asked again, and which items are in the group depends on the date, so that count isn't compared
-	result, err = core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy())
+	result, err = core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy(), false)
 	result.NumCheckedReadmes = 0
 	if err != nil || result != (core.ArchiveSyncResult{NumStarredRepos: 4, NumAddedRepos: 0, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0}) {
 		t.Errorf("second run: %+v %v", result, err)
@@ -1611,7 +1621,9 @@ func TestSync(t *testing.T) {
 }
 
 // Tests snapshots of repositories that disappeared.
-//   - If the query itself fails (an outage), nothing is recorded as gone
+//   - If the query itself fails (an outage), nothing is recorded as gone.
+//     It isn't an error when every batch failed with a failure that passes on its own (502),
+//     and it is one when they failed with a failure that needs a person (401)
 //   - If GitHub says it can't find a repository, the snapshot content stays and only the first time it was seen gone (`unavailable_since`) is added.
 //     The next run keeps that time
 //   - If it shows up again, the mark is removed
@@ -1621,7 +1633,7 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	gh := setup(t, "", "")
 	gh.starred = []string{"a/kept", "a/vanishing"}
 	repo := openTestDBRepo(t)
-	if _, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy()); err != nil {
+	if _, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy(), false); err != nil {
 		t.Fatal(err)
 	}
 	vanishingID := fmt.Sprintf("R_%d", makeRepoID("a/vanishing"))
@@ -1631,7 +1643,11 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute); err != nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
 		t.Errorf("outage: %+v %v", result, err)
 	}
-	gh.graphqlDown = false
+	gh.graphqlDownStatus = http.StatusUnauthorized
+	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, time.Minute); err == nil || len(result.UnavailableRepoIDs) != 0 || result.NumCheckedRepos != 0 {
+		t.Errorf("every batch refused: %+v %v", result, err)
+	}
+	gh.graphqlDown, gh.graphqlDownStatus = false, 0
 
 	// When deleted, the snapshot (description, etc.) stays and only the time is added
 	gh.gone = map[string]bool{vanishingID: true}
@@ -1877,7 +1893,7 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 
 	// Sync: adds the other new Stars.
 	// For the same GitHub star list, they must go into the same star list as Import
-	if _, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy()); err != nil {
+	if _, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy(), false); err != nil {
 		t.Fatal(err)
 	}
 	var starLists []core.StarList
@@ -1969,7 +1985,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// Adding new Stars fails, but the unrelated snapshot refreshes run to the end and commit.
 	// The error comes back with the step name
-	result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy())
+	result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy(), false)
 	if err == nil || !strings.Contains(err.Error(), "archive new stars") || strings.Contains(err.Error(), "refresh repo meta") {
 		t.Errorf("sync error = %v", err)
 	}
@@ -1980,7 +1996,7 @@ func TestSyncStepsDoNotBlockEachOther(t *testing.T) {
 
 	// When the outage ends, the next run fills in the missing Stars
 	gh.githubStarListsDown = false
-	if result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy()); err != nil || result.NumAddedRepos != 1 {
+	if result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy(), false); err != nil || result.NumAddedRepos != 1 {
 		t.Errorf("next sync: %+v %v", result, err)
 	}
 }

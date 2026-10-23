@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -271,7 +272,7 @@ func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 	gh.readmes[2] = fakeReadme{name: "README.rst", content: "Two\n"}
 
 	// Day 2: item 1 has a snapshot and isn't in group 2, so only item 2 (no snapshot) is checked
-	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2))
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2), false)
 	if err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.txt") != "Old\n" || gh.readFile(core.ReadmesDBDir+"/02/2.rst") != "Two\n" {
 		t.Errorf("day 2: %d %v, files %q", checked, err, gh.files)
 	}
@@ -279,7 +280,7 @@ func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 	// Day 1: item 1 is in group 1, so its changed README is written.
 	// Item 2 now has a snapshot and isn't in group 1
 	commitsBefore := len(gh.commits)
-	checked, err = core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1))
+	checked, err = core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1), false)
 	_, oldFileLeft := gh.files[core.ReadmesDBDir+"/01/1.txt"]
 	if err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# New\n" || oldFileLeft || len(gh.commits) != commitsBefore+1 ||
 		gh.commits[len(gh.commits)-1] != "sync(readmes): update readmes of 1 repo\n\nSaved:\n- a/one" {
@@ -289,13 +290,13 @@ func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 	// A skipped item isn't asked, even with no snapshot
 	delete(gh.files, core.ReadmesDBDir+"/02/2.rst")
 	queriesBefore := gh.readmeQueries
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), []int64{2}, syncDay(2)); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), []int64{2}, syncDay(2), false); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
 		t.Errorf("skipped item: %d %v, README queries %d -> %d", checked, err, queriesBefore, gh.readmeQueries)
 	}
 
 	// An item without `node_id` can't be asked by GraphQL, so it isn't asked either
 	gh.files[core.StarItemsDBPath] = strings.Replace(gh.files[core.StarItemsDBPath], `"node_id":"R_2",`, "", 1)
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2)); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2), false); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
 		t.Errorf("item without node_id: %d %v, README queries %d -> %d", checked, err, queriesBefore, gh.readmeQueries)
 	}
 }
@@ -312,7 +313,7 @@ func TestSyncReadmeSnapshotsWithGitHubAsksUncheckedItemsFirst(t *testing.T) {
 	gh := setup(t, "[\n"+strings.Join(items, ",\n")+"\n]\n", sampleStarLists)
 	repo := openTestDBRepo(t)
 	gh.files[core.ReadmesDBDir+"/61/61.md"] = "# Old\n"
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 32 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 32 {
 		t.Fatalf("sync: %d %v", checked, err)
 	}
 	for _, listedIDs := range gh.readmeListedIDs {
@@ -346,7 +347,7 @@ func TestSyncReadmeSnapshotsWithGitHubAsksAbsentMarkersAfterTodaysGroup(t *testi
 	gh.readmes[61] = fakeReadme{name: "README.md", content: "# Old\n"}
 	gh.readmes[62] = fakeReadme{name: "README.md", content: "# Changed\n"}
 
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 32 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 32 {
 		t.Fatalf("sync: %d %v", checked, err)
 	}
 	_, markerLeft := gh.files[core.ReadmesDBDir+"/05/5.no-readme"]
@@ -369,7 +370,7 @@ func TestSyncDoesNotAskReadmesOfMissingRepos(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	gh.gone = map[string]bool{"R_2": true}
-	result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy())
+	result, err := core.SyncArchiveWithGitHub(ctx, openTestDBRepo(t), testLongStepsEndBy(), false)
 	_, hasMarker := gh.files[core.ReadmesDBDir+"/02/2.no-readme"]
 	if err != nil || result.NumUnavailableRepos != 1 || hasMarker || slices.ContainsFunc(gh.readmeListedIDs, func(ids []string) bool { return slices.Contains(ids, "R_2") }) {
 		t.Errorf("%+v %v, absent marker %v, listed %v", result, err, hasMarker, gh.readmeListedIDs)
@@ -388,7 +389,7 @@ func TestSyncReadmeSnapshotsWithGitHubSavesEachReadmeForItsItem(t *testing.T) {
 	repo := openTestDBRepo(t)
 	gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
 	gh.readmes[2] = fakeReadme{name: "README.rst", content: "Two\n"}
-	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0))
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false)
 	_, absent := gh.files[core.ReadmesDBDir+"/03/3.no-readme"]
 	if err != nil || checked != 3 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" || gh.readFile(core.ReadmesDBDir+"/02/2.rst") != "Two\n" || !absent {
 		t.Errorf("%d %v, files %q", checked, err, gh.files)
@@ -405,7 +406,7 @@ func TestSyncReadmeSnapshotsWithGitHubDeletesSnapshotsOfRemovedItems(t *testing.
 	gh.files[core.ReadmesDBDir+"/02/2.md"] = "# Two\n"
 	gh.files[core.ReadmesDBDir+"/03/3.md"] = "# Removed item\n" // Item 3 isn't in the archive
 
-	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(3)) // Group 3: neither item 1 nor item 2
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(3), false) // Group 3: neither item 1 nor item 2
 	_, orphanLeft := gh.files[core.ReadmesDBDir+"/03/3.md"]
 	if err != nil || checked != 0 || orphanLeft || gh.commits[len(gh.commits)-1] != "sync(readmes): remove readmes of 1 repo no longer in the archive" {
 		t.Errorf("%d %v, orphan left %v, commits %q", checked, err, orphanLeft, gh.commits)
@@ -422,7 +423,7 @@ func TestSyncReadmeSnapshotsWithGitHubKeepsSnapshotsWithoutTheItemFile(t *testin
 	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
 	delete(gh.files, core.StarItemsDBPath)
 	commitsBefore := len(gh.commits)
-	_, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0))
+	_, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false)
 	_, readmeLeft := gh.files[core.ReadmesDBDir+"/01/1.md"]
 	_, markerLeft := gh.files[core.ReadmesDBDir+"/02/2.no-readme"]
 	if err != nil || !readmeLeft || !markerLeft || len(gh.commits) != commitsBefore {
@@ -445,14 +446,14 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 	gh := setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
 	repo := openTestDBRepo(t)
 	commitsBefore := len(gh.commits)
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 305 || len(gh.commits) != commitsBefore+2 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 305 || len(gh.commits) != commitsBefore+2 {
 		t.Errorf("305 items: %d %v, commits %d -> %d", checked, err, commitsBefore, len(gh.commits))
 	}
 
 	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
 	repo = openTestDBRepo(t)
 	gh.readmeRateLimitFrom = 7 // The first 6 README queries are answered, then GitHub answers with the rate limit error
-	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0))
+	checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false)
 	savedFiles := 0
 	for path := range gh.files {
 		if strings.HasPrefix(path, core.ReadmesDBDir+"/") {
@@ -471,7 +472,7 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 	// 30 seconds is less than the time kept for the commit (40 seconds).
 	// 50 seconds leaves 10 seconds before it, less than one request time limit (20 seconds)
 	for _, seconds := range []time.Duration{30, 50} {
-		if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, time.Now().Add(seconds*time.Second), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 0 {
+		if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, time.Now().Add(seconds*time.Second), nil, syncDay(0), false); err != nil || checked != 0 || gh.readmeQueries != 0 {
 			t.Errorf("no time (%d seconds): %d %v, README queries %d", seconds, checked, err, gh.readmeQueries)
 		}
 	}
@@ -479,14 +480,16 @@ func TestSyncReadmeSnapshotsWithGitHubLimits(t *testing.T) {
 	// With too little time even for the commit, nothing is committed, not even the deletion of removed items' snapshots
 	gh.files[core.ReadmesDBDir+"/03/3.md"] = "# Removed item\n"
 	commitsBefore = len(gh.commits)
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, time.Now().Add(10*time.Second), nil, syncDay(0)); err != nil || checked != 0 || len(gh.commits) != commitsBefore {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, time.Now().Add(10*time.Second), nil, syncDay(0), false); err != nil || checked != 0 || len(gh.commits) != commitsBefore {
 		t.Errorf("no time to commit: %d %v, commits %d -> %d", checked, err, commitsBefore, len(gh.commits))
 	}
 }
 
 // Tests when the README sync step stops because README calls fail.
-//   - After a batch whose calls all failed, it stops without an error.
-//     The second batch isn't asked, because GitHub is likely failing as a whole
+//   - After a batch whose calls all failed, it stops.
+//     The second batch isn't asked, because GitHub is likely failing as a whole or the setup is broken.
+//     It isn't an error if the calls failed with a failure that passes on its own (502),
+//     and it is one if they failed with a failure that needs a person (401)
 //   - A failure about each repository isn't a failed call.
 //     Nothing is saved for those repositories, and the second batch is still asked.
 //     It is still asked when some calls of the first batch failed and the others fetched nothing, because GitHub answered those
@@ -500,8 +503,13 @@ func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryCallFails(t *testing.T) {
 	repo := openTestDBRepo(t)
 	gh.readmeQueryFails = func(queryNumber int) bool { return true }
 	// The first batch (`maxReadmesPerCommit`, 200 items) is 7 calls of up to 30 items, and each fails at its first query
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 7 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 0 || gh.readmeQueries != 7 {
 		t.Errorf("every call fails: %d %v, README queries %d", checked, err, gh.readmeQueries)
+	}
+	gh.readmeQueries = 0
+	gh.readmeFailStatus = http.StatusUnauthorized
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err == nil || checked != 0 || gh.readmeQueries != 7 {
+		t.Errorf("every call is refused: %d %v, README queries %d", checked, err, gh.readmeQueries)
 	}
 
 	gh = setup(t, "[\n"+strings.Join(manyItems, ",\n")+"\n]\n", sampleStarLists)
@@ -510,14 +518,66 @@ func TestSyncReadmeSnapshotsWithGitHubStopsWhenEveryCallFails(t *testing.T) {
 		gh.readmes[id] = fakeReadme{unavailable: true}
 	}
 	// Both batches are asked: 11 calls of one listing query each, with nothing left to read after them
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 11 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 0 || gh.readmeQueries != 11 {
 		t.Errorf("each repository fails: %d %v, README queries %d", checked, err, gh.readmeQueries)
 	}
 
 	gh.readmeQueries = 0
 	gh.readmeQueryFails = func(queryNumber int) bool { return queryNumber%2 == 1 }
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0)); err != nil || checked != 0 || gh.readmeQueries != 11 {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false); err != nil || checked != 0 || gh.readmeQueries != 11 {
 		t.Errorf("some calls fail, the others fetch nothing: %d %v, README queries %d", checked, err, gh.readmeQueries)
+	}
+}
+
+// Tests that `refreshEarly` also refreshes the saved READMEs whose turn to be refreshed hasn't come yet.
+//   - Without it, an item with a saved README outside today's group isn't asked
+//   - With it, that item is asked too, and its changed README is written
+func TestSyncReadmeSnapshotsWithGitHubRefreshesEarly(t *testing.T) {
+	ctx := context.Background()
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	repo := openTestDBRepo(t)
+	readmePath := core.ReadmesDBDir + "/01/1.md"
+	gh.files[readmePath] = "# Old\n"
+	gh.readmes[1] = fakeReadme{name: "README.md", content: "# New\n"}
+
+	// Day 2: item 1 isn't in group 2
+	if _, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2), false); err != nil || gh.readFile(readmePath) != "# Old\n" {
+		t.Errorf("without refreshEarly: %v, README %q", err, gh.readFile(readmePath))
+	}
+	if _, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2), true); err != nil || gh.readFile(readmePath) != "# New\n" {
+		t.Errorf("with refreshEarly: %v, README %q", err, gh.readFile(readmePath))
+	}
+}
+
+// Tests how the README sync step reports a commit that fails.
+//   - A failure that passes on its own isn't an error, and nothing is saved:
+//     GitHub failing on its side (502), the rate limit (403 that says so), and other commits that keep moving the branch
+//   - A failure that needs a person is an error: a request GitHub rejects (422)
+func TestSyncReadmeSnapshotsWithGitHubCommitFailures(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name         string
+		treeStatus   int    // Status code of a failing tree creation. 0 if it doesn't fail
+		refStatus    int    // Status code of a failing branch move. 0 if it doesn't fail
+		refMessage   string // GitHub message of the failing branch move
+		interfereAll bool   // Whether another device commits first on every branch move
+		wantErr      bool
+	}{
+		{"GitHub failing", http.StatusBadGateway, 0, "", false, false},
+		{"rate limit", 0, http.StatusForbidden, "API rate limit exceeded for user ID 4242.", false, false},
+		{"branch keeps moving", 0, 0, "", true, false},
+		{"request rejected", http.StatusUnprocessableEntity, 0, "", false, true},
+	}
+	for _, c := range cases {
+		gh := setup(t, sampleStarItems, sampleStarLists)
+		repo := openTestDBRepo(t)
+		gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
+		gh.treeStatus, gh.refStatus, gh.refMessage, gh.interfereAll = c.treeStatus, c.refStatus, c.refMessage, c.interfereAll
+		_, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false)
+		_, saved := gh.files[core.ReadmesDBDir+"/01/1.md"]
+		if (err != nil) != c.wantErr || saved {
+			t.Errorf("%s: %v, README saved %v", c.name, err, saved)
+		}
 	}
 }
 
@@ -534,7 +594,7 @@ func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
 	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
 	gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
 
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1)); err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" {
+	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1), false); err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" {
 		t.Errorf("sync: %d %v, files %q", checked, err, gh.files)
 	}
 
