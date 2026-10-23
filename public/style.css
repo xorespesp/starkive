@@ -1281,31 +1281,48 @@ button .spinner i {
   }
 }
 
-/* Status line */
+/* Notices: messages stacked at the bottom of the page, newest at the bottom */
 
-.status {
+.notices {
   position: fixed;
   left: 50%;
   bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
   max-width: calc(100% - 32px);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.notice {
+  max-width: 100%;
   padding: 8px 16px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, 12px);
+  animation: notice-in 0.2s;
   transition: opacity 0.2s, transform 0.2s;
 }
 
-.status.visible {
-  opacity: 1;
-  transform: translate(-50%, 0);
+/* A closed notice fades out before it is removed (`NOTICE_LEAVE_MS` in `app.js`) */
+.notice.leaving {
+  opacity: 0;
+  transform: translateY(12px);
 }
 
-.status.error {
+.notice.error {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
 }
 
 @media (max-width: 860px) {
@@ -1374,7 +1391,7 @@ button .spinner i {
 }
 
 /* The system setting "reduce motion": no movement.
-   The progress dots stay still, and dialogs and the status line appear at once */
+   The progress dots stay still, and dialogs and notices appear at once */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

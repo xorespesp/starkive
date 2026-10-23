@@ -25,7 +25,10 @@ const TEXT_LIMITS = { note: 2000, starListName: 100, starListDescription: 300 };
 // GitHub GraphQL takes longer the more IDs it gets (100 IDs about 4.5 seconds, 25 IDs about 1.7 seconds, measured).
 // So small batches sent in parallel finish sooner overall
 const LIVE_META_BATCH = 25;
-const LIVE_META_PARALLEL = 12; // Live details requests sent in parallel. This is for the deployed site (HTTP/2). With the local dev server (HTTP/1.1), the browser limits it to 6
+// Live details requests sent in parallel.
+// This is for the deployed site (HTTP/2).
+// With the local dev server (HTTP/1.1), the browser limits it to 6
+const LIVE_META_PARALLEL = 12;
 
 // `state.selected` values for the special sidebar entries. Star list IDs are numbers, so they never clash with these strings
 const ALL = ''; // Everything
@@ -113,7 +116,7 @@ function beginSession() {
  * Closes the session and goes back to the sign-in screen.
  * It cancels requests in flight, closes open dialogs and clears the loaded data.
  *
- * @param {string} message Text to show in the status line of the sign-in screen
+ * @param {string} message Text to show in a notice on the sign-in screen. The notices of the closed session go away
  * @param {{ error?: boolean }} [options] If `error` is `true`, the text is shown as an error and stays longer
  */
 function endSession(message, { error = false } = {}) {
@@ -122,7 +125,8 @@ function endSession(message, { error = false } = {}) {
   closeAllModals();
   clearLoadedData();
   showLogin();
-  setStatus(message, { error });
+  clearNotices();
+  if (message) showNotice(message, { kind: error ? 'error' : 'info' });
 }
 
 /**
@@ -155,7 +159,7 @@ const isCancelled = (err) => err?.name === 'AbortError';
  * Otherwise, after the session closes, its next request goes out with no session (or with a new one).
  */
 async function api(path, { method = 'GET', body, beforeSignIn = false } = {}) {
-  const signal = path.startsWith('login-session') ? undefined : sessionScope?.signal; // The sign-in API is outside the session, so it gets no signal
+  const signal = path.startsWith('login-session') ? undefined : sessionScope?.signal;
   const res = await fetch(`/api/${path}`, {
     method,
     cache: 'no-store',
@@ -197,10 +201,14 @@ function clearLoadedData() {
  * Requests the archive items, star list definitions and metadata snapshots in parallel.
  *
  * @param {boolean} [beforeSignIn] Whether the requests are sent before we know the user is signed in (the option of the same name in `api`)
- * @returns {Promise<[object[], object[], object[]]>} The contents of the three files
+ * @returns {{ lists: Promise<[object[], object[]]>, meta: Promise<object[]> }} The archive items and star list definitions,
+ *   and apart from them the metadata snapshots, so the page can be drawn before the snapshots arrive
  */
 function fetchArchiveFiles(beforeSignIn = false) {
-  return Promise.all(['archive-star-items', 'archive-star-lists', 'archive-repo-meta'].map((path) => api(path, { beforeSignIn })));
+  return {
+    lists: Promise.all([api('archive-star-items', { beforeSignIn }), api('archive-star-lists', { beforeSignIn })]),
+    meta: api('archive-repo-meta', { beforeSignIn }),
+  };
 }
 
 /**
@@ -237,21 +245,47 @@ function isSyncStatusOutdated(result) {
   return result.syncSettingWritesAtSend !== syncSettingWrites;
 }
 
+let archiveLoads = 0; // Number of archive loads started (`loadAll`). A metadata answer of an older load is dropped (`loadArchivedMeta`)
+
 /**
- * Receives the three archive files and puts them in `state`.
+ * Receives the archive items and star list definitions and puts them in `state`.
  * It clears the live repository details.
  * `requestLiveMeta` fetches them separately, only for items on screen.
+ * The metadata snapshots are only for display, so they aren't awaited (`loadArchivedMeta`).
  *
  * @param {AbortSignal} signal This session's cancel signal. It ties live details loading (`liveMetaLoader`) to this session
- * @param {Promise<[object[], object[], object[]]>} [archive] A request already sent (`fetchArchiveFiles`). If missing, it is sent now
+ * @param {{ lists: Promise, meta: Promise }} [archive] Requests already sent (`fetchArchiveFiles`). If missing, they are sent now
  */
 async function loadAll(signal, archive = fetchArchiveFiles()) {
-  let archivedMeta;
-  [state.starItems, state.starLists, archivedMeta] = await archive;
-  state.archivedMeta = new Map(archivedMeta.map((m) => [m.id, m]));
+  const load = ++archiveLoads;
+  archive.meta.catch(() => {}); // Handled by `loadArchivedMeta`. This keeps an early failure of `lists` from leaving it unhandled
+  [state.starItems, state.starLists] = await archive.lists;
   state.liveMeta = new Map();
   state.missing = new Set();
   liveMetaLoader = newLiveMetaLoader(signal);
+  loadArchivedMeta(archive.meta, load);
+}
+
+/**
+ * Puts the metadata snapshots in `state` when they arrive, and redraws.
+ * Until then the page keeps the snapshots it had (none on the first load), and `view` uses live details or the saved name.
+ *
+ * @param {Promise<object[]>} request The request for the snapshots (`fetchArchiveFiles`)
+ * @param {number} load Number of the archive load it belongs to (`archiveLoads`). An answer of an older load is dropped
+ *
+ * NOTE: If the request fails, the list still works.
+ * Descriptions and the unavailable marks come from the snapshots, so the notice says they may be missing.
+ */
+async function loadArchivedMeta(request, load) {
+  try {
+    const archivedMeta = await request;
+    if (load !== archiveLoads) return;
+    state.archivedMeta = new Map(archivedMeta.map((m) => [m.id, m]));
+    render();
+  } catch (err) {
+    if (isCancelled(err) || load !== archiveLoads) return;
+    showNotice(`Couldn't load saved repository details: ${err.message}. Descriptions and unavailable marks may be missing. Reload to try again`, { kind: 'error' });
+  }
 }
 
 /**
@@ -280,7 +314,7 @@ async function fetchLiveMeta(nodeIds) {
  *   `queue`: `node_id`s not sent yet.
  *   `workers`: number of workers running now.
  *   `error`: the error of the first failed batch.
- *   `reportErrors`: whether to show failures in the status line right away (turned on after the first screen is loaded).
+ *   `reportErrors`: whether to show failures in a notice right away (turned on after the first screen is loaded).
  *   `idleWaiters`: `resolve` functions of callers waiting for all workers to finish
  */
 function newLiveMetaLoader(signal) {
@@ -331,7 +365,7 @@ async function runLiveMetaWorker(loader) {
       scheduleRender();
     } catch (err) {
       if (isCancelled(err)) break;
-      if (!loader.error && loader.reportErrors) setStatus(`Could not load some repository details from GitHub: ${err.message}`, { error: true });
+      if (!loader.error && loader.reportErrors) showNotice(`Could not load some repository details from GitHub: ${err.message}`, { kind: 'error' });
       loader.error ??= err;
     }
   }
@@ -379,17 +413,42 @@ function scheduleRender() {
  * "Gone" means only that GitHub clearly answered it can't find the repository.
  * That is either a live check, or, before a live check, the record left by sync.
  * A repository whose request merely failed is not treated as gone.
+ * The result is cached by its inputs (`viewCache`), so callers must not change it.
  */
 function view(item) {
   const live = state.liveMeta.get(item.node_id);
   const snap = state.archivedMeta.get(item.id);
-  const gone = !live && (state.missing.has(item.node_id) || Boolean(snap?.unavailable_since));
+  const missing = state.missing.has(item.node_id);
+  const cached = viewCache.get(item);
+  if (cached && cached.live === live && cached.snap === snap && cached.missing === missing) return cached.result;
+  const result = buildView(item, live, snap, missing);
+  viewCache.set(item, { live, snap, missing, result });
+  return result;
+}
+
+// Archive item -> the last result of `view` and the inputs it was built from (`{ live, snap, missing, result }`).
+// Every input is read in `view`, and live details and snapshots are replaced with new objects, never changed in place.
+// So a changed input always gives a new result, and anything cached by the result is rebuilt on its own.
+// An item changed by the server is a new object, so its old entry is dropped (`WeakMap`)
+const viewCache = new WeakMap();
+
+/**
+ * Builds the result of `view` from the archive item `item` and its inputs.
+ *
+ * @param {object} item Archive item
+ * @param {object|undefined} live Live details from GitHub (`state.liveMeta`)
+ * @param {object|undefined} snap Snapshot left by sync (`state.archivedMeta`)
+ * @param {boolean} missing Whether GitHub answered it can't find the repository (`state.missing`)
+ * @returns {object} See `view`
+ */
+function buildView(item, live, snap, missing) {
+  const gone = !live && (missing || Boolean(snap?.unavailable_since));
   const name = live?.nameWithOwner ?? snap?.name ?? item.name;
   return {
     available: !gone,
     unavailableSince: gone ? snap?.unavailable_since ?? '' : '',
     name,
-    previousName: name !== item.name ? item.name : '', // The name at archive time, if it differs
+    previousName: name !== item.name ? item.name : '',
     url: live?.url ?? `https://github.com/${name}`, // Gone repositories keep a link too, so the user can check for themselves
     description: (live ? live.description : snap?.description) ?? '',
     language: (live ? live.primaryLanguage?.name : snap?.language) ?? '',
@@ -548,7 +607,7 @@ function starListIdsOf(item) {
 // ---------------------------------------------------------------------------
 
 /**
- * Makes the progress indicator: three dots that rise in turn (`.spinner`).
+ * Makes the progress indicator (`.spinner`).
  * It is decoration, so screen readers skip it.
  * The text next to it says what is going on.
  *
@@ -739,13 +798,12 @@ function openModal({ panel, className = '', onClose }) {
   const dialog = el('dialog', { className: `dialog ${className}`.trim() }, panel);
   const modal = {
     close: () => {
-      if (!openModals.delete(modal)) return; // Already closed. Whatever the way, the code below runs only once
+      if (!openModals.delete(modal)) return; // Already closed
       dialog.close();
       setTimeout(() => dialog.remove(), DIALOG_CLOSE_MS);
       onClose?.();
     },
   };
-  // A backdrop click counts only when both the press and the release are on the backdrop
   let pressedOnBackdrop = false;
   dialog.onpointerdown = (ev) => {
     pressedOnBackdrop = ev.target === dialog;
@@ -875,7 +933,7 @@ function openAddRepo(prefill = '') {
   const input = el('input', { value: prefill, placeholder: 'owner/repo or GitHub URL', spellcheck: false });
   const inputHint = el('p', { className: 'input-hint invalid', hidden: true }); // Says right away why Add is locked, under the input
   const select = starListSelect('No list');
-  // Names shown for the archive items now (`view`: live name, then snapshot, then the stored name). GitHub names ignore case
+  // Names shown for the archive items now (`view`). GitHub names ignore case
   const archivedNames = new Set(state.starItems.map((item) => view(item).name.toLowerCase()));
   // State of what is typed now: `empty`, `invalid` (not a repository), `archived` (already in the archive) or `ok`
   const inputState = () => {
@@ -902,7 +960,7 @@ function openAddRepo(prefill = '') {
     canConfirm: () => inputState() === 'ok',
     onConfirm: async () => {
       const item = await addRepo(input.value, Number(select.value));
-      setStatus(`Added ${item.name}`);
+      showNotice(`Added ${item.name}`);
     },
   });
 }
@@ -963,7 +1021,7 @@ function openCreateStarList() {
       if (!name) throw new Error('Name is required');
       const starList = await createStarList(name, description);
       setFilter('selected', starList.id);
-      setStatus(`Created ${name}`);
+      showNotice(`Created ${name}`);
     },
   });
 }
@@ -984,7 +1042,7 @@ function openEditStarList(starList) {
       const { name, description } = fields.values();
       if (!name) throw new Error('Name is required');
       await updateStarList(starList.id, name, description);
-      setStatus('List saved');
+      showNotice('List saved');
     },
   });
 }
@@ -1083,7 +1141,7 @@ function openMembership(item) {
   const options = el('div', { className: 'star-list-options' });
   const empty = el('p', { className: 'muted', textContent: 'No lists yet. Create one below.', hidden: state.starLists.length > 0 });
   // Adds one checkbox row.
-  // Once there is at least one, the "none yet" text is hidden
+  // Once there is at least one, `empty` is hidden
   const addOption = (starList, checked) => {
     options.append(el('label', { className: 'star-list-option' }, el('input', { type: 'checkbox', value: starList.id, checked }), starList.name));
     empty.hidden = true;
@@ -1092,7 +1150,7 @@ function openMembership(item) {
 
   const newName = el('input', { placeholder: 'New list name', maxLength: TEXT_LIMITS.starListName });
   const createButton = el('button', { type: 'button', className: 'ghost', textContent: 'Create' });
-  const createError = el('p', { className: 'dialog-error', hidden: true }); // Error of Create. It shows under the create row, because the page status line is behind the dialog's backdrop
+  const createError = el('p', { className: 'dialog-error', hidden: true }); // Error of Create. It shows under the create row, because notices on the page are behind the dialog's backdrop
   createButton.onclick = async () => {
     const name = newName.value.trim();
     if (!name) return newName.focus();
@@ -1132,7 +1190,7 @@ function openMembership(item) {
     onConfirm: async () => {
       const checked = [...options.querySelectorAll('input:checked')].map((i) => Number(i.value)); // Checkbox values are strings
       await updateStarItem(item.id, { star_list_ids: checked });
-      setStatus('Lists saved');
+      showNotice('Lists saved');
     },
   });
 }
@@ -1148,28 +1206,24 @@ function openMembership(item) {
  */
 const sortedStarLists = () => [...state.starLists].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
-// Archive item -> `{ text, settled }` (the search text, and whether it was built after the live details were settled).
-// A changed item is replaced by the new object from the server, so old values are dropped on their own (`WeakMap`)
+// Result of `view` -> the search text built from it.
+// `view` gives a new result whenever its inputs change, so the text is rebuilt on its own (`WeakMap`)
 const searchTextCache = new WeakMap();
 
 /**
  * Returns the item's search text (name, description, note, language and topics joined in lowercase).
+ * It is cached, so a keystroke doesn't rebuild the text of every item.
  *
  * @param {object} item Archive item
  * @returns {string}
- *
- * NOTE: Live details are fetched only for items shown on screen.
- * So most items use text built from the snapshot (or the saved name if there is none).
- * That text is cached too, and rebuilt when live details arrive later (when the settled state changes).
- * Without the cache, every keystroke would recompute every item.
  */
 function searchText(item) {
-  const settled = state.liveMeta.has(item.node_id) || state.missing.has(item.node_id);
-  const cached = searchTextCache.get(item);
-  if (cached?.settled === settled) return cached.text;
-  const v = view(item);
-  const text = [v.name, v.description, item.note, v.language, ...v.topics].join('\n').toLowerCase();
-  searchTextCache.set(item, { text, settled });
+  const v = view(item); // The note isn't in `v`, but a changed note comes with a new item, which gives a new `v`
+  let text = searchTextCache.get(v);
+  if (text === undefined) {
+    text = [v.name, v.description, item.note, v.language, ...v.topics].join('\n').toLowerCase();
+    searchTextCache.set(v, text);
+  }
   return text;
 }
 
@@ -1231,7 +1285,7 @@ function renderLanguageOptions() {
 }
 
 /**
- * Draws the left sidebar: all, unlisted, unavailable repositories (only if there are any),
+ * Draws the left sidebar: all, unlisted, unavailable repositories (only if there are any, or it is chosen),
  * each star list with its item count, and the new star list button.
  */
 function renderSidebar() {
@@ -1578,7 +1632,7 @@ const STARRED_PARALLEL = 6; // Pages of GitHub Stars fetched in parallel
  *   The Stars (each repository once), repository ID -> names of the GitHub star lists it is in (for display),
  *   and whether the GitHub star lists couldn't be read
  *
- * NOTE: If the list changes while pages are fetched, the same repository can come on two pages.
+ * NOTE: If the Stars change while pages are fetched, the same repository can come on two pages.
  * So they are merged by ID.
  */
 async function fetchAllStarred(onProgress) {
@@ -1596,7 +1650,6 @@ async function fetchAllStarred(onProgress) {
   };
   await Promise.all(Array.from({ length: STARRED_PARALLEL }, worker));
 
-  // Keep only one copy of a repository that came on two pages because the list changed while fetching
   const byId = new Map();
   for (const s of pages.flat()) if (!byId.has(s.repo.id)) byId.set(s.repo.id, s);
   // GitHub star lists are only for display.
@@ -1607,7 +1660,6 @@ async function fetchAllStarred(onProgress) {
 
 /**
  * Makes one row for a new Star that can be chosen in the Import dialog.
- * The row has a checkbox, the name, GitHub star lists, the Star count and the date it was starred.
  *
  * @param {object} starredRepo One GitHub Star (an entry of `/api/github-stars`)
  * @param {boolean} checked Initial checked state
@@ -1862,7 +1914,7 @@ async function openImport() {
         status.textContent = nothingImported;
       } else {
         status.textContent = `Imported ${stars(added)}. Reload to see them.`;
-        setStatus(`Imported ${stars(added)}.`);
+        showNotice(`Imported ${stars(added)}.`);
       }
       return;
     }
@@ -1885,7 +1937,7 @@ async function openImport() {
       rows.length > 0 && `${rows.length} not archived yet`,
     ].filter(Boolean);
     status.replaceChildren(el('span', { className: 'status-success', textContent: `✓ Imported ${stars(added)}` }), ...details.map((text) => ` · ${text}`));
-    setStatus(`Imported ${stars(added)}.`);
+    showNotice(`Imported ${stars(added)}.`);
   };
 
   // Fetch the list for the first time after all handlers are attached.
@@ -2055,7 +2107,7 @@ function openSettings() {
   enabled.setAttribute('role', 'switch'); // Screen readers then say "on" or "off" instead of "checked"
   enabled.setAttribute('aria-label', 'Sync with GitHub');
   const select = el('select', {}, ...SYNC_INTERVALS.map(([days, label]) => el('option', { value: String(days), textContent: label })));
-  const lastRun = el('span'); // The last scheduled run. It links to the run on GitHub when there is one, so it stays on one line
+  const lastRun = el('span'); // The last scheduled run, as a link to the run on GitHub when there is one
   const problemNote = el('p', { className: 'note' });
   const fixButton = el('button', { type: 'button', className: 'ghost' }); // Button that matches the workflow to the setting when they differ. `fix` of `syncProblem` sets its text and action
   const error = el('p', { className: 'dialog-error', hidden: true });
@@ -2271,17 +2323,17 @@ async function followSyncWorkflowRun(watched, signal) {
     render();
     liveMetaLoader.reportErrors = true;
   } catch (err) {
-    if (isCancelled(err)) throw err; // A closed session already told the user, so nothing is written over it
-    setStatus(err.message, { error: true });
+    if (isCancelled(err)) throw err; // A closed session already told the user
+    showNotice(err.message, { kind: 'error' });
     return;
   }
   const finished = state.sync.last_run?.id === watched.id ? state.sync.last_run : null; // `null` if another run finished after it before a read saw it
   // The run ran on GitHub, so its counts aren't here.
   // The new items are found by comparing the archive before and after
   const newCount = state.starItems.filter((item) => !idsBefore.has(item.id)).length;
-  if (finished?.conclusion === 'cancelled') setStatus('Sync was cancelled');
-  else if (finished && finished.conclusion !== 'success') setStatus('Sync failed. See the run in the Actions tab of your archive repository', { error: true });
-  else setStatus(`${finished ? 'Synced' : 'Sync finished'}: ${newCount} new`);
+  if (finished?.conclusion === 'cancelled') showNotice('Sync was cancelled');
+  else if (finished && finished.conclusion !== 'success') showNotice('Sync failed. See the run in the Actions tab of your archive repository', { kind: 'error' });
+  else showNotice(`${finished ? 'Synced' : 'Sync finished'}: ${newCount} new`);
 }
 
 /**
@@ -2310,44 +2362,80 @@ function wait(ms, signal) {
 // Page flow
 // ---------------------------------------------------------------------------
 
-let statusTimer; // Timer that clears the status line on its own
+const NOTICE_LIMIT = 3; // Notices shown at once. A new one beyond this pushes out the oldest that isn't in progress
+const NOTICE_MS = 3000; // How long a notice stays (milliseconds)
+const NOTICE_ERROR_MS = 8000; // How long an error stays (milliseconds). Longer, so the user can read it
+const NOTICE_LEAVE_MS = 200; // Time a closed notice stays while it fades out (milliseconds). Matches `.notice.leaving` in `style.css`
+
+const notices = []; // Notices on the page now, oldest first: `{ node, timer, busy, close }`
 
 /**
- * Shows a message in the status line at the bottom of the page.
- * Errors stay longer, so the user can read them.
+ * Shows a notice at the bottom of the page and returns a handle to change it.
+ * Each piece of work changes only its own notice through the handle.
+ * So work running at the same time doesn't write over another's message.
+ * Notices stack in one place, newest at the bottom.
  *
- * @param {string} message The text to show. An empty string hides the status line
- * @param {{ error?: boolean, sticky?: boolean, busy?: boolean }} [options] `error`: shown as an error for 8 seconds (otherwise 3 seconds).
- *   `sticky`: not cleared on its own.
- *   `busy`: work in progress. It shows the progress indicator and isn't cleared on its own (the next message replaces it)
+ * @param {string} text The text to show
+ * @param {{ kind?: 'info'|'error'|'busy', sticky?: boolean }} [options] `info`: goes away after 3 seconds.
+ *   `error`: shown as an error for 8 seconds.
+ *   `busy`: work in progress, with the progress indicator and no timer.
+ *   `sticky`: no timer.
+ *   A notice without a timer goes away through the handle or `clearNotices`.
+ *   Past `NOTICE_LIMIT`, a new notice pushes out the oldest one that isn't busy
+ * @returns {{ update: (text: string, options?: object) => void, close: () => void }} `update` changes the text and kind (the same options).
+ *   `close` takes it away. Both do nothing once it is gone
  */
-function setStatus(message, { error = false, sticky = false, busy = false } = {}) {
-  const box = $('status');
-  box.textContent = message;
-  if (busy && message) box.prepend(spinner());
-  box.classList.toggle('error', error);
-  box.classList.toggle('visible', Boolean(message));
-  clearTimeout(statusTimer);
-  if (message && !sticky && !busy) statusTimer = setTimeout(() => setStatus(''), error ? 8000 : 3000);
+function showNotice(text, options = {}) {
+  const notice = { node: el('div', { className: 'notice' }), timer: null, busy: false, close: null };
+  notices.push(notice);
+  $('notices').append(notice.node);
+  const close = () => {
+    const i = notices.indexOf(notice);
+    if (i < 0) return;
+    clearTimeout(notice.timer);
+    notices.splice(i, 1);
+    notice.node.classList.add('leaving');
+    setTimeout(() => notice.node.remove(), NOTICE_LEAVE_MS);
+  };
+  notice.close = close;
+  const update = (newText, { kind = 'info', sticky = false } = {}) => {
+    if (!notices.includes(notice)) return;
+    notice.node.textContent = newText;
+    if (kind === 'busy') notice.node.prepend(spinner());
+    notice.node.classList.toggle('error', kind === 'error');
+    notice.busy = kind === 'busy';
+    clearTimeout(notice.timer);
+    if (kind !== 'busy' && !sticky) notice.timer = setTimeout(close, kind === 'error' ? NOTICE_ERROR_MS : NOTICE_MS);
+  };
+  update(text, options);
+  if (notices.length > NOTICE_LIMIT) notices.find((n) => !n.busy && n !== notice)?.close();
+  return { update, close };
+}
+
+/** Takes away every notice, including ones in progress. */
+function clearNotices() {
+  for (const notice of [...notices]) notice.close(); // Closing removes it from `notices`, so loop over a copy
 }
 
 /**
- * Runs async work with progress, done and error messages.
+ * Runs async work with a notice that shows its progress, then its result or error.
  *
  * @param {() => Promise<void>} task The work to do
  * @param {string} pending Progress message ("…" is added after it)
  * @param {string} done Message to show on success
  * @returns {Promise<boolean>} `true` on success.
- *   On failure, it shows the error message and returns `false` (work cancelled because the session closed is not reported)
+ *   On failure, it shows the error message and returns `false`.
+ *   Work cancelled because the session closed isn't reported, and its notice goes away
  */
 async function run(task, pending, done) {
-  setStatus(`${pending}…`, { busy: true });
+  const notice = showNotice(`${pending}…`, { kind: 'busy' });
   try {
     await task();
-    setStatus(done);
+    notice.update(done);
     return true;
   } catch (err) {
-    if (!isCancelled(err)) setStatus(err.message, { error: true });
+    if (isCancelled(err)) notice.close();
+    else notice.update(err.message, { kind: 'error' });
     return false;
   }
 }
@@ -2485,12 +2573,12 @@ function moveToDashboardURL(dashboardURL) {
  *
  * @param {string} repo DB repository name (`owner/repo`)
  * @param {string} [done] Message to show after loading, instead of "Loaded N repositories"
- * @param {{ signal: AbortSignal, archive: Promise, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
+ * @param {{ signal: AbortSignal, archive: object, sync: Promise }} [preloaded] The session `start` already opened when the page opened,
  *   and the archive and sync status requests sent in that session. If missing, a new session is opened and the requests are sent now
  *
  * NOTE: Opening a new session cancels the previous session's loading, so it doesn't overwrite this page.
- * After loading, the status line shows only the first of these:
- * an error from failed live details, a sync problem, or the done message.
+ * This load's notice turns into the done message.
+ * Failed live details and a sync problem get their own error notices, so neither hides the other.
  */
 async function openDashboard(repo, done = '', preloaded = null) {
   const signal = preloaded?.signal ?? beginSession();
@@ -2507,7 +2595,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
   for (const id of ['add-menu', 'account-menu']) $(id).hidden = false;
   updateSettingsAttention();
 
-  setStatus('Loading…', { busy: true });
+  const loading = showNotice('Loading…', { kind: 'busy' });
   try {
     await loadAll(signal, preloaded?.archive);
     render();
@@ -2517,7 +2605,7 @@ async function openDashboard(repo, done = '', preloaded = null) {
     if (pendingAdd) openAddRepo(pendingAdd);
     // Wait only for the live details of items drawn on the first screen.
     // After that, workers report failed batches right away
-    setStatus('Loading details from GitHub…', { busy: true });
+    loading.update('Loading details from GitHub…', { kind: 'busy' });
     await waitForLiveMetaIdle(liveMetaLoader);
     const syncResult = await syncRequest;
     signal.throwIfAborted();
@@ -2528,11 +2616,12 @@ async function openDashboard(repo, done = '', preloaded = null) {
     const metaError = liveMetaLoader.error;
     liveMetaLoader.reportErrors = true;
     const syncTrouble = syncProblem(state.sync, state.syncError);
-    if (metaError) setStatus(`Could not load some repository details from GitHub: ${metaError.message}`, { error: true });
-    else if (syncTrouble) setStatus(`${syncTrouble.text}. Open Settings for details`, { error: true }); // Warn, so a stopped sync doesn't go unnoticed
-    else setStatus(done || `Loaded ${state.starItems.length} repositories`);
+    loading.update(done || `Loaded ${state.starItems.length} repositories`);
+    if (metaError) showNotice(`Could not load some repository details from GitHub: ${metaError.message}`, { kind: 'error' });
+    if (syncTrouble) showNotice(`${syncTrouble.text}. Open Settings for details`, { kind: 'error' }); // Warn, so a stopped sync doesn't go unnoticed
   } catch (err) {
-    if (!isCancelled(err)) setStatus(err.message, { error: true });
+    if (isCancelled(err)) loading.close();
+    else loading.update(err.message, { kind: 'error' });
   }
 }
 
@@ -2553,7 +2642,9 @@ async function start() {
   rememberAddParam();
   const signal = beginSession();
   const archive = fetchArchiveFiles(true);
-  archive.catch(() => {}); // Fails before sign-in. This keeps it from showing in the console as an unhandled rejection (`loadAll` awaits it separately)
+  // These fail before sign-in. This keeps them from showing in the console as unhandled rejections (`loadAll` and `loadArchivedMeta` await them separately)
+  archive.lists.catch(() => {});
+  archive.meta.catch(() => {});
   const sync = fetchSyncStatus(true);
   sync.catch(() => {}); // Rejects only when cancelled below. `openDashboard` awaits it separately
   let repo;
@@ -2566,8 +2657,8 @@ async function start() {
     showLogin();
     const message = redirectError || (err.status === 401 ? '' : err.message);
     const pendingAdd = readPendingAdd(false);
-    if (message) setStatus(message, { error: true });
-    else if (pendingAdd) setStatus(`Sign in to add ${pendingAdd}`, { sticky: true });
+    if (message) showNotice(message, { kind: 'error' });
+    else if (pendingAdd) showNotice(`Sign in to add ${pendingAdd}`, { sticky: true });
     return;
   }
   showAccount(username);
@@ -2620,7 +2711,7 @@ function bindEvents() {
   $('login-button').onclick = async () => {
     const button = $('login-button');
     button.disabled = true;
-    setStatus('Redirecting to GitHub…', { busy: true });
+    const redirecting = showNotice('Redirecting to GitHub…', { kind: 'busy' });
     try {
       const url = safeUrl((await api('login-session', { method: 'POST' })).url);
       if (!url) throw new Error("Couldn't start GitHub sign-in");
@@ -2629,7 +2720,7 @@ function bindEvents() {
       button.disabled = false;
       // 409: if sign-in started somewhere other than the canonical address, move there.
       // Otherwise (the setup tool needs to be run), show the server's message
-      if (!(err.status === 409 && moveToDashboardURL(err.body?.dashboard_url))) setStatus(err.message, { error: true });
+      if (!(err.status === 409 && moveToDashboardURL(err.body?.dashboard_url))) redirecting.update(err.message, { kind: 'error' });
     }
   };
 
@@ -2639,7 +2730,7 @@ function bindEvents() {
     try {
       await api('login-session', { method: 'DELETE' });
     } catch (err) {
-      setStatus(`Couldn't sign out: ${err.message}`, { error: true });
+      showNotice(`Couldn't sign out: ${err.message}`, { kind: 'error' });
       return;
     }
     endSession('Signed out');
@@ -2651,7 +2742,7 @@ function bindEvents() {
   window.addEventListener('pageshow', (ev) => {
     if (!ev.persisted || $('login').hidden) return;
     $('login-button').disabled = false;
-    setStatus('');
+    clearNotices();
   });
 
   $('import-button').onclick = openImport;
