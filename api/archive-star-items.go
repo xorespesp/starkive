@@ -118,35 +118,31 @@ const maxStarredRepoIDsPerRequest = 100_000
 // One that doesn't come in time, or fails, is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
 
-// Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).
-// It can add a repository without a Star.
-// The time it was added goes where the Star time would be.
-// Its README snapshot is saved in the same commit.
-// If fetching the README fails (an error, or no answer within `addReadmeTimeout`), the item is added without it and the failure is only logged.
-//
-// Args:
-//   - `fullNameOrURL`: The `owner/repo` or GitHub repository address the user typed
-//   - `starListIDs`: IDs of the star lists to put the new item in. If empty, it goes in no star list
+// Result of looking up the repository to add on GitHub
+type repoToAdd struct {
+	item   core.StarItem       // The new item, without star lists
+	readme *core.FetchedReadme // Its README. `nil` if it wasn't fetched
+	err    error               // Why the repository couldn't be looked up. A README that wasn't fetched isn't an error
+}
+
+// Looks up the repository `fullName` on GitHub and fetches its README.
+// If fetching the README fails (an error, or no answer within `addReadmeTimeout`), the result has no README and the failure is only logged.
 //
 // Returns:
-//   - A 400 `HTTPError` if the input shape is wrong or a star list ID doesn't exist.
-//     A 404 if GitHub can't find the repository, and a 409 if it's already in the archive
-func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
-	fullName := parseRepoFullNameOrURL(fullNameOrURL)
-	if fullName == "" {
-		return core.Errorf(http.StatusBadRequest, "Enter owner/repo or a GitHub repository URL")
-	}
+//   - The new item and its README.
+//     `err` is set if the lookup fails: a 404 `HTTPError` if GitHub can't find the repository, or the GitHub error
+func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) repoToAdd {
 	res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), "/repos/"+fullName, core.GitHubAPIRequest{})
 	if err != nil {
-		return err
+		return repoToAdd{err: err}
 	}
 	defer res.Body.Close()
 	// A missing repository and a private one the token can't see are both 404 (docs)
 	if res.StatusCode == http.StatusNotFound {
-		return core.Errorf(http.StatusNotFound, "Repository not found: %s", fullName)
+		return repoToAdd{err: core.Errorf(http.StatusNotFound, "Repository not found: %s", fullName)}
 	}
 	if err := core.CheckGitHubResponse(res); err != nil {
-		return err
+		return repoToAdd{err: err}
 	}
 	var repo struct {
 		ID       int64  `json:"id"`        // Repository ID. Becomes the item ID
@@ -154,12 +150,13 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 		FullName string `json:"full_name"` // `owner/repo` as GitHub answers it (the letter case may differ from the input)
 	}
 	if err := core.DecodeGitHubResponse(res, &repo); err != nil {
-		return err
+		return repoToAdd{err: err}
 	}
+	found := repoToAdd{item: core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}}
 
 	// Only fetching the README gets the shorter deadline `addReadmeTimeout`, so a slow GitHub doesn't keep the user waiting.
 	// `WithTimeout` makes it a child of `ctx`, so it never ends later than the deadline of the request.
-	// The commit below uses `ctx`, not this child, so a slow README can't make the save fail.
+	// The commit uses `ctx`, not this child, so a slow README can't make the save fail.
 	// `cancel` frees the timer of the child right away, because nothing after the README uses it
 	addReadmeCtx, cancel := context.WithTimeout(ctx, addReadmeTimeout)
 	readmes, readmeErr := core.FetchReadmesByNodeIDs(addReadmeCtx, dbRepo.EnvConfig(), []string{repo.NodeID})
@@ -169,10 +166,61 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 	}
 	if readmeErr != nil {
 		log.Printf("add %s: README not saved: %v", repo.FullName, readmeErr)
+		return found
+	}
+	found.readme = readmes[0]
+	return found
+}
+
+// Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).
+// It can add a repository without a Star.
+// The time it was added goes where the Star time would be.
+// Its README snapshot is saved in the same commit.
+// If the README can't be fetched, the item is added without it.
+//
+// Args:
+//   - `fullNameOrURL`: The `owner/repo` or GitHub repository address the user typed
+//   - `starListIDs`: IDs of the star lists to put the new item in. If empty, it goes in no star list
+//
+// Returns:
+//   - A 400 `HTTPError` if the input shape is wrong or a star list ID doesn't exist.
+//     A 404 if GitHub can't find the repository, and a 409 if it's already in the archive
+//
+// NOTE: The lookup on GitHub (`lookUpRepoToAdd`) and the start of the save run at the same time.
+// They don't need each other until `change` adds the item.
+// The lookup takes about 0.8 seconds, and reading the files before `change` about 0.7 seconds with 20,000 items (measured).
+// So Add ends sooner by about the shorter of the two.
+// The lookup is taken once and used again when `change` runs again after a conflict.
+func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
+	fullName := parseRepoFullNameOrURL(fullNameOrURL)
+	if fullName == "" {
+		return core.Errorf(http.StatusBadRequest, "Enter owner/repo or a GitHub repository URL")
+	}
+	// `chan`: a typed queue between goroutines.
+	// Every path below takes the result (`takeLookup`), so the goroutine ends before this function returns.
+	// Room for one result keeps the send from waiting for that, so the goroutine can't be left blocked.
+	lookupDone := make(chan repoToAdd, 1)
+	// `go`: runs the function in a goroutine (a lightweight thread), so the save below starts without waiting.
+	// `lookupDone <- v` sends `v` to the channel
+	go func() { lookupDone <- lookUpRepoToAdd(ctx, dbRepo, fullName) }()
+	var lookup *repoToAdd // `nil` until the result is taken from `lookupDone`
+	// Returns the lookup result.
+	// The first call waits for it, and later calls get the same result
+	takeLookup := func() repoToAdd {
+		if lookup == nil {
+			found := <-lookupDone // Waits until the goroutine sends its result
+			lookup = &found
+		}
+		return *lookup
 	}
 
-	item := core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}
-	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
+	var item core.StarItem
+	_, err := core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
+		found := takeLookup()
+		if found.err != nil {
+			return core.CommitMessage{}, found.err
+		}
+		item = found.item
 		ids, err := a.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
 		if err != nil {
 			return core.CommitMessage{}, err
@@ -182,12 +230,18 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 		}
 		item.StarListIDs = ids
 		a.StarItems = append([]core.StarItem{item}, a.StarItems...)
-		if readmeErr == nil {
-			a.AddFetchedReadmeToSave(item.ID, *readmes[0])
+		if found.readme != nil {
+			a.AddFetchedReadmeToSave(item.ID, *found.readme)
 		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
 	if err != nil {
+		// The save can fail before `change` runs (for example, GitHub fails while the files are read).
+		// A repository that doesn't exist still answers 404, not with the error of the save.
+		// So this waits for the lookup if it is still running
+		if found := takeLookup(); found.err != nil {
+			return found.err
+		}
 		return err
 	}
 	core.WriteAPIJSONResponse(w, http.StatusOK, item)

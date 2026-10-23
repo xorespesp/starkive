@@ -132,7 +132,8 @@ func TestAddSavesTheReadme(t *testing.T) {
 
 // Tests Add when fetching the README fails as a whole, and when another commit gets in first.
 //   - When every README query fails, or GitHub answers with the rate limit, the item is still added, with no README file
-//   - When another device commits first, the change is applied again, and the README is saved with it
+//   - When another device commits first, the change is applied again, and the README is saved with it.
+//     The repository and its README are fetched only once
 func TestAddWithFailingOrConflictingReadme(t *testing.T) {
 	const linuxID = 2325298 // ID that the fake GitHub gives `torvalds/linux`
 	readmePath := core.ReadmesDBDir + "/98/2325298.md"
@@ -156,10 +157,18 @@ func TestAddWithFailingOrConflictingReadme(t *testing.T) {
 
 	gh = setup(t, sampleStarItems, sampleStarLists)
 	gh.readmes[linuxID] = fakeReadme{name: "README.md", content: "# Linux\n"}
+	rec = call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
+	queriesWithoutConflict := gh.readmeQueries
+	if rec.Code != 200 || queriesWithoutConflict == 0 {
+		t.Fatalf("add: %d %s, README queries %d", rec.Code, rec.Body, queriesWithoutConflict)
+	}
+
+	gh = setup(t, sampleStarItems, sampleStarLists)
+	gh.readmes[linuxID] = fakeReadme{name: "README.md", content: "# Linux\n"}
 	gh.interfereOnce = func(files map[string]string) { files["other.txt"] = "from another device\n" }
 	rec = call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
-	if rec.Code != 200 || gh.readFile(readmePath) != "# Linux\n" || gh.readFile("other.txt") != "from another device\n" {
-		t.Errorf("conflict: %d %s, README %q", rec.Code, rec.Body, gh.readFile(readmePath))
+	if rec.Code != 200 || gh.readFile(readmePath) != "# Linux\n" || gh.readFile("other.txt") != "from another device\n" || gh.readmeQueries != queriesWithoutConflict {
+		t.Errorf("conflict: %d %s, README %q, README queries %d (want %d)", rec.Code, rec.Body, gh.readFile(readmePath), gh.readmeQueries, queriesWithoutConflict)
 	}
 }
 

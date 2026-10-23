@@ -1449,6 +1449,8 @@ func TestArchiveFilesGetReturnsFile(t *testing.T) {
 //   - It also accepts a GitHub address (including a trailing `/tree/...`).
 //     It puts the repository in the chosen star list and adds it at the top of the archive
 //   - Already there: 409. A missing star list: 400. Path tricks (`../user`): 400. A repository not on GitHub: 404
+//   - The lookup runs while the files are read.
+//     If reading the files fails, a repository not on GitHub still gives 404, and one that exists gives 502
 func TestStarItemsAdd(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
@@ -1476,6 +1478,21 @@ func TestStarItemsAdd(t *testing.T) {
 	for _, c := range cases {
 		if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", c.body, cookie); rec.Code != c.want {
 			t.Errorf("%s: got %d %s, want %d", c.body, rec.Code, rec.Body, c.want)
+		}
+	}
+
+	gh.mu.Lock()
+	gh.contentsHangup = true
+	gh.mu.Unlock()
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"repo_full_name_or_url":"nobody/missing-repo"}`, 404},
+		{`{"repo_full_name_or_url":"torvalds/linux"}`, http.StatusBadGateway},
+	} {
+		if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", c.body, cookie); rec.Code != c.want {
+			t.Errorf("files can't be read, %s: got %d %s, want %d", c.body, rec.Code, rec.Body, c.want)
 		}
 	}
 }
