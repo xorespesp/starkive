@@ -190,14 +190,15 @@ func encodeLines[T any](items []T) ([]byte, error) {
 		return []byte("[]\n"), nil
 	}
 	var buf bytes.Buffer
+	var line bytes.Buffer // One item. It is emptied for each item and keeps its memory
+	enc := json.NewEncoder(&line)
+	enc.SetEscapeHTML(false) // Keeps `<`, `>`, `&` as they are instead of Unicode escapes, so the file reads as plain text
 	buf.WriteString("[\n")
 	for i, item := range items {
 		if i > 0 {
 			buf.WriteString(",\n")
 		}
-		var line bytes.Buffer
-		enc := json.NewEncoder(&line)
-		enc.SetEscapeHTML(false) // Keeps `<`, `>`, `&` as they are instead of Unicode escapes, so the file reads as plain text
+		line.Reset()
 		if err := enc.Encode(item); err != nil {
 			return nil, err
 		}
