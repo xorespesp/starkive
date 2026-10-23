@@ -42,6 +42,8 @@ type ArchiveSyncResult struct {
 //     The README step leaves out GitHub failures that pass on their own (`SyncReadmeSnapshotsWithGitHub`)
 //
 // NOTE: The steps are independent, so even if one fails the others run to the end.
+// A GraphQL rate limit answer is the exception.
+// The `ctx` of an API request carries a `gitHubRateLimitMark`, so after such an answer the later steps still run but send no more GraphQL queries.
 // Adding comes first, so new items usually get their metadata and README snapshots in the same run.
 // If the branch just written briefly shows the old commit (measured), or time runs short, they get them in the next run.
 // Each run compares all Stars with the archive.

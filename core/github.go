@@ -1,6 +1,7 @@
 // Shared code for calling the GitHub API.
 // It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubResponse`, `GitHubAPIError`),
 // tells rate limit answers apart (`checkGitHubResponseWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
+// stops GraphQL queries for the rest of a request after a rate limit answer (`gitHubRateLimitMark`),
 // reads GitHub's JSON answers (`DecodeGitHubResponse`),
 // turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`),
 // and tells failures that pass on their own from ones that need a person (`isTemporaryGitHubError`).
@@ -16,7 +17,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -157,7 +160,9 @@ func newGitHubUnreadableError(err error) error {
 //   - `graphQLErrors` if the answer has errors along with `data` (a partial result).
 //     `dst` is filled even then
 //   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
-//     It also wraps a 502 `HTTPError` when the answer was 200, or the `GitHubAPIError` when it was 403 or 429
+//     It also wraps a 502 `HTTPError` when the answer was 200, or the `GitHubAPIError` when it was 403 or 429.
+//     If an earlier query of the same request got such an answer, it sends nothing and returns an error that wraps that answer
+//     (`gitHubRateLimitMark`)
 //   - A `GitHubAPIError` on any other HTTP failure.
 //     A 502 `HTTPError` if the answer has no `data`, can't be read, or doesn't come (`CallGitHubAPI`)
 //
@@ -166,7 +171,14 @@ func newGitHubUnreadableError(err error) error {
 // The error type `RATE_LIMITED` isn't in the docs and wasn't measured, so it is only one of the signs.
 // With no points left, any error counts as the rate limit, even beside usable `data`.
 // That `data` is dropped, because the next request would be refused anyway.
-func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables map[string]any, dst any) error {
+func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables map[string]any, dst any) (err error) {
+	mark := readGitHubRateLimitMark(ctx)
+	if err := mark.checkNotLimited(); err != nil {
+		return err
+	}
+	// `defer` runs this when the function returns.
+	// `err` is the named result, so it sees the error being returned
+	defer func() { mark.recordIfRateLimited(err) }()
 	body := map[string]any{"query": query, "variables": variables}
 	res, err := CallGitHubAPI(ctx, cfg, "/graphql", GitHubAPIRequest{Method: http.MethodPost, Body: body})
 	if err != nil {
@@ -185,7 +197,7 @@ func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables ma
 	}
 	for _, e := range result.Errors {
 		if e.Type == "RATE_LIMITED" || res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "" {
-			return fmt.Errorf("%w: %w", errGitHubRateLimited, Errorf(http.StatusBadGateway, "GitHub GraphQL: %s", e.Message)) // Two `%w`: `errors.Is` and `errors.As` find both errors
+			return fmt.Errorf("%w%s: %w", errGitHubRateLimited, formatGitHubRetryTime(res.Header), Errorf(http.StatusBadGateway, "GitHub GraphQL: %s", e.Message)) // Two `%w`: `errors.Is` and `errors.As` find both errors
 		}
 	}
 	if len(result.Data) == 0 || string(result.Data) == "null" {
@@ -256,8 +268,92 @@ func (errs graphQLErrors) hasErrorInNode(index int) bool {
 // Error for a GitHub answer that says the rate limit was reached
 var errGitHubRateLimited = errors.New("GitHub rate limit reached")
 
+// Mark that remembers the first rate limit answer to a GraphQL query during one request to our API.
+// `ServeAPIRequest` puts a new one in the `ctx` of each request (`addGitHubRateLimitMark`), so it lives as long as that request.
+// Once it is set, `callGraphQL` sends no more queries in that request.
+//
+// NOTE: GitHub counts its rate limits per account, not per step of our work (docs).
+// So after one rate limit answer, the later queries of every step in the request would be refused too.
+// GitHub says that sending more after a rate limit answer can make the limit last longer or get the integration banned (docs).
+// The mark holds them back in one place, so no step or goroutine has to stop on its own to keep this.
+// Only GraphQL queries are held back.
+// REST requests still go out, so a commit can still save what was already fetched.
+// Its methods also work on a `nil` mark (a `ctx` that wasn't made by `ServeAPIRequest`), which holds nothing back.
+type gitHubRateLimitMark struct {
+	mu            sync.Mutex // Lock for `firstLimitErr`. Goroutines of the same request read and set it at the same time
+	firstLimitErr error      // The first rate limit answer. `nil` until one comes
+}
+
+// Key of the `gitHubRateLimitMark` in a `ctx`.
+// It is a type of its own, so a value that other code puts in the `ctx` can't use the same key
+type gitHubRateLimitMarkKey struct{}
+
+// Keeps `err` if it is the first rate limit answer of the request.
+// Any other error is ignored.
+func (m *gitHubRateLimitMark) recordIfRateLimited(err error) {
+	if m == nil || !errors.Is(err, errGitHubRateLimited) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.firstLimitErr == nil {
+		m.firstLimitErr = err
+	}
+}
+
+// Checks that no rate limit answer came yet in this request, so a query may be sent.
+//
+// Returns:
+//   - `nil` if no rate limit answer came yet in this request.
+//     Otherwise an error that wraps the first one, so `errors.Is(err, errGitHubRateLimited)` is true and the time to retry stays in the message
+func (m *gitHubRateLimitMark) checkNotLimited() error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.firstLimitErr == nil {
+		return nil
+	}
+	return fmt.Errorf("not sent after an earlier rate limit answer: %w", m.firstLimitErr)
+}
+
+// Returns a copy of `ctx` that carries a new, unset `gitHubRateLimitMark`.
+func addGitHubRateLimitMark(ctx context.Context) context.Context {
+	return context.WithValue(ctx, gitHubRateLimitMarkKey{}, &gitHubRateLimitMark{})
+}
+
+// Returns the `gitHubRateLimitMark` that `ctx` carries, or `nil` if it carries none.
+func readGitHubRateLimitMark(ctx context.Context) *gitHubRateLimitMark {
+	mark, _ := ctx.Value(gitHubRateLimitMarkKey{}).(*gitHubRateLimitMark) // Type assertion (like `dynamic_cast`). Without the value, `mark` is `nil`
+	return mark
+}
+
+// Formats when to retry, as the headers `header` of a rate limit answer give it, for the server log.
+// `Retry-After` gives the seconds to wait.
+// With no requests left (`X-RateLimit-Remaining` is 0), `X-RateLimit-Reset` gives the time the limit resets in Unix seconds (docs).
+//
+// Returns:
+//   - A text like ` (retry after 60s)` or ` (resets at 18:17:00 UTC)`.
+//     An empty string if the headers give neither
+func formatGitHubRetryTime(header http.Header) string {
+	if after := header.Get("Retry-After"); after != "" {
+		if seconds, err := strconv.Atoi(after); err == nil {
+			return fmt.Sprintf(" (retry after %ds)", seconds)
+		}
+		return " (retry after " + after + ")"
+	}
+	if header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			return " (resets at " + time.Unix(reset, 0).UTC().Format("15:04:05") + " UTC)"
+		}
+	}
+	return ""
+}
+
 // Checks a GitHub answer like `CheckGitHubResponse`, and wraps a rate limit answer with `errGitHubRateLimited`.
 // A rate limit answer is 429, or 403 with no requests left, a `Retry-After` header, or "rate limit" in the message (docs).
+// When to retry goes into the message (`formatGitHubRetryTime`).
 func checkGitHubResponseWithRateLimit(res *http.Response) error {
 	err := CheckGitHubResponse(res)
 	var apiErr *GitHubAPIError
@@ -268,7 +364,7 @@ func checkGitHubResponseWithRateLimit(res *http.Response) error {
 		(res.StatusCode == http.StatusForbidden && (res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "" ||
 			strings.Contains(strings.ToLower(apiErr.Message), "rate limit")))
 	if isRateLimited {
-		return fmt.Errorf("%w: %w", errGitHubRateLimited, err) // Two `%w`: `errors.Is` finds both errors
+		return fmt.Errorf("%w%s: %w", errGitHubRateLimited, formatGitHubRetryTime(res.Header), err) // Two `%w`: `errors.Is` finds both errors
 	}
 	return err
 }

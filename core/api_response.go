@@ -52,6 +52,7 @@ const requestTimeLimit = 290 * time.Second
 // Runs a handler and turns the returned error into a JSON error answer.
 // The entry function of each API wraps its per-method handlers with this function.
 // The handler gets the request with a `ctx` whose deadline is `requestTimeLimit` from now (`r.Context()`).
+// The `ctx` also carries a new `gitHubRateLimitMark`, so GraphQL queries stop for the rest of the request after a rate limit answer.
 //   - `HTTPError`: answers with its status code and message.
 //     For a 5xx whose error wraps a cause, the whole error goes to the server log
 //   - `GitHubAPIError` (GitHub answered with a failure): always answers 502
@@ -70,6 +71,7 @@ const requestTimeLimit = 290 * time.Second
 func ServeAPIRequest(w http.ResponseWriter, r *http.Request, handle func(http.ResponseWriter, *http.Request) error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), requestTimeLimit)
 	defer cancel() // `cancel` frees the timer of the deadline when the request ends
+	ctx = addGitHubRateLimitMark(ctx)
 	err := handle(w, r.WithContext(ctx))
 	if err == nil {
 		return

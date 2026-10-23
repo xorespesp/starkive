@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -66,6 +67,8 @@ type RepoMetaSyncResult struct {
 //     Only the time of the first such answer is kept (`UnavailableSince`)
 //   - A batch whose request failed changes nothing.
 //     If every batch sent failed with a failure that needs a person (`isTemporaryGitHubError` is false), it stops with that error
+//   - A rate limit answer stops it from sending more batches.
+//     The batches answered before it are still saved
 //   - The result is written in one commit.
 //     The subject has the number checked and the number not found.
 //     The body lists disappeared, visible again and renamed repositories, and the number whose details changed
@@ -109,6 +112,7 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 	checked := 0
 	failedBatches := 0
 	var failure error             // The failure of one batch. One that needs a person is kept over one that passes on its own
+	var rateLimited error         // The first rate limit answer. Once it is set, no more batches are sent
 	fresh := map[int64]RepoMeta{} // New snapshots of the repositories found (repository info only)
 	gone := map[int64]bool{}      // Repositories that GitHub answered it can't find
 	var wg sync.WaitGroup         // Counter that waits until all goroutines end (like `std::thread::join`)
@@ -119,7 +123,7 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 			for {
 				mu.Lock()
 				// Send the next request only if it ends before `budgetEndsAt` even when it waits the longest for GitHub (`githubTimeout`)
-				if next >= len(batches) || time.Now().Add(githubTimeout).After(budgetEndsAt) {
+				if rateLimited != nil || next >= len(batches) || time.Now().Add(githubTimeout).After(budgetEndsAt) {
 					mu.Unlock()
 					return
 				}
@@ -138,6 +142,9 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 					failedBatches++
 					if failure == nil || isTemporaryGitHubError(ctx, failure) {
 						failure = err
+					}
+					if rateLimited == nil && errors.Is(err, errGitHubRateLimited) {
+						rateLimited = err
 					}
 					mu.Unlock()
 					continue // A batch whose request failed changes nothing. This keeps a temporary outage from being recorded as a disappearance
@@ -160,6 +167,13 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 		}()
 	}
 	wg.Wait()
+	if rateLimited != nil {
+		unsent := 0
+		for _, batch := range batches[next:] {
+			unsent += len(batch)
+		}
+		log.Printf("repo details: stopped with %d repos left for the next sync: %v", unsent, rateLimited)
+	}
 	// Every batch sent failed, so nothing was checked.
 	// If a person must fix the cause (for example, GitHub no longer accepts the query), the refresh and the disappearance checks would stop silently.
 	// So that case is an error

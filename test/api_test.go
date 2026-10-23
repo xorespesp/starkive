@@ -81,6 +81,8 @@ type fakeGitHub struct {
 	githubStarLists     map[string][]string           // My GitHub star lists: name -> repositories in it (owner/repo)
 	graphqlDown         bool                          // If `true`, all GraphQL requests fail with `graphqlDownStatus`
 	graphqlDownStatus   int                           // Status code of the failures that `graphqlDown` makes. 502 (a temporary outage) if 0
+	metaQueries         int                           // Number of repository info queries by GraphQL (`nodes` by `node_id`, not README queries)
+	metaRateLimitFrom   int                           // If not 0, repository info queries from this one on (counting from 1) get the secondary rate limit answer (403)
 	githubStarListsDown bool                          // If `true`, only the GitHub star list query (`viewer.lists`) fails with 502
 	ownerDown           bool                          // If `true`, `/user` with the server token (the token owner check) fails with 502
 	tokenRejected       bool                          // If `true`, every request with the server token is refused with 401 "Bad credentials" (token expired or revoked)
@@ -817,6 +819,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					i, name, strings.Join(items, ",")))
 			}
 			fmt.Fprintf(w, `{"data":{"viewer":{"lists":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[%s]}}}}`, strings.Join(githubStarLists, ","))
+			return
+		}
+		f.metaQueries++
+		if f.metaRateLimitFrom != 0 && f.metaQueries >= f.metaRateLimitFrom {
+			// The measured message. The `Retry-After` header is the documented way to give the wait
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, http.StatusForbidden)
 			return
 		}
 		// Repository info: `R_1` and the repositories in my Stars (`R_<ID>`) get their info.
@@ -1682,6 +1691,35 @@ func TestSyncKeepsSnapshotOfVanishedRepos(t *testing.T) {
 	// With no time, nothing is checked
 	if result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, repo, 0); err != nil || result.NumCheckedRepos != 0 {
 		t.Errorf("no budget: %+v %v", result, err)
+	}
+}
+
+// Tests that the metadata sync step stops sending batches after a rate limit answer.
+// 3,000 items are 30 batches of 100, asked 6 at a time.
+//   - When the first answer is the rate limit, at most the first 6 batches (sent together) go out.
+//     It isn't an error, because the limit passes on its own
+//   - When it comes from the third answer on, the 2 batches answered before it are counted.
+//     Each of those 2 goroutines may send one more batch before it sees the stop, so at most 6 + 2 go out
+func TestSyncRepoMetaStopsAtRateLimit(t *testing.T) {
+	ctx := context.Background()
+	items := []string{}
+	for id := 1; id <= 3000; id++ {
+		items = append(items, fmt.Sprintf(`{"id":%d,"node_id":"R_%d","name":"owner/repo%d","note":"","star_list_ids":[],"starred_at":"x"}`, id, id, id))
+	}
+	for _, c := range []struct {
+		from        int // The first query (counting from 1) that gets the rate limit answer
+		wantChecked int
+		maxQueries  int
+	}{
+		{1, 0, 6},
+		{3, 200, 8},
+	} {
+		gh := setup(t, "[\n"+strings.Join(items, ",\n")+"\n]\n", sampleStarLists)
+		gh.metaRateLimitFrom = c.from
+		result, err := core.SyncRepoMetaSnapshotsWithGitHub(ctx, openTestDBRepo(t), time.Minute)
+		if err != nil || result.NumCheckedRepos != c.wantChecked || gh.metaQueries > c.maxQueries {
+			t.Errorf("rate limit from query %d: %+v %v, queries %d", c.from, result, err, gh.metaQueries)
+		}
 	}
 }
 

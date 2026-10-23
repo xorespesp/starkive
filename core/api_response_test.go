@@ -1,10 +1,11 @@
-// Unit tests for the error answers and the request deadline of `ServeAPIRequest` (`api_response.go`)
+// Unit tests for the error answers, the request deadline and the rate limit mark of `ServeAPIRequest` (`api_response.go`)
 package core
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,24 @@ func TestServeAPIRequestGivesRequestDeadline(t *testing.T) {
 	})
 	if timeLeft := time.Until(deadline); !hasDeadline || timeLeft > requestTimeLimit || timeLeft < requestTimeLimit-time.Minute || ctxErr != nil {
 		t.Errorf("deadline %v (set %v), error %v", deadline, hasDeadline, ctxErr)
+	}
+}
+
+// Tests that `ServeAPIRequest` gives each request its own unset `gitHubRateLimitMark`.
+// A rate limit answer in one request must not hold back the queries of the next one
+func TestServeAPIRequestGivesNewRateLimitMark(t *testing.T) {
+	marks := []*gitHubRateLimitMark{}
+	for range 2 {
+		req := httptest.NewRequest("POST", "http://example.test/api/sync-archive", nil)
+		ServeAPIRequest(httptest.NewRecorder(), req, func(w http.ResponseWriter, r *http.Request) error {
+			mark := readGitHubRateLimitMark(r.Context())
+			marks = append(marks, mark)
+			mark.recordIfRateLimited(fmt.Errorf("%w: GitHub 403", errGitHubRateLimited))
+			return nil
+		})
+	}
+	if len(marks) != 2 || marks[0] == nil || marks[1] == nil || marks[0] == marks[1] {
+		t.Errorf("marks %v", marks)
 	}
 }
 
