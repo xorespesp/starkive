@@ -1,4 +1,4 @@
-// Integration tests for the DB repository: finding and opening it (state, format version, guard), and writing to it (`core.UpdateDBRepoFiles`, `core.UpdateArchive`)
+// Integration tests for the DB repository: finding and opening it (state, format version, guard), and writing to it (`core.UpdateDBRepoFiles`, `core.UpdateStarCatalog`)
 package test
 
 import (
@@ -261,7 +261,7 @@ func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
 	}
 }
 
-// Tests that `core.UpdateArchive` doesn't treat a data file as changed when only its layout differs and the data is the same.
+// Tests that `core.UpdateStarCatalog` doesn't treat a data file as changed when only its layout differs and the data is the same.
 // (For example, a person edited the file and added indentation.)
 //   - A write that changes nothing (with an empty message, like a sync with no new Stars) makes no error and no commit
 //   - A write that changes another file commits only that file, and leaves the file with the different layout as it is
@@ -282,15 +282,62 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 	gh.mu.Unlock()
 	repo := openTestDBRepo(t)
 
-	if _, err := core.UpdateArchive(ctx, repo, func(a *core.Archive) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
+	if _, err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
 		t.Errorf("nothing changed: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
-	_, err = core.UpdateArchive(ctx, repo, func(a *core.Archive) (core.CommitMessage, error) {
-		a.StarLists = append(a.StarLists, core.StarList{ID: 9999, Name: "new"})
+	_, err = core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		tx.StarLists = append(tx.StarLists, core.StarList{ID: 9999, Name: "new"})
 		return core.NewCommitMessage("user(star-lists)", "add new"), nil
 	})
 	if err != nil || len(gh.commits) != before+1 || gh.readFile(core.StarItemsDBPath) != string(reformatted) || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
 		t.Errorf("star lists changed: %v, commits %d -> %d", err, before, len(gh.commits))
+	}
+}
+
+// Tests that each archive write reads only the files it uses.
+// A broken file that a write doesn't read doesn't stop it, and is left as it is.
+//   - `core.UpdateStarCatalog` doesn't read the metadata snapshots
+//   - `core.UpdateStarLists` reads only the star lists
+//   - `core.UpdateRepoMetaSnapshots` doesn't read the star lists, and writes only the snapshots
+func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
+	ctx := context.Background()
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	repo := openTestDBRepo(t)
+	setFile := func(path string, content string) {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		gh.files[path] = content
+	}
+
+	setFile(core.RepoMetaDBPath, "not JSON")
+	_, err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		tx.StarItems[0].Note = "x"
+		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
+	})
+	if err != nil || gh.readFile(core.RepoMetaDBPath) != "not JSON" || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"note":"x"`) {
+		t.Errorf("star catalog: %v, files %q", err, gh.files)
+	}
+
+	setFile(core.StarItemsDBPath, "not JSON")
+	err = core.UpdateStarLists(ctx, repo, func(starLists *[]core.StarList) (core.CommitMessage, error) {
+		*starLists = append(*starLists, core.StarList{ID: 9999, Name: "new"})
+		return core.NewCommitMessage("user(star-lists)", "create new"), nil
+	})
+	if err != nil || gh.readFile(core.StarItemsDBPath) != "not JSON" || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
+		t.Errorf("star lists: %v, files %q", err, gh.files)
+	}
+
+	setFile(core.StarItemsDBPath, sampleStarItems)
+	setFile(core.RepoMetaDBPath, "[]\n")
+	setFile(core.StarListsDBPath, "not JSON")
+	committed, err := core.UpdateRepoMetaSnapshots(ctx, repo, func(starItems []core.StarItem, repoMeta *[]core.RepoMeta) (core.CommitMessage, error) {
+		starItems[0].Note = "not written"
+		*repoMeta = []core.RepoMeta{{ID: starItems[0].ID, Name: starItems[0].Name, Topics: []string{}}}
+		return core.NewCommitMessage("sync(repo-meta)", "refresh 1 repo, 0 unavailable"), nil
+	})
+	if err != nil || len(committed) != 1 || gh.readFile(core.StarListsDBPath) != "not JSON" || gh.readFile(core.StarItemsDBPath) != sampleStarItems ||
+		!strings.Contains(gh.readFile(core.RepoMetaDBPath), `"id":1`) {
+		t.Errorf("metadata snapshots: %v, %v, files %q", err, committed, gh.files)
 	}
 }
 

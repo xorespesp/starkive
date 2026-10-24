@@ -351,7 +351,7 @@ func syncReadmeSnapshotBatches(ctx context.Context, repo *DBRepo, endBy time.Tim
 	if err != nil {
 		return 0, err
 	}
-	starItems, err := readItems[StarItem](ctx, repo, StarItemsDBPath)
+	starItems, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
 	if err != nil {
 		return 0, err
 	}
@@ -530,8 +530,8 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 // It reads the archive and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
 // Nothing is committed if nothing changes.
 func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetched map[int64]FetchedReadme) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{StarItemsDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
-		starItems, err := decodeItems[StarItem](filesRead[StarItemsDBPath])
+	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+		starItems, err := starItemsDataFile.decodeForReading(filesRead)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

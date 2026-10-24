@@ -2,7 +2,7 @@
 // It covers reading a file (`ReadDBRepoFile`), listing a folder at a commit (`readBlobSHAsInFolder`),
 // and writing and deleting several files in one commit (`UpdateDBRepoFiles`).
 // It writes the bytes it is given.
-// What they mean is decided by the archive (`archive.go`) and the config file (`db_config.go`).
+// What they mean is decided by the archive (`data_file.go` and the `archive_*.go` files) and the config file (`db_config.go`).
 // `db_repo.go` also decides which repository to use, and whether it is safe to write to.
 package core
 
@@ -133,6 +133,7 @@ func (changes FileChangesCommit) check() error {
 //   - `paths`: Paths of the files to read. Each must pass `isValidRepoPath`
 //   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist),
 //     and `commitSHA`, the sha of that commit.
+//     Every path in `paths` is a key of `filesRead`, also when the file doesn't exist.
 //     It can read more at the same commit with `commitSHA` (for example a folder listing, `readBlobSHAsInFolder`).
 //     Paths found that way exist in the tree the new commit is built on, so they are safe to put in `FilesToDelete`.
 //     It returns the commit to make (`FileChangesCommit`).
@@ -156,7 +157,7 @@ func (changes FileChangesCommit) check() error {
 //     If it leaves results in outer variables, it must set them from scratch on every call.
 //   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
 //     plus the requests that `buildFileChangesCommit` sends.
-//     For the archive (three files) that is 8 when `buildFileChangesCommit` sends none.
+//     An archive write reads one or two data files, so that is 6 or 7 when `buildFileChangesCommit` sends none.
 //     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
 //     That one is sent again on every attempt.
 //     This is the price of putting several files in one commit with no in-between state.

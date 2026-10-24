@@ -1,13 +1,12 @@
 // Star lists: the unit that groups archive items (`db/star-lists.json`).
 // This file also holds name comparison, ID issuing, and cleanup of the IDs stored in items.
-// Reading and writing star list definitions is done by `UpdateArchive` (`archive.go`).
-// This file holds only the rules used inside it.
+// Changing the star list definitions alone is done by `UpdateStarLists` here.
+// Changes that also touch the items go through `UpdateStarCatalog`, and the rules for the star list IDs stored in items are there too (`archive_star_catalog.go`).
 // Reading the star lists on GitHub is in `github_stars.go`.
 package core
 
 import (
-	"net/http"
-	"slices"
+	"context"
 	"strings"
 	"time"
 
@@ -62,72 +61,30 @@ func NewStarListID(starLists []StarList) int64 {
 	return id
 }
 
-// Checks that all requested star list IDs exist in this archive, and returns them cleaned up for storing in an item.
-// `(a *Archive)` marks this function as a method of `Archive`, and `a` plays the role of `this` in C++.
+// Reads the star list definitions from one commit, changes them with `change`, and writes them in one commit if they changed.
+// Only the star list file is read, so it is for changes that don't look at the items.
+// It works on top of `UpdateDBRepoFiles`.
 //
 // Args:
-//   - `ids`: Star list IDs from the request body
-//
-// Returns:
-//   - The cleaned ID list (same rules as `CleanStarListIDs`).
-//     A 400 `HTTPError` if even one ID doesn't exist
-//
-// NOTE: It is called inside the `change` of `UpdateArchive`.
-// So the "does this star list exist?" check and the save use the archive at the same commit.
-// An ID of a star list deleted in the meantime can't be saved.
-func (a *Archive) CheckStarListIDs(ids []int64) ([]int64, error) {
-	for _, id := range ids {
-		if !slices.ContainsFunc(a.StarLists, func(l StarList) bool { return l.ID == id }) {
-			return nil, Errorf(http.StatusBadRequest, "Unknown star list id: %d", id)
+//   - `change`: Changes `starLists` in place and returns a commit message.
+//     It gets a pointer to the slice, so it can also append to it or replace it.
+//     If it returns an error, nothing is written.
+//     If another commit gets in, it is called again with the star lists read at the new commit
+func UpdateStarLists(ctx context.Context, repo *DBRepo, change func(starLists *[]StarList) (CommitMessage, error)) error {
+	return UpdateDBRepoFiles(ctx, repo, []string{starListsDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+		var starLists []StarList
+		trackedStarLists, err := starListsDataFile.decodeForWriting(filesRead, &starLists)
+		if err != nil {
+			return FileChangesCommit{}, err
 		}
-	}
-	return a.CleanStarListIDs(ids), nil
-}
-
-// Cleans up the star list IDs to store in an item.
-// It keeps only IDs that exist in this archive, removes duplicates, and sorts by ID (which is creation order).
-//
-// Args:
-//   - `ids`: IDs to clean up. IDs that don't exist are dropped without an error
-//
-// NOTE: Every place that writes star list IDs into an item goes through this method.
-// So there is one ordering rule for the stored file.
-// The same content always gives the same line, so no diff appears.
-func (a *Archive) CleanStarListIDs(ids []int64) []int64 {
-	clean := []int64{}
-	for _, id := range ids {
-		exists := slices.ContainsFunc(a.StarLists, func(l StarList) bool { return l.ID == id })
-		if exists && !slices.Contains(clean, id) {
-			clean = append(clean, id)
+		message, err := change(&starLists)
+		if err != nil {
+			return FileChangesCommit{}, err
 		}
-	}
-	slices.Sort(clean)
-	return clean
-}
-
-// Turns star list names into IDs.
-// If no star list has the same name (by `IsSameStarListName`), it makes a new one in `a.StarLists`.
-//
-// Args:
-//   - `names`: GitHub star list names
-//
-// Returns:
-//   - Given name -> star list ID
-//   - Names of star lists made this time (written in the commit message body)
-//
-// NOTE: Names are turned into IDs only in this method, and after that only IDs are used.
-// Names can change, so using them in place of IDs would drift.
-func (a *Archive) getOrCreateStarListIDs(names []string) (map[string]int64, []string) {
-	ids := map[string]int64{}
-	created := []string{}
-	for _, name := range names {
-		i := slices.IndexFunc(a.StarLists, func(l StarList) bool { return IsSameStarListName(l.Name, name) })
-		if i < 0 {
-			a.StarLists = append(a.StarLists, StarList{ID: NewStarListID(a.StarLists), Name: strings.TrimSpace(name)})
-			i = len(a.StarLists) - 1
-			created = append(created, a.StarLists[i].Name)
+		changes := FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: message}
+		if err := trackedStarLists.addIfChanged(&changes); err != nil {
+			return FileChangesCommit{}, err
 		}
-		ids[name] = a.StarLists[i].ID
-	}
-	return ids, created
+		return changes, nil
+	})
 }

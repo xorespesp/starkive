@@ -9,7 +9,7 @@
 //	PATCH  ?id=<id>  { note?, star_list_ids? } -> The changed item. Only the fields that were sent change
 //	DELETE ?id=<id>  -> { ok: true }
 //
-// For every write, the server reads the archive at one commit, applies the change, and writes it as one commit (`core.UpdateArchive`).
+// For every write, the server reads the star catalog at one commit, applies the change, and writes it as one commit (`core.UpdateStarCatalog`).
 // The browser sends only what to change.
 // So it doesn't overwrite changes made meanwhile on another device, and sending the same Import request again gives the same result.
 
@@ -71,26 +71,26 @@ func parseRepoFullNameOrURL(fullNameOrURL string) string {
 //
 // Args:
 //   - `id`: ID of the item to change (the GitHub repository ID)
-//   - `change`: A function that gets the whole archive `a` at the same commit and the item `s`.
+//   - `change`: A function that gets the transaction `tx` (the catalog read at one commit) and the item `s` in it.
 //     It changes `s` and returns the commit message.
 //     If it returns an error, nothing is written.
-//     If another commit gets in the way, it may be called again with a new archive
+//     If another commit gets in the way, it may be called again with a new transaction
 //
 // Returns:
 //   - The changed item. A 404 `HTTPError` if the item doesn't exist
 //
-// NOTE: `change` gets the whole archive so that some checks happen at the same commit as the save.
+// NOTE: `change` gets the whole catalog so that some checks happen at the same commit as the save.
 // The star list ID check is one of them: it needs another file (`db/star-lists.json`).
 // If that file were read separately, an ID pointing to a star list deleted meanwhile could be saved.
-func updateStarItem(ctx context.Context, dbRepo *core.DBRepo, id int64, change func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
+func updateStarItem(ctx context.Context, dbRepo *core.DBRepo, id int64, change func(tx *core.StarCatalogTransaction, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
 	var updated core.StarItem
-	_, err := core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
-		i := slices.IndexFunc(a.StarItems, func(s core.StarItem) bool { return s.ID == id })
+	_, err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
 		}
-		message, err := change(a, &a.StarItems[i])
-		updated = a.StarItems[i] // Set again if called again
+		message, err := change(tx, &tx.StarItems[i])
+		updated = tx.StarItems[i] // Set again if called again
 		return message, err
 	})
 	return updated, err
@@ -215,23 +215,23 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 	}
 
 	var item core.StarItem
-	_, err := core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
+	_, err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		found := takeLookup()
 		if found.err != nil {
 			return core.CommitMessage{}, found.err
 		}
 		item = found.item
-		ids, err := a.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
+		ids, err := tx.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
 		if err != nil {
 			return core.CommitMessage{}, err
 		}
-		if slices.ContainsFunc(a.StarItems, func(s core.StarItem) bool { return s.ID == item.ID }) {
+		if slices.ContainsFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == item.ID }) {
 			return core.CommitMessage{}, core.Errorf(http.StatusConflict, "%s is already in the archive", item.Name)
 		}
 		item.StarListIDs = ids
-		a.StarItems = append([]core.StarItem{item}, a.StarItems...)
+		tx.StarItems = append([]core.StarItem{item}, tx.StarItems...)
 		if found.readme != nil {
-			a.AddFetchedReadmeToSave(item.ID, *found.readme)
+			tx.SaveReadme(item.ID, *found.readme)
 		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
@@ -312,7 +312,7 @@ func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 	if (body.RepoFullNameOrURL == "") == (len(body.StarredRepoIDs) == 0) {
 		return core.Errorf(http.StatusBadRequest, "Send either repo_full_name_or_url or starred_repo_ids")
 	}
-	starListIDs := []int64{} // Whether this ID exists is checked at the commit that saves (`Archive.CheckStarListIDs`)
+	starListIDs := []int64{} // Whether this ID exists is checked at the commit that saves (`StarCatalog.CheckStarListIDs`)
 	if body.StarListID != 0 {
 		starListIDs = []int64{body.StarListID}
 	}
@@ -350,14 +350,14 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 		}
 		body.Note = &trimmed
 	}
-	updated, err := updateStarItem(ctx, dbRepo, id, func(a *core.Archive, s *core.StarItem) (core.CommitMessage, error) {
+	updated, err := updateStarItem(ctx, dbRepo, id, func(tx *core.StarCatalogTransaction, s *core.StarItem) (core.CommitMessage, error) {
 		commitSummary := "edit " + s.Name
 		if body.Note != nil {
 			s.Note = *body.Note
 			commitSummary = "edit note of " + s.Name
 		}
 		if body.StarListIDs != nil {
-			ids, err := a.CheckStarListIDs(*body.StarListIDs)
+			ids, err := tx.CheckStarListIDs(*body.StarListIDs)
 			if err != nil {
 				return core.CommitMessage{}, err
 			}
@@ -374,7 +374,7 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Deletes one item from the archive and answers `{ ok: true }`.
-// Its README snapshots are deleted in the same commit (`core.UpdateArchive`).
+// Its README snapshots are deleted in the same commit (`core.UpdateStarCatalog`).
 // Its metadata snapshot is removed in the next sync.
 // Answers 400 if `id` isn't a number, and 404 if the item doesn't exist.
 func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error {
@@ -387,13 +387,13 @@ func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
-		i := slices.IndexFunc(a.StarItems, func(s core.StarItem) bool { return s.ID == id })
+	_, err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
 		}
-		name := a.StarItems[i].Name // `slices.Delete` shifts the later items into place, so the name is taken out before deleting
-		a.StarItems = slices.Delete(a.StarItems, i, i+1)
+		name := tx.StarItems[i].Name // `slices.Delete` shifts the later items into place, so the name is taken out before deleting
+		tx.StarItems = slices.Delete(tx.StarItems, i, i+1)
 		return core.NewCommitMessage("user(star-items)", "remove "+name), nil
 	})
 	if err != nil {

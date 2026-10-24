@@ -1,5 +1,5 @@
 // Metadata snapshots in the archive (`db/repo-meta.json`, `RepoMeta`): each repository's info as it last was on GitHub, kept as a record.
-// They are brought up to date by `SyncRepoMetaSnapshotsWithGitHub`.
+// They are brought up to date by `SyncRepoMetaSnapshotsWithGitHub`, and written by `UpdateRepoMetaSnapshots`.
 // Reading the current values from GitHub is in `github_repo_meta.go`.
 package core
 
@@ -89,7 +89,7 @@ type RepoMetaSyncResult struct {
 // Repositories are never deleted automatically.
 func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget time.Duration) (RepoMetaSyncResult, error) {
 	budgetEndsAt := time.Now().Add(budget)
-	starItems, err := readItems[StarItem](ctx, repo, StarItemsDBPath)
+	starItems, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
 	if err != nil {
 		return RepoMetaSyncResult{}, err
 	}
@@ -182,9 +182,9 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 	}
 
 	now := FormatNow()
-	updated, err := UpdateArchive(ctx, repo, func(a *Archive) (CommitMessage, error) {
-		byID := make(map[int64]RepoMeta, len(a.RepoMeta))
-		for _, m := range a.RepoMeta {
+	updated, err := UpdateRepoMetaSnapshots(ctx, repo, func(starItems []StarItem, repoMeta *[]RepoMeta) (CommitMessage, error) {
+		byID := make(map[int64]RepoMeta, len(*repoMeta))
+		for _, m := range *repoMeta {
 			byID[m.ID] = m
 		}
 		// Notable changes for the commit body.
@@ -198,7 +198,7 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 		// Rebuilds the snapshot list in the order of the archive items at the same commit.
 		// Snapshots of repositories removed from the archive drop out here
 		next := []RepoMeta{}
-		for _, s := range a.StarItems {
+		for _, s := range starItems {
 			old, known := byID[s.ID]
 			m := old
 			if snap, ok := fresh[s.ID]; ok {
@@ -241,17 +241,58 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 			"sync(repo-meta)", "refresh "+FormatCount(checked, "repo")+fmt.Sprintf(", %d unavailable", unavailable),
 			formatCommitList("Unavailable", vanished), formatCommitList("Available again", revived), formatCommitList("Renamed", renamed), details,
 		)
-		a.RepoMeta = next
+		*repoMeta = next
 		return commitMessage, nil
 	})
 	if err != nil {
 		return RepoMetaSyncResult{}, err
 	}
 	result := RepoMetaSyncResult{NumCheckedRepos: checked}
-	for _, m := range updated.RepoMeta {
+	for _, m := range updated {
 		if m.UnavailableSince != "" {
 			result.UnavailableRepoIDs = append(result.UnavailableRepoIDs, m.ID)
 		}
 	}
 	return result, nil
+}
+
+// Reads the archive items and the metadata snapshots from one commit, changes the snapshots with `change`, and writes them in one commit if they changed.
+// The items are only read.
+// Changes to `starItems` are not written.
+// It works on top of `UpdateDBRepoFiles`.
+//
+// Args:
+//   - `change`: Changes `repoMeta` in place, or replaces it, and returns a commit message.
+//     If it returns an error, nothing is written.
+//     If another commit gets in, it is called again with the files read at the new commit
+//
+// Returns:
+//   - The snapshots as committed. If they didn't change, nothing is committed and they are returned as is
+func UpdateRepoMetaSnapshots(ctx context.Context, repo *DBRepo, change func(starItems []StarItem, repoMeta *[]RepoMeta) (CommitMessage, error)) ([]RepoMeta, error) {
+	var committed []RepoMeta
+	err := UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, repoMetaDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+		starItems, err := starItemsDataFile.decodeForReading(filesRead) // Only read, so changes to it aren't written
+		if err != nil {
+			return FileChangesCommit{}, err
+		}
+		var repoMeta []RepoMeta
+		trackedRepoMeta, err := repoMetaDataFile.decodeForWriting(filesRead, &repoMeta)
+		if err != nil {
+			return FileChangesCommit{}, err
+		}
+		message, err := change(starItems, &repoMeta)
+		if err != nil {
+			return FileChangesCommit{}, err
+		}
+		changes := FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: message}
+		if err := trackedRepoMeta.addIfChanged(&changes); err != nil {
+			return FileChangesCommit{}, err
+		}
+		committed = repoMeta // If called again, this becomes the new result
+		return changes, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return committed, nil
 }

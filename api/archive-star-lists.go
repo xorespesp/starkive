@@ -5,7 +5,8 @@
 //	PATCH  ?id=<id>  { name, description } -> The changed star list
 //	DELETE ?id=<id>  -> { ok: true }. The repositories (items) stay in the archive. Only their membership in that star list is removed
 //
-// Every write reads the archive at one commit, applies the change, and writes it as one commit (`core.UpdateArchive`).
+// Every write reads the data it needs at one commit, applies the change, and writes it as one commit
+// (`core.UpdateStarLists`, or `core.UpdateStarCatalog` when the items change too).
 
 package handler
 
@@ -86,12 +87,12 @@ func handleArchiveStarListsPost(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var created core.StarList
-	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
-		if err := checkUniqueStarListName(a.StarLists, name, 0); err != nil {
+	err = core.UpdateStarLists(ctx, dbRepo, func(starLists *[]core.StarList) (core.CommitMessage, error) {
+		if err := checkUniqueStarListName(*starLists, name, 0); err != nil {
 			return core.CommitMessage{}, err
 		}
-		created = core.StarList{ID: core.NewStarListID(a.StarLists), Name: name, Description: description} // If called again, it is set again with a new ID
-		a.StarLists = append(a.StarLists, created)
+		created = core.StarList{ID: core.NewStarListID(*starLists), Name: name, Description: description} // If called again, it is set again with a new ID
+		*starLists = append(*starLists, created)
 		return core.NewCommitMessage("user(star-lists)", "create "+name), nil
 	})
 	if err != nil {
@@ -119,16 +120,16 @@ func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var updated core.StarList
-	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
-		i := slices.IndexFunc(a.StarLists, func(l core.StarList) bool { return l.ID == id })
+	err = core.UpdateStarLists(ctx, dbRepo, func(starLists *[]core.StarList) (core.CommitMessage, error) {
+		i := slices.IndexFunc(*starLists, func(l core.StarList) bool { return l.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "List not found")
 		}
-		if err := checkUniqueStarListName(a.StarLists, name, id); err != nil {
+		if err := checkUniqueStarListName(*starLists, name, id); err != nil {
 			return core.CommitMessage{}, err
 		}
-		a.StarLists[i].Name, a.StarLists[i].Description = name, description
-		updated = a.StarLists[i]
+		(*starLists)[i].Name, (*starLists)[i].Description = name, description
+		updated = (*starLists)[i]
 		return core.NewCommitMessage("user(star-lists)", "edit "+name), nil
 	})
 	if err != nil {
@@ -155,19 +156,19 @@ func handleArchiveStarListsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateArchive(ctx, dbRepo, func(a *core.Archive) (core.CommitMessage, error) {
-		i := slices.IndexFunc(a.StarLists, func(l core.StarList) bool { return l.ID == id })
+	_, err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		i := slices.IndexFunc(tx.StarLists, func(l core.StarList) bool { return l.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "List not found")
 		}
-		name := a.StarLists[i].Name // `slices.Delete` shifts the later items into place, so the name is taken out before deleting
-		a.StarLists = slices.Delete(a.StarLists, i, i+1)
+		name := tx.StarLists[i].Name // `slices.Delete` shifts the later items into place, so the name is taken out before deleting
+		tx.StarLists = slices.Delete(tx.StarLists, i, i+1)
 		members := 0 // Number of repositories that were in this star list. Written in the commit body
 		// Removes the membership from the items in the same commit that deletes the definition
-		for j := range a.StarItems {
-			if slices.Contains(a.StarItems[j].StarListIDs, id) {
+		for j := range tx.StarItems {
+			if slices.Contains(tx.StarItems[j].StarListIDs, id) {
 				members++
-				a.StarItems[j].StarListIDs = slices.DeleteFunc(a.StarItems[j].StarListIDs, func(x int64) bool { return x == id })
+				tx.StarItems[j].StarListIDs = slices.DeleteFunc(tx.StarItems[j].StarListIDs, func(x int64) bool { return x == id })
 			}
 		}
 		removed := "" // An empty body section is left out of the commit message

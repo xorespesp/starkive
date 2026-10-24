@@ -1,5 +1,5 @@
 // Archive entries (`db/star-items.json`, `StarItem`), and putting GitHub Stars into the archive as new entries (`ArchiveStarredRepos`).
-// The archive as a whole is in `archive.go`, and reading Stars from GitHub is in `github_stars.go`.
+// The star catalog (items and star lists together) is in `archive_star_catalog.go`, and reading Stars from GitHub is in `github_stars.go`.
 package core
 
 import (
@@ -42,8 +42,8 @@ type StarItem struct {
 // Returns:
 //   - Number of items actually added
 //
-// NOTE: The duplicate check and the star list check are both done inside the `change` of `UpdateArchive`.
-// That is, they use the archive right before the commit.
+// NOTE: The duplicate check and the star list check are both done inside the `change` of `UpdateStarCatalog`.
+// That is, they use the catalog right before the commit.
 // So sending the same request again gives the same result.
 // Star lists are made only when there are items to add.
 // No item points to a star list that doesn't exist.
@@ -53,15 +53,15 @@ func ArchiveStarredRepos(ctx context.Context, repo *DBRepo, starredRepos []Starr
 	// They are input from GitHub, not the archive, so another commit doesn't make them stale
 	var githubStarLists map[int64][]string
 	added := 0
-	_, err := UpdateArchive(ctx, repo, func(a *Archive) (CommitMessage, error) {
+	_, err := UpdateStarCatalog(ctx, repo, func(tx *StarCatalogTransaction) (CommitMessage, error) {
 		added = 0 // If called again after a conflict, count again from zero
-		// Both the star list check and the duplicate check below use the archive right before the commit (`a`)
-		requested, err := a.CheckStarListIDs(starListIDs)
+		// Both the star list check and the duplicate check below use the catalog right before the commit (`tx`)
+		requested, err := tx.CheckStarListIDs(starListIDs)
 		if err != nil {
 			return CommitMessage{}, err
 		}
-		seen := make(map[int64]bool, len(a.StarItems)+len(starredRepos))
-		for _, s := range a.StarItems {
+		seen := make(map[int64]bool, len(tx.StarItems)+len(starredRepos))
+		for _, s := range tx.StarItems {
 			seen[s.ID] = true
 		}
 		if !slices.ContainsFunc(starredRepos, func(s StarredRepo) bool { return !seen[s.Repo.ID] }) {
@@ -79,14 +79,14 @@ func ArchiveStarredRepos(ctx context.Context, repo *DBRepo, starredRepos []Starr
 				continue
 			}
 			seen[s.Repo.ID] = true // Even if the same repository appears again in `starredRepos`, add it only once
-			idByName, created := a.getOrCreateStarListIDs(githubStarLists[s.Repo.ID])
+			idByName, created := tx.getOrCreateStarListIDs(githubStarLists[s.Repo.ID])
 			createdStarLists = append(createdStarLists, created...)
 			ids := append([]int64{}, requested...) // Appends to a copy. Appending to `requested` directly could overwrite its array when it has spare capacity
 			for _, id := range idByName {
 				ids = append(ids, id)
 			}
 			fresh = append(fresh, StarItem{
-				ID: s.Repo.ID, NodeID: s.Repo.NodeID, Name: s.Repo.FullName, StarListIDs: a.CleanStarListIDs(ids),
+				ID: s.Repo.ID, NodeID: s.Repo.NodeID, Name: s.Repo.FullName, StarListIDs: tx.CleanStarListIDs(ids),
 				StarredAt: s.StarredAt,
 			})
 		}
@@ -95,7 +95,7 @@ func ArchiveStarredRepos(ctx context.Context, repo *DBRepo, starredRepos []Starr
 		for i, s := range fresh {
 			names[i] = s.Name
 		}
-		a.StarItems = append(fresh, a.StarItems...)
+		tx.StarItems = append(fresh, tx.StarItems...)
 		return NewCommitMessage(commitPrefix, "archive "+FormatCount(added, "star"),
 			formatCommitList("", names), formatCommitList("New star lists", createdStarLists)), nil
 	})

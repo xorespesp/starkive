@@ -2154,12 +2154,12 @@ func TestStarListDeletedWhileAssigning(t *testing.T) {
 // Cleaning drops missing IDs, removes duplicates and sorts by ID.
 // Checking refuses if even one ID is missing
 func TestCleanStarListIDs(t *testing.T) {
-	a := &core.Archive{StarLists: []core.StarList{{ID: 300}, {ID: 100}, {ID: 200}}}
+	c := &core.StarCatalog{StarLists: []core.StarList{{ID: 300}, {ID: 100}, {ID: 200}}}
 	// The missing ID (999) is dropped, duplicates become one, and the order is by ID (which is creation order)
-	if got := a.CleanStarListIDs([]int64{200, 999, 100, 200}); !slices.Equal(got, []int64{100, 200}) {
+	if got := c.CleanStarListIDs([]int64{200, 999, 100, 200}); !slices.Equal(got, []int64{100, 200}) {
 		t.Errorf("got %v", got)
 	}
-	if _, err := a.CheckStarListIDs([]int64{100, 999}); err == nil {
+	if _, err := c.CheckStarListIDs([]int64{100, 999}); err == nil {
 		t.Errorf("unknown id should be rejected")
 	}
 }
