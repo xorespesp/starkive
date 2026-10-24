@@ -19,10 +19,10 @@ import (
 //     For a caller that doesn't take it out, it is still a 502 `HTTPError`
 //   - An answer with no `data` is a 502 `HTTPError`, not a partial result.
 //     So is an answer that isn't JSON, or whose `data` has another shape
-//   - A rate limit answered with 200 and an error, or with 403, wraps `errGitHubRateLimited`.
+//   - A rate limit answered with 200 and an error, or with 403, wraps `ErrGitHubRateLimited`.
 //     The one answered with 200 is also a 502 `HTTPError`, and the 403 one keeps GitHub's status.
 //     The last point used with no error is still a success
-//   - Any other HTTP failure is a `GitHubAPIError` that doesn't wrap `errGitHubRateLimited`
+//   - Any other HTTP failure is a `GitHubAPIError` that doesn't wrap `ErrGitHubRateLimited`
 func TestCallGraphQL(t *testing.T) {
 	ctx := context.Background()
 	var answer func(w http.ResponseWriter) // What the server answers. Set by each case
@@ -82,7 +82,7 @@ func TestCallGraphQL(t *testing.T) {
 	cases := []struct {
 		name          string
 		answer        func(w http.ResponseWriter)
-		isRateLimited bool // The error wraps `errGitHubRateLimited`
+		isRateLimited bool // The error wraps `ErrGitHubRateLimited`
 		wantStatus    int  // Status of the `HTTPError` it wraps. 0 if it wraps none
 		githubStatus  int  // Status of the `GitHubAPIError` it wraps. 0 if it wraps none
 	}{
@@ -130,7 +130,7 @@ func TestCallGraphQL(t *testing.T) {
 		if errors.As(err, &httpErr) {
 			status = httpErr.Status
 		}
-		if err == nil || errors.As(err, &nodeErrs) || errors.Is(err, errGitHubRateLimited) != c.isRateLimited ||
+		if err == nil || errors.As(err, &nodeErrs) || errors.Is(err, ErrGitHubRateLimited) != c.isRateLimited ||
 			status != c.wantStatus || !hasGitHubStatusOrNone(err, c.githubStatus) {
 			t.Errorf("%s: %v", c.name, err)
 		}
@@ -166,7 +166,7 @@ func TestIsTemporaryGitHubError(t *testing.T) {
 		{"no answer", ctx, newGitHubUnreachableError(errors.New("connection reset")), true},
 		{"GitHub failing", ctx, &GitHubAPIError{Status: http.StatusBadGateway}, true},
 		{"wrapped", ctx, fmt.Errorf("refresh readmes: %w", &GitHubAPIError{Status: http.StatusServiceUnavailable}), true},
-		{"rate limit", ctx, fmt.Errorf("%w: %w", errGitHubRateLimited, &GitHubAPIError{Status: http.StatusForbidden}), true},
+		{"rate limit", ctx, fmt.Errorf("%w: %w", ErrGitHubRateLimited, &GitHubAPIError{Status: http.StatusForbidden}), true},
 		{"branch kept moving", ctx, errBranchMoved, true},
 		{"token refused", ctx, &GitHubAPIError{Status: http.StatusUnauthorized, Message: "Bad credentials"}, false},
 		{"missing permission", ctx, &GitHubAPIError{Status: http.StatusForbidden, Message: "Resource not accessible by personal access token"}, false},
@@ -257,16 +257,16 @@ func TestCallGraphQLStopsAfterRateLimit(t *testing.T) {
 
 	ctx := withGitHubRateLimitMark(context.Background())
 	answer = failing
-	if err := callGraphQL(ctx, cfg, "query", nil, &data); errors.Is(err, errGitHubRateLimited) || requests != 1 {
+	if err := callGraphQL(ctx, cfg, "query", nil, &data); errors.Is(err, ErrGitHubRateLimited) || requests != 1 {
 		t.Errorf("server error: %v, requests %d", err, requests)
 	}
 	answer = limited
-	if err := callGraphQL(ctx, cfg, "query", nil, &data); !errors.Is(err, errGitHubRateLimited) || !strings.Contains(err.Error(), "(retry after 60s)") || requests != 2 {
+	if err := callGraphQL(ctx, cfg, "query", nil, &data); !errors.Is(err, ErrGitHubRateLimited) || !strings.Contains(err.Error(), "(retry after 60s)") || requests != 2 {
 		t.Errorf("rate limit: %v, requests %d", err, requests)
 	}
 	answer = ok
 	err := callGraphQL(ctx, cfg, "query", nil, &data)
-	if !errors.Is(err, errGitHubRateLimited) || !hasGitHubStatus(err, http.StatusForbidden) || !strings.Contains(err.Error(), "(retry after 60s)") || requests != 2 {
+	if !errors.Is(err, ErrGitHubRateLimited) || !hasGitHubStatus(err, http.StatusForbidden) || !strings.Contains(err.Error(), "(retry after 60s)") || requests != 2 {
 		t.Errorf("after the rate limit: %v, requests %d", err, requests)
 	}
 

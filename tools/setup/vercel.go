@@ -173,7 +173,7 @@ func checkVercelDeployCommit(ctx context.Context, apiBase string, vercelDeployCo
 }
 
 // Sends a GET to the GitHub API address `target` without authentication and returns the status code.
-// For an answer other than 200, 404 or 422, it returns GitHub's error as is
+// For an answer other than 200, 404 or 422, it returns GitHub's error as is (a rate limit answer wraps `core.ErrGitHubRateLimited`)
 func readPublicGitHubStatus(ctx context.Context, target string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -191,7 +191,7 @@ func readPublicGitHubStatus(ctx context.Context, target string) (int, error) {
 	case http.StatusOK, http.StatusNotFound, http.StatusUnprocessableEntity:
 		return res.StatusCode, nil
 	}
-	return 0, core.CheckGitHubResponse(res)
+	return 0, core.CheckGitHubResponseWithRateLimit(res)
 }
 
 // Suffix of the dashboard name.

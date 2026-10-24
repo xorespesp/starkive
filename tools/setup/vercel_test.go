@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,7 +47,8 @@ func TestParseGitRemoteURL(t *testing.T) {
 // If the repository can't be seen (private or missing), the error says a public repository is needed.
 // If the commit is missing (404, 422), the error says to push.
 // For a release executable (a stamped repository address), both errors say to download the latest setup tool instead.
-// Other failures give GitHub's error
+// Other failures give GitHub's error.
+// Only a rate limit answer wraps `core.ErrGitHubRateLimited`, so the caller can skip the check
 func TestCheckVercelDeployCommit(t *testing.T) {
 	sha := strings.Repeat("ab", 20)
 	cases := []struct {
@@ -61,6 +63,7 @@ func TestCheckVercelDeployCommit(t *testing.T) {
 		{"unpushed commit", false, http.StatusOK, http.StatusNotFound, "git push"},
 		{"commit GitHub doesn't know", false, http.StatusOK, http.StatusUnprocessableEntity, "git push"},
 		{"GitHub failing", false, http.StatusServiceUnavailable, http.StatusOK, "503"},
+		{"rate limit", false, http.StatusForbidden, http.StatusOK, "rate limit"},
 		{"release: private or missing repository", true, http.StatusNotFound, http.StatusOK, "download the latest setup tool"},
 		{"release: commit gone", true, http.StatusOK, http.StatusUnprocessableEntity, "Download the latest setup tool"},
 	}
@@ -76,6 +79,9 @@ func TestCheckVercelDeployCommit(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/repos/me/starkive":
+					if c.repo == http.StatusForbidden {
+						w.Header().Set("X-RateLimit-Remaining", "0") // What GitHub sends when no requests are left (docs)
+					}
 					w.WriteHeader(c.repo)
 				case "/repos/me/starkive/commits/" + sha:
 					w.WriteHeader(c.commit)
@@ -91,6 +97,9 @@ func TestCheckVercelDeployCommit(t *testing.T) {
 				t.Errorf("got %v", err)
 			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
 				t.Errorf("got %v, want an error with %q", err, c.wantErr)
+			}
+			if isRateLimited := errors.Is(err, core.ErrGitHubRateLimited); isRateLimited != (c.name == "rate limit") {
+				t.Errorf("got %v, rate limit error: %v", err, isRateLimited)
 			}
 		})
 	}

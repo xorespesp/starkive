@@ -438,7 +438,7 @@ var errReadmesAllFailed = errors.New("every README call of a batch failed")
 //   - The READMEs fetched: item ID -> README.
 //     An item that GitHub can't tell about now, or whose call failed, isn't in it, and is asked again later
 //   - Why not every call was answered: `errReadmesOutOfTime` (not sent in time, or cut at `fetchEndBy`),
-//     or an error that wraps `errGitHubRateLimited`.
+//     or an error that wraps `ErrGitHubRateLimited`.
 //     If every call failed, an error that wraps `errReadmesAllFailed` and the failure of one call, so no more batches are asked.
 //     A failure that needs a person is picked over one that passes on its own.
 //     `nil` if every call ended and at least one succeeded
@@ -496,7 +496,7 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 				})
 				mu.Lock()
 				switch {
-				case errors.Is(err, errGitHubRateLimited):
+				case errors.Is(err, ErrGitHubRateLimited):
 					if stopErr == nil {
 						stopErr = err
 					}

@@ -1,6 +1,6 @@
 // Shared code for calling the GitHub API.
 // It sends requests (`CallGitHubAPI`), turns failure answers into errors (`CheckGitHubResponse`, `GitHubAPIError`),
-// tells rate limit answers apart (`checkGitHubResponseWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
+// tells rate limit answers apart (`CheckGitHubResponseWithRateLimit`), runs GraphQL queries (`callGraphQL`, `graphQLErrors`),
 // stops GraphQL queries for the rest of a request after a rate limit answer (`gitHubRateLimitMark`),
 // reads GitHub's JSON answers (`DecodeGitHubResponse`),
 // turns an answer that never came or can't be read into a 502 (`newGitHubUnreachableError`, `newGitHubUnreadableError`),
@@ -159,7 +159,7 @@ func newGitHubUnreadableError(err error) error {
 // Returns:
 //   - `graphQLErrors` if the answer has errors along with `data` (a partial result).
 //     `dst` is filled even then
-//   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached.
+//   - An error that wraps `ErrGitHubRateLimited` if GitHub says the rate limit was reached.
 //     It also wraps a 502 `HTTPError` when the answer was 200, or the `GitHubAPIError` when it was 403 or 429.
 //     If an earlier query of the same request got such an answer, it sends nothing and returns an error that wraps that answer
 //     (`gitHubRateLimitMark`)
@@ -184,7 +184,7 @@ func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables ma
 		return err
 	}
 	defer res.Body.Close()
-	if err := checkGitHubResponseWithRateLimit(res); err != nil {
+	if err := CheckGitHubResponseWithRateLimit(res); err != nil {
 		return err
 	}
 	var result struct {
@@ -196,7 +196,7 @@ func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables ma
 	}
 	for _, e := range result.Errors {
 		if e.Type == "RATE_LIMITED" || res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "" {
-			return fmt.Errorf("%w%s: %w", errGitHubRateLimited, formatGitHubRetryTime(res.Header), Errorf(http.StatusBadGateway, "GitHub GraphQL: %s", e.Message)) // Two `%w`: `errors.Is` and `errors.As` find both errors
+			return fmt.Errorf("%w%s: %w", ErrGitHubRateLimited, formatGitHubRetryTime(res.Header), Errorf(http.StatusBadGateway, "GitHub GraphQL: %s", e.Message)) // Two `%w`: `errors.Is` and `errors.As` find both errors
 		}
 	}
 	if len(result.Data) == 0 || string(result.Data) == "null" {
@@ -264,8 +264,9 @@ func (errs graphQLErrors) hasErrorInNode(index int) bool {
 	return false
 }
 
-// Error for a GitHub answer that says the rate limit was reached
-var errGitHubRateLimited = errors.New("GitHub rate limit reached")
+// Error for a GitHub answer that says the rate limit was reached.
+// A rate limit error wraps it (`CheckGitHubResponseWithRateLimit`, `callGraphQL`), so check with `errors.Is`
+var ErrGitHubRateLimited = errors.New("GitHub rate limit reached")
 
 // Mark that remembers the first rate limit answer to a GraphQL query during one request to our API.
 // `ServeAPIRequest` puts a new one in the `ctx` of each request (`withGitHubRateLimitMark`), so it lives as long as that request.
@@ -286,7 +287,7 @@ type gitHubRateLimitMarkKey struct{}
 
 // Keeps `err` if it is the first rate limit answer of the request.
 func (m *gitHubRateLimitMark) recordIfRateLimited(err error) {
-	if m == nil || !errors.Is(err, errGitHubRateLimited) {
+	if m == nil || !errors.Is(err, ErrGitHubRateLimited) {
 		return
 	}
 	m.mu.Lock()
@@ -338,10 +339,10 @@ func formatGitHubRetryTime(header http.Header) string {
 	return ""
 }
 
-// Checks a GitHub answer like `CheckGitHubResponse`, and wraps a rate limit answer with `errGitHubRateLimited`.
+// Checks a GitHub answer like `CheckGitHubResponse`, and wraps a rate limit answer with `ErrGitHubRateLimited`.
 // A rate limit answer is 429, or 403 with no requests left, a `Retry-After` header, or "rate limit" in the message (docs).
 // When to retry goes into the message (`formatGitHubRetryTime`).
-func checkGitHubResponseWithRateLimit(res *http.Response) error {
+func CheckGitHubResponseWithRateLimit(res *http.Response) error {
 	err := CheckGitHubResponse(res)
 	var apiErr *GitHubAPIError
 	if !errors.As(err, &apiErr) {
@@ -351,7 +352,7 @@ func checkGitHubResponseWithRateLimit(res *http.Response) error {
 		(res.StatusCode == http.StatusForbidden && (res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "" ||
 			strings.Contains(strings.ToLower(apiErr.Message), "rate limit")))
 	if isRateLimited {
-		return fmt.Errorf("%w%s: %w", errGitHubRateLimited, formatGitHubRetryTime(res.Header), err) // Two `%w`: `errors.Is` finds both errors
+		return fmt.Errorf("%w%s: %w", ErrGitHubRateLimited, formatGitHubRetryTime(res.Header), err) // Two `%w`: `errors.Is` finds both errors
 	}
 	return err
 }
@@ -390,7 +391,7 @@ func hasGitHubStatusBetween(err error, lowest int, highest int) bool {
 
 // Reports whether error `err` is a GitHub failure that passes on its own, so trying again later is enough.
 // These are: the deadline of `ctx` cut the work, no answer came (`gitHubUnreachableError`),
-// GitHub failed on its side (5xx), the rate limit was reached (`errGitHubRateLimited`),
+// GitHub failed on its side (5xx), the rate limit was reached (`ErrGitHubRateLimited`),
 // or other commits kept moving the branch (`errBranchMoved`).
 //
 // NOTE: Any other error counts as one that needs a person, so a broken setup isn't missed.
@@ -403,7 +404,7 @@ func hasGitHubStatusBetween(err error, lowest int, highest int) bool {
 func isTemporaryGitHubError(ctx context.Context, err error) bool {
 	var unreachable *gitHubUnreachableError
 	switch {
-	case errors.Is(err, errGitHubRateLimited), errors.Is(err, errBranchMoved):
+	case errors.Is(err, ErrGitHubRateLimited), errors.Is(err, errBranchMoved):
 		return true
 	case hasGitHubStatusBetween(err, 500, 599): // GitHub failed on its side
 		return true

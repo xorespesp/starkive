@@ -43,7 +43,7 @@ func TestServeAPIRequestGivesNewRateLimitMark(t *testing.T) {
 		ServeAPIRequest(httptest.NewRecorder(), req, func(w http.ResponseWriter, r *http.Request) error {
 			mark := readGitHubRateLimitMark(r.Context())
 			marks = append(marks, mark)
-			mark.recordIfRateLimited(fmt.Errorf("%w: GitHub 403", errGitHubRateLimited))
+			mark.recordIfRateLimited(fmt.Errorf("%w: GitHub 403", ErrGitHubRateLimited))
 			return nil
 		})
 	}

@@ -184,7 +184,7 @@ const maxReadmeContentQueries = 3
 //     `nil` where it can't tell now: an ID that isn't a repository, a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`,
 //     a file gone between the queries, or a repository whose next pick is still unread after `maxReadmeContentQueries` content queries or after a later query failed.
 //     Ask those again later
-//   - An error that wraps `errGitHubRateLimited` if GitHub says the rate limit was reached before the first content query is answered (`callGraphQL`).
+//   - An error that wraps `ErrGitHubRateLimited` if GitHub says the rate limit was reached before the first content query is answered (`callGraphQL`).
 //     Any other error means a query failed, including one cut at the deadline (`context.DeadlineExceeded`), and says nothing about the READMEs.
 //     If a later query fails, even for the rate limit, the READMEs settled so far are returned without an error
 //

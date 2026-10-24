@@ -120,7 +120,7 @@ type testReadmeRepo struct {
 //     and a file gone before the content query give `nil`, so they are asked again later.
 //     The test server answers like GitHub: only the fields asked for, each folder by the path in its expression,
 //     each file by its alias and its own path variable, and an error for a variable that isn't declared with the right type
-//   - A rate limit passes through as an error that wraps `errGitHubRateLimited` (each kind is tested in `TestCallGraphQL`).
+//   - A rate limit passes through as an error that wraps `ErrGitHubRateLimited` (each kind is tested in `TestCallGraphQL`).
 //     A failed query, an answer with no data and an answer whose node count doesn't match are errors that don't wrap it.
 //     The whole call fails even when only the folder listing or the content query of the first round fails
 //   - A call whose deadline has passed fails at once, and a query still waiting at the deadline fails then.
@@ -432,7 +432,7 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		name          string
 		query         string // Kind of the query that fails. Empty for every kind
 		answer        func(w http.ResponseWriter)
-		isRateLimited bool // The error wraps `errGitHubRateLimited`
+		isRateLimited bool // The error wraps `ErrGitHubRateLimited`
 	}{
 		{"rate limit with 200", "", func(w http.ResponseWriter) {
 			w.Header().Set("X-RateLimit-Remaining", "0")
@@ -467,7 +467,7 @@ func TestFetchReadmesByNodeIDs(t *testing.T) {
 		failQuery = c.query
 		mu.Unlock()
 		got, err := FetchReadmesByNodeIDs(ctx, cfg, []string{"R_md", "R_docs"})
-		if err == nil || got != nil || errors.Is(err, errGitHubRateLimited) != c.isRateLimited {
+		if err == nil || got != nil || errors.Is(err, ErrGitHubRateLimited) != c.isRateLimited {
 			t.Errorf("%s: %v, %v", c.name, got, err)
 		}
 	}

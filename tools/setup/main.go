@@ -158,6 +158,12 @@ func main() {
 		// Printed before the GitHub check, so the user knows what goes to Vercel even if the check fails
 		fmt.Println("Vercel deploy source: " + vercelDeployCommit.buildTreeURL())
 		err = checkVercelDeployCommit(ctx, readGitHubAPIURL(), vercelDeployCommit)
+		// The check asks without a token, so its limit is shared by everyone on the same IP (60 an hour, docs).
+		// It only catches a mistake early, so a rate limit skips it instead of stopping the setup
+		if errors.Is(err, core.ErrGitHubRateLimited) {
+			fmt.Println("Note: couldn't check the commit on GitHub (" + err.Error() + "). Make sure " + vercelDeployCommit.url + " is public and has commit " + vercelDeployCommit.sha[:7] + ".")
+			err = nil
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Setup stopped: "+err.Error())

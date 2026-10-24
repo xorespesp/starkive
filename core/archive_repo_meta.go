@@ -152,7 +152,7 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 					if failure == nil || isTemporaryGitHubError(ctx, failure) {
 						failure = err
 					}
-					if rateLimited == nil && errors.Is(err, errGitHubRateLimited) {
+					if rateLimited == nil && errors.Is(err, ErrGitHubRateLimited) {
 						rateLimited = err
 					}
 					mu.Unlock()
