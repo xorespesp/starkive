@@ -185,7 +185,9 @@ func FindDBRepo(ctx context.Context, cfg *EnvConfig) (*DBRepo, error) {
 	key := buildEnvCacheKey(cfg)
 	result, found := dbRepoCache.get(key)
 	if !found {
+		timingStep := beginServerTimingStep(ctx, "db-repo") // Shows only when the repository wasn't in the cache
 		result.repo, result.err = fetchDBRepoByID(ctx, cfg)
+		timingStep.end()
 		ttl := dbRepoNotReadyTTL
 		if result.err == nil && result.repo.state == DBRepoStarkive {
 			ttl = dbRepoReadyTTL

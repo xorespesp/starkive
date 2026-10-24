@@ -5,6 +5,7 @@
 //
 //	go run ./tools/dev-server            http://localhost:3000
 //	go run ./tools/dev-server -addr :8080
+//	go run -tags timing ./tools/dev-server   with step times in a `Server-Timing` header (`core/server_timing.go`)
 //
 // Run it from the repository root (it reads `public/`, `vercel.json` and `.env.local` from there).
 // Environment variables come from the real environment or from `.env.local` (KEY=VALUE lines, not committed to git).

@@ -245,7 +245,10 @@ func readBranchHead(ctx context.Context, repo *DBRepo) (branchHead, error) {
 			SHA string `json:"sha"`
 		} `json:"tree"`
 	}
-	if err := callDBRepoAPI(ctx, repo, http.MethodGet, "/git/commits/"+sha, nil, &commit); err != nil {
+	timingStep := beginServerTimingStep(ctx, "w-head-commit") // Shows only when the commit is read
+	err = callDBRepoAPI(ctx, repo, http.MethodGet, "/git/commits/"+sha, nil, &commit)
+	timingStep.end()
+	if err != nil {
 		return branchHead{}, err
 	}
 	head := branchHead{commit: sha, tree: commit.Tree.SHA}
@@ -383,15 +386,21 @@ func UpdateDBRepoFiles(ctx context.Context, repo *DBRepo, paths []string, buildF
 	// Compare-and-swap loop: the commit is built on the branch tip that was read, and the branch moves only if it is still there.
 	// If another commit (another device, a sync) got in first, the files are read and the commit is built again on the new tip
 	for attempt := 1; ; attempt++ {
+		timingStep := beginServerTimingStep(ctx, "w-head")
 		head, err := readBranchHead(ctx, repo)
+		timingStep.end()
 		if err != nil {
 			return err
 		}
+		timingStep = beginServerTimingStep(ctx, "w-read")
 		filesAtCommit, err := readDBRepoFilesAtCommit(ctx, repo, paths, head.commit)
+		timingStep.end()
 		if err != nil {
 			return err
 		}
+		timingStep = beginServerTimingStep(ctx, "w-build")
 		changes, err := buildFileChangesCommit(filesAtCommit)
+		timingStep.end()
 		if err != nil {
 			return err
 		}
@@ -483,7 +492,10 @@ func commitFiles(ctx context.Context, repo *DBRepo, head branchHead, changes Fil
 	var tree struct {
 		SHA string `json:"sha"`
 	}
-	if err := callDBRepoAPI(ctx, repo, http.MethodPost, "/git/trees", map[string]any{"base_tree": head.tree, "tree": entries}, &tree); err != nil {
+	timingStep := beginServerTimingStep(ctx, "w-tree")
+	err := callDBRepoAPI(ctx, repo, http.MethodPost, "/git/trees", map[string]any{"base_tree": head.tree, "tree": entries}, &tree)
+	timingStep.end()
+	if err != nil {
 		return err
 	}
 	if tree.SHA == head.tree { // Every change matched what was already there, so a commit would change nothing
@@ -492,11 +504,16 @@ func commitFiles(ctx context.Context, repo *DBRepo, head branchHead, changes Fil
 	var commit struct {
 		SHA string `json:"sha"`
 	}
-	if err := callDBRepoAPI(ctx, repo, http.MethodPost, "/git/commits", map[string]any{"message": changes.Message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit); err != nil {
+	timingStep = beginServerTimingStep(ctx, "w-commit")
+	err = callDBRepoAPI(ctx, repo, http.MethodPost, "/git/commits", map[string]any{"message": changes.Message.String(), "tree": tree.SHA, "parents": []string{head.commit}}, &commit)
+	timingStep.end()
+	if err != nil {
 		return err
 	}
 	// Moves without force. If the branch moved in the meantime, GitHub refuses
-	err := callDBRepoAPI(ctx, repo, http.MethodPatch, "/git/refs/heads/"+repo.branch, map[string]any{"sha": commit.SHA, "force": false}, nil)
+	timingStep = beginServerTimingStep(ctx, "w-move")
+	err = callDBRepoAPI(ctx, repo, http.MethodPatch, "/git/refs/heads/"+repo.branch, map[string]any{"sha": commit.SHA, "force": false}, nil)
+	timingStep.end()
 	// Kept once the move is known to have happened, so the next write on this instance can skip reading this commit.
 	// `tree.SHA` is the tree the commit was made from
 	madeHead := branchHead{commit: commit.SHA, tree: tree.SHA}

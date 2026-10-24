@@ -60,6 +60,8 @@ const requestTimeLimit = 290 * time.Second
 //     A panic in the handler is answered the same way (`RunWithPanicAsError`).
 //     If the handler had already started its answer, the status can't change any more, and the log shows the cause
 //
+// In a build with the `timing` build tag, the answer also carries the times of the steps (`Server-Timing`, `server_timing.go`).
+//
 // Args:
 //   - `handle`: Per-method handler. Returns `nil` when it has written the whole answer, or an error on failure
 //
@@ -73,8 +75,12 @@ const requestTimeLimit = 290 * time.Second
 func ServeAPIRequest(w http.ResponseWriter, r *http.Request, handle func(http.ResponseWriter, *http.Request) error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), requestTimeLimit)
 	defer cancel() // `cancel` frees the timer of the deadline when the request ends
-	ctx = addGitHubRateLimitMark(ctx)
-	err := RunWithPanicAsError(func() error { return handle(w, r.WithContext(ctx)) })
+	ctx = withGitHubRateLimitMark(ctx)
+	ctx = withServerTimings(ctx)
+	// The handler and the error answers below write through `wrappedWriter`.
+	// In a `timing` build, it adds the step times as a header when the headers go out. Otherwise it is `w` itself
+	wrappedWriter := wrapResponseWriterWithServerTiming(ctx, w)
+	err := RunWithPanicAsError(func() error { return handle(wrappedWriter, r.WithContext(ctx)) })
 	if err == nil {
 		return
 	}
@@ -86,20 +92,20 @@ func ServeAPIRequest(w http.ResponseWriter, r *http.Request, handle func(http.Re
 		}
 		for key, values := range httpErr.Header {
 			for _, v := range values {
-				w.Header().Add(key, v)
+				wrappedWriter.Header().Add(key, v)
 			}
 		}
-		WriteAPIJSONResponse(w, httpErr.Status, map[string]string{"error": httpErr.Message})
+		WriteAPIJSONResponse(wrappedWriter, httpErr.Status, map[string]string{"error": httpErr.Message})
 		return
 	}
 	var githubErr *GitHubAPIError
 	if errors.As(err, &githubErr) {
-		WriteAPIJSONResponse(w, http.StatusBadGateway, map[string]string{"error": githubErr.Error()})
+		WriteAPIJSONResponse(wrappedWriter, http.StatusBadGateway, map[string]string{"error": githubErr.Error()})
 		return
 	}
 
 	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
-	WriteAPIJSONResponse(w, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
+	WriteAPIJSONResponse(wrappedWriter, http.StatusInternalServerError, map[string]string{"error": "Internal server error"})
 }
 
 // Answers 405 to an HTTP method that isn't supported
@@ -138,7 +144,9 @@ func WriteAPIJSONResponse(w http.ResponseWriter, status int, body any) {
 // NOTE: A data file is already the JSON array the browser needs, so it isn't decoded and encoded again.
 func WriteAPIDBFileResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo, path string) error {
 	ctx := r.Context() // The deadline that `ServeAPIRequest` set for this request
+	timingStep := beginServerTimingStep(ctx, "github-read")
 	content, err := ReadDBRepoFile(ctx, repo, path)
+	timingStep.endWithDesc(path)
 	if err != nil {
 		return err
 	}

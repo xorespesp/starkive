@@ -255,7 +255,7 @@ func TestCallGraphQLStopsAfterRateLimit(t *testing.T) {
 		http.Error(w, `{"message":"You have exceeded a secondary rate limit"}`, http.StatusForbidden)
 	}
 
-	ctx := addGitHubRateLimitMark(context.Background())
+	ctx := withGitHubRateLimitMark(context.Background())
 	answer = failing
 	if err := callGraphQL(ctx, cfg, "query", nil, &data); errors.Is(err, errGitHubRateLimited) || requests != 1 {
 		t.Errorf("server error: %v, requests %d", err, requests)

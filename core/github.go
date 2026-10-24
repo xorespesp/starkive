@@ -268,7 +268,7 @@ func (errs graphQLErrors) hasErrorInNode(index int) bool {
 var errGitHubRateLimited = errors.New("GitHub rate limit reached")
 
 // Mark that remembers the first rate limit answer to a GraphQL query during one request to our API.
-// `ServeAPIRequest` puts a new one in the `ctx` of each request (`addGitHubRateLimitMark`), so it lives as long as that request.
+// `ServeAPIRequest` puts a new one in the `ctx` of each request (`withGitHubRateLimitMark`), so it lives as long as that request.
 // Once it is set, `callGraphQL` sends no more queries in that request.
 //
 // NOTE: GitHub counts rate limits per account, and sending more after a rate limit answer can make the limit last longer (docs).
@@ -311,7 +311,7 @@ func (m *gitHubRateLimitMark) checkNotLimited() error {
 }
 
 // Returns a copy of `ctx` that carries a new, unset `gitHubRateLimitMark`.
-func addGitHubRateLimitMark(ctx context.Context) context.Context {
+func withGitHubRateLimitMark(ctx context.Context) context.Context {
 	return context.WithValue(ctx, gitHubRateLimitMarkKey{}, &gitHubRateLimitMark{})
 }
 
