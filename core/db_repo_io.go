@@ -197,22 +197,6 @@ type branchHead struct {
 	tree   string // Tree sha of that commit. Used as the base when making a new tree
 }
 
-// The last branch tip that this instance read or made, for each DB repository and branch.
-// The key is `buildDBRepoCacheKey`.
-// A write uses it to skip reading the tip commit to learn its tree, when the branch still points to the same commit (`readBranchHead`).
-//
-// NOTE: A commit sha is a hash of the commit's content, which includes its tree.
-// So the tree of a commit never changes, and a kept pair is never wrong.
-// When the branch moves to a commit this instance doesn't know, the tree is read again.
-// But a wrong tree here would be the base of the next commit, and that commit would silently undo the files changed since.
-// So only a commit and the tree it was made from go in together.
-var lastBranchHeadCache cache[branchHead]
-
-// How long `lastBranchHeadCache` keeps a branch tip.
-// A kept tip never becomes wrong, and only one is kept for each branch.
-// So it is kept long, for the next write that the same instance gets
-const lastBranchHeadTTL = time.Hour
-
 // Reads the commit sha that the default branch points to.
 //
 // Returns:
@@ -229,31 +213,41 @@ func readBranchCommit(ctx context.Context, repo *DBRepo) (string, error) {
 	return ref.Object.SHA, nil
 }
 
-// Reads the commit that the default branch points to, and its tree.
-// The commit isn't read again if it is the one in `lastBranchHeadCache`, whose tree is known.
+// Builds the part after `/repos/<repository>` of the request that `readBranchHead` sends for `branch`.
+// The request lists the commits from that branch, one per page.
+func buildBranchTipAPISuffix(branch string) string {
+	return "/commits?per_page=1&sha=" + url.QueryEscape("refs/heads/"+branch)
+}
+
+// Builds the API path of the request that `readBranchHead` sends for the default branch.
+// It is exported so the setup tool can wait for a new branch with the same request that writes start with.
+// A 200 answer with a commit in it means that a write can read the branch tip.
+func (repo *DBRepo) BuildBranchTipAPIPath() string {
+	return repo.BuildAPIPath(buildBranchTipAPISuffix(repo.branch))
+}
+
+// Reads the commit that the default branch points to, and its tree, with one request.
+//
+// NOTE: The list of commits from the branch gives both in its first entry, without the changed files (docs, measured).
+// The branch is named in full (`refs/heads/...`), because git looks up a short name as a tag before a branch (git docs).
+// The pair comes from GitHub in one answer, so the tree always belongs to the commit.
+// A tree from another commit would be the base of the next commit, and that commit would silently undo the files changed since.
 func readBranchHead(ctx context.Context, repo *DBRepo) (branchHead, error) {
-	sha, err := readBranchCommit(ctx, repo)
-	if err != nil {
+	var commits []struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Tree struct {
+				SHA string `json:"sha"`
+			} `json:"tree"`
+		} `json:"commit"`
+	}
+	if err := callDBRepoAPI(ctx, repo, http.MethodGet, buildBranchTipAPISuffix(repo.branch), nil, &commits); err != nil {
 		return branchHead{}, err
 	}
-	key := buildDBRepoCacheKey(repo)
-	if last, ok := lastBranchHeadCache.get(key); ok && last.commit == sha {
-		return last, nil
+	if len(commits) == 0 || commits[0].SHA == "" || commits[0].Commit.Tree.SHA == "" {
+		return branchHead{}, newGitHubUnreadableError(fmt.Errorf("GitHub gave no commit for branch %s", repo.branch))
 	}
-	var commit struct {
-		Tree struct {
-			SHA string `json:"sha"`
-		} `json:"tree"`
-	}
-	timingStep := beginServerTimingStep(ctx, "w-head-commit") // Shows only when the commit is read
-	err = callDBRepoAPI(ctx, repo, http.MethodGet, "/git/commits/"+sha, nil, &commit)
-	timingStep.end()
-	if err != nil {
-		return branchHead{}, err
-	}
-	head := branchHead{commit: sha, tree: commit.Tree.SHA}
-	lastBranchHeadCache.put(key, head, lastBranchHeadTTL)
-	return head, nil
+	return branchHead{commit: commits[0].SHA, tree: commits[0].Commit.Tree.SHA}, nil
 }
 
 // Asks GitHub whether a branch contains a commit.
@@ -371,9 +365,8 @@ func (changes FileChangesCommit) check() error {
 //     Errors while making the tree or the commit are not conflicts, so they are returned right away.
 //   - `buildFileChangesCommit` can be called more than once.
 //     If it leaves results in outer variables, it must set them from scratch on every call.
-//   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
+//   - One attempt costs "4 + number of files read" GitHub requests (branch tip, one per file read, tree, commit, branch move),
 //     plus the requests that `buildFileChangesCommit` sends.
-//     The read of the commit is skipped when the branch points to the commit in `lastBranchHeadCache`.
 //     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
 //     That one is sent again on every attempt.
 //     This is the price of putting several files in one commit with no in-between state.
@@ -514,11 +507,7 @@ func commitFiles(ctx context.Context, repo *DBRepo, head branchHead, changes Fil
 	timingStep = beginServerTimingStep(ctx, "w-move")
 	err = callDBRepoAPI(ctx, repo, http.MethodPatch, "/git/refs/heads/"+repo.branch, map[string]any{"sha": commit.SHA, "force": false}, nil)
 	timingStep.end()
-	// Kept once the move is known to have happened, so the next write on this instance can skip reading this commit.
-	// `tree.SHA` is the tree the commit was made from
-	madeHead := branchHead{commit: commit.SHA, tree: tree.SHA}
 	if err == nil {
-		lastBranchHeadCache.put(buildDBRepoCacheKey(repo), madeHead, lastBranchHeadTTL)
 		return nil
 	}
 	// Doesn't guess the cause from the status code.
@@ -532,7 +521,6 @@ func commitFiles(ctx context.Context, repo *DBRepo, head branchHead, changes Fil
 	case compareErr != nil:
 		return err
 	case included: // The move happened, only the response was lost
-		lastBranchHeadCache.put(buildDBRepoCacheKey(repo), madeHead, lastBranchHeadTTL)
 		return nil
 	}
 	return errBranchMoved // Another commit landed in the meantime

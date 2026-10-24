@@ -403,10 +403,8 @@ func newFakeDBRepo(t *testing.T, existing []string) (*core.DBRepo, *fakeDBRepoWr
 			got.count++
 		}
 		switch {
-		case r.URL.Path == "/repos/me/archive/git/ref/heads/main":
-			w.Write([]byte(`{"object":{"sha":"c1"}}`))
-		case r.URL.Path == "/repos/me/archive/git/commits/c1":
-			w.Write([]byte(`{"tree":{"sha":"t1"}}`))
+		case r.URL.Path == "/repos/me/archive/commits" && r.URL.Query().Get("sha") == "refs/heads/main":
+			w.Write([]byte(`[{"sha":"c1","commit":{"tree":{"sha":"t1"}}}]`))
 		case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
 			for _, path := range existing {
 				if r.URL.Path == "/repos/me/archive/contents/"+path {
@@ -480,6 +478,41 @@ func findTestDBRepo(t *testing.T, apiURL string) *core.DBRepo {
 		t.Fatal(err)
 	}
 	return dbRepo
+}
+
+// Guards the wait after the first commit of an empty DB repository (fake GitHub).
+// It waits with the request that writes start with (`core.DBRepo.BuildBranchTipAPIPath`),
+// until that request gives a commit, here on the third read.
+// A 409 (empty repository) and a 200 with no commit both mean "not yet"
+func TestInitializeDBRepoWaitsForTheBranchTip(t *testing.T) {
+	reads := 0
+	var dbRepo *core.DBRepo
+	srv := httptest.NewServer(answerDBRepoLookup(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/me/archive/contents/"+core.MarkerDBPath:
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path+"?"+r.URL.RawQuery == dbRepo.BuildBranchTipAPIPath():
+			reads++
+			switch reads {
+			case 1:
+				http.Error(w, `{"message":"Git Repository is empty."}`, http.StatusConflict)
+				return
+			case 2:
+				w.Write([]byte(`[]`))
+				return
+			}
+			w.Write([]byte(`[{"sha":"c1","commit":{"tree":{"sha":"t1"}}}]`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dbRepo = findTestDBRepo(t, srv.URL)
+	if err := initializeDBRepo(context.Background(), dbRepo); err != nil || reads != 3 {
+		t.Errorf("got %v after %d reads", err, reads)
+	}
 }
 
 // Guards the initial files of the DB repository (fake GitHub).

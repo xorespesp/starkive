@@ -65,7 +65,6 @@ type fakeGitHub struct {
 	interfereAll        bool                          // If `true`, another device commits first on every branch move (constant conflicts)
 	treeStatus          int                           // If not 0, tree creation fails with this status code
 	treeCalls           int                           // Number of tree creation requests
-	commitReads         int                           // Number of requests that read a commit (`/git/commits/<sha>`)
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	blobs               map[string]string             // Created blob sha -> content
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
@@ -317,13 +316,16 @@ func (f *fakeGitHub) readFilesAt(commit string) map[string]string {
 }
 
 // Returns the files of a tree sha.
-// It is `tree-of-<commit sha>` from reading a commit, or a tree made with the tree API (`trees`), which a commit made on this fake has.
+// It is `tree-of-<commit sha>` from reading the branch tip, or a tree made with the tree API (`trees`).
 // Call it while holding `mu`.
 func (f *fakeGitHub) readFilesOfTree(tree string) map[string]string {
 	if files, ok := f.trees[tree]; ok {
 		return files
 	}
-	return f.readFilesAt(strings.TrimPrefix(tree, "tree-of-"))
+	if commit, ok := strings.CutPrefix(tree, "tree-of-"); ok { // A commit sha isn't a tree sha, so it isn't accepted as one
+		return f.readFilesAt(commit)
+	}
+	return nil
 }
 
 // Moves the branch to a new commit.
@@ -541,11 +543,19 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"object":{"sha":%q}}`, f.head)
 
-	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/commits/") && r.Method == http.MethodGet:
-		// Read a commit.
-		// The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
-		f.commitReads++
-		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
+	case r.URL.Path == "/repos/me/archive/commits" && r.Method == http.MethodGet:
+		// List commits from a branch, newest first: the first entry is the branch tip with its tree (no changed files).
+		// The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files.
+		// It answers only the full branch name with one commit per page. A short name can also mean a tag
+		if f.repoEmpty {
+			http.Error(w, `{"message":"Git Repository is empty."}`, http.StatusConflict)
+			return
+		}
+		if r.URL.Query().Get("sha") != "refs/heads/main" || r.URL.Query().Get("per_page") != "1" {
+			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `[{"sha":%q,"commit":{"tree":{"sha":"tree-of-%s"}}}]`, f.head, f.head)
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/") && r.Method == http.MethodGet:
 		// List a folder at a commit (`<commit sha>:<folder path>`, `recursive=1`).

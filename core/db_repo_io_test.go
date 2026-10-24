@@ -170,14 +170,22 @@ func TestReadDBRepoFileCutInTheBodyIsBadGateway(t *testing.T) {
 	}
 }
 
-// Tests that a REST answer that isn't the expected JSON is a 502, like any GitHub failure (`callDBRepoAPI`, `DecodeGitHubResponse`)
+// Tests that a REST answer that isn't the expected JSON is a 502, like any GitHub failure (`callDBRepoAPI`, `DecodeGitHubResponse`).
+// A branch tip answer with no commit, or with a commit but no tree, is the same
 func TestUnreadableRESTAnswerIsBadGateway(t *testing.T) {
 	ctx := context.Background()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "<html>Unicorn!</html>")
-	}))
-	t.Cleanup(server.Close)
-	if _, err := readBranchCommit(ctx, newTestDBRepo(server.URL)); !isBadGateway(err) {
-		t.Errorf("HTML answer: %v", err)
+	for _, answer := range []string{"<html>Unicorn!</html>", "[]", "[{}]", `[{"sha":"c1"}]`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, answer)
+		}))
+		t.Cleanup(server.Close)
+		if answer == "<html>Unicorn!</html>" {
+			if _, err := readBranchCommit(ctx, newTestDBRepo(server.URL)); !isBadGateway(err) {
+				t.Errorf("branch read, %s: %v", answer, err)
+			}
+		}
+		if _, err := readBranchHead(ctx, newTestDBRepo(server.URL)); !isBadGateway(err) {
+			t.Errorf("branch tip read, %s: %v", answer, err)
+		}
 	}
 }

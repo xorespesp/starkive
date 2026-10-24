@@ -26,7 +26,8 @@ import (
 // NOTE: On an empty repository, the Git Data API (reading a branch, creating a tree) answers 409 (measured).
 // So only this first commit is written with the Contents API.
 // Right after the write, reading the branch may not show the first commit for a short time (read delay after a write, measured).
-// It waits until the commit shows up, so the next request that reads the branch doesn't fail.
+// It waits until the commit shows up in the same request that writes start with (`core.DBRepo.BuildBranchTipAPIPath`),
+// so the next write doesn't fail.
 func initializeDBRepo(ctx context.Context, dbRepo *core.DBRepo) error {
 	body := map[string]string{
 		"message": "first commit",
@@ -45,10 +46,12 @@ func initializeDBRepo(ctx context.Context, dbRepo *core.DBRepo) error {
 	// It reads up to 5 times, and waits 0.3, 0.6, ... 1.2 seconds after each failed read but the last
 	const maxReads = 5
 	for attempt := 1; attempt <= maxReads; attempt++ {
-		res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), dbRepo.BuildAPIPath("/git/ref/heads/"+dbRepo.Branch()), core.GitHubAPIRequest{})
+		res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), dbRepo.BuildBranchTipAPIPath(), core.GitHubAPIRequest{})
 		if err == nil {
+			var commits []json.RawMessage
+			isShown := res.StatusCode == http.StatusOK && json.NewDecoder(res.Body).Decode(&commits) == nil && len(commits) > 0
 			res.Body.Close()
-			if res.StatusCode == http.StatusOK {
+			if isShown {
 				return nil
 			}
 		}
