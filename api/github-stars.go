@@ -29,7 +29,7 @@ const maxStarredPageNumber = 1000
 // Answers 400 if `page` isn't a number or is outside 1 to `maxStarredPageNumber`.
 //
 // NOTE: The GitHub star list membership is only shown in the dialog.
-// When adding to the archive, the server reads it again from GitHub and decides there (`core.ArchiveStarredRepos`).
+// When adding to the archive, the server reads it again from GitHub and decides there (`core.AddStarredReposToStarCatalog`).
 // So if only this part can't be read, it still returns the Stars and just adds a failure flag.
 // The details go only to the server log.
 func handleGitHubStarsGet(w http.ResponseWriter, r *http.Request) error {

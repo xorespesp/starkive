@@ -1,5 +1,5 @@
 // Reading from GitHub: my Stars (`FetchStarredPage`, `FetchAllStarredRepos`) and my GitHub star lists (`FetchGitHubStarListsByRepo`).
-// Putting Stars into the archive is in `archive_star_items.go`.
+// Putting Stars into the archive is in `archive_stars.go`.
 package core
 
 import (

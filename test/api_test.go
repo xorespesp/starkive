@@ -1917,7 +1917,7 @@ func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
 	all := fetchAllStarred(t, cookie)
 
 	// While the page was open, the daily sync archived the first repository first
-	core.ArchiveStarredRepos(ctx, openTestDBRepo(t), all[:1], []int64{}, "sync(star-items)")
+	core.AddStarredReposToStarCatalog(ctx, openTestDBRepo(t), all[:1], []int64{}, "sync(star-items)")
 
 	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{all[0].Repo.ID, all[1].Repo.ID, all[2].Repo.ID}})
 	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)

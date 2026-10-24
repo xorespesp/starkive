@@ -2,8 +2,7 @@
 // (`db/star-items.json`, `db/star-lists.json`, `db/repo-meta.json`).
 // This file holds their format (`encodeJSONArrayByLine`, `FormatNow`), which path holds which item type (`dataFile`),
 // and how a write tells whether a file changed (`trackedDataFile`).
-// What the items mean is in the file of each part: `archive_star_catalog.go`, `archive_star_items.go`,
-// `archive_star_lists.go` and `archive_repo_meta.go`.
+// What the items mean is in `archive_stars.go` (items and star lists) and `archive_repo_meta.go`.
 // README snapshots aren't data files. They are in `archive_readmes.go`.
 package core
 

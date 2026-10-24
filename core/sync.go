@@ -1,5 +1,5 @@
 // Sync that brings the archive in line with GitHub (`SyncArchiveWithGitHub`).
-// It adds new Stars (`archive_star_items.go`), then refreshes the metadata snapshots (`archive_repo_meta.go`) and the README snapshots (`archive_readmes.go`).
+// It adds new Stars (`archive_stars.go`), then refreshes the metadata snapshots (`archive_repo_meta.go`) and the README snapshots (`archive_readmes.go`).
 // When to sync (the schedule decision, turning it on and off) is in `sync_schedule.go`.
 package core
 
@@ -21,7 +21,7 @@ type ArchiveSyncResult struct {
 }
 
 // Brings the archive in line with GitHub.
-//  1. Adds my GitHub Stars that aren't in the archive (`ArchiveStarredRepos`)
+//  1. Adds my GitHub Stars that aren't in the archive (`AddStarredReposToStarCatalog`)
 //  2. Refreshes the metadata snapshots within `repoMetaSyncBudget`, or the time left before `longStepsEndBy` if that is shorter (`SyncRepoMetaSnapshotsWithGitHub`)
 //  3. Refreshes the README snapshots with the time left before `longStepsEndBy` (`SyncReadmeSnapshotsWithGitHub`).
 //     Repositories that the metadata step found missing aren't asked.
@@ -57,7 +57,7 @@ func SyncArchiveWithGitHub(ctx context.Context, repo *DBRepo, longStepsEndBy tim
 	starredRepos, err := FetchAllStarredRepos(ctx, repo.cfg)
 	if err == nil {
 		result.NumStarredRepos = len(starredRepos)
-		result.NumAddedRepos, err = ArchiveStarredRepos(ctx, repo, starredRepos, []int64{}, "sync(star-items)")
+		result.NumAddedRepos, err = AddStarredReposToStarCatalog(ctx, repo, starredRepos, []int64{}, "sync(star-items)")
 	}
 	if err != nil {
 		errs = append(errs, fmt.Errorf("archive new stars: %w", err)) // Wrapped with `%w`, so `errors.As` still finds the inner error (`HTTPError`, `GitHubAPIError`)

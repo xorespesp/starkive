@@ -282,7 +282,7 @@ func addStarredRepoIDs(ctx context.Context, w http.ResponseWriter, dbRepo *core.
 			selected = append(selected, s)
 		}
 	}
-	added, err := core.ArchiveStarredRepos(ctx, dbRepo, selected, starListIDs, "user(star-items)")
+	added, err := core.AddStarredReposToStarCatalog(ctx, dbRepo, selected, starListIDs, "user(star-items)")
 	if err != nil {
 		return err
 	}
