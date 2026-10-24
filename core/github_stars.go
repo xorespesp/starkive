@@ -103,8 +103,13 @@ func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, e
 				page := next
 				next++
 				mu.Unlock()
-				starredRepos, _, err := FetchStarredPage(ctx, cfg, page)
-				pages[page-1] = starredRepos // Each page has its own slot, so writing without a lock doesn't overlap
+				// Only the call runs through `RunWithPanicAsError`, not the code that holds `mu`.
+				// A panic becomes the error of this page
+				err := RunWithPanicAsError(func() error {
+					starredRepos, _, err := FetchStarredPage(ctx, cfg, page)
+					pages[page-1] = starredRepos // Each page has its own slot, so writing without a lock doesn't overlap
+					return err
+				})
 				if err != nil {
 					mu.Lock()
 					if failure == nil {

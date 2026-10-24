@@ -486,7 +486,14 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 				for i, item := range group {
 					nodeIDs[i] = item.NodeID
 				}
-				readmes, err := FetchReadmesByNodeIDs(fetchCtx, cfg, nodeIDs)
+				// Only the call runs through `RunWithPanicAsError`, not the code that holds `mu`.
+				// A panic becomes the error of this call
+				var readmes []*FetchedReadme
+				err := RunWithPanicAsError(func() error {
+					var err error
+					readmes, err = FetchReadmesByNodeIDs(fetchCtx, cfg, nodeIDs)
+					return err
+				})
 				mu.Lock()
 				switch {
 				case errors.Is(err, errGitHubRateLimited):

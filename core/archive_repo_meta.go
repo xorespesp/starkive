@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -135,7 +136,15 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 				for i, s := range batch {
 					ids[i] = s.NodeID
 				}
-				nodes, missing, err := FetchRepoMetaByNodeIDs(ctx, repo.cfg, ids)
+				// Only the call runs through `RunWithPanicAsError`, not the code that holds `mu`.
+				// A panic becomes the error of this batch
+				var nodes []json.RawMessage
+				var missing []string
+				err := RunWithPanicAsError(func() error {
+					var err error
+					nodes, missing, err = FetchRepoMetaByNodeIDs(ctx, repo.cfg, ids)
+					return err
+				})
 				if err != nil {
 					log.Printf("repo details failed (%d repos left unchanged): %v", len(batch), err)
 					mu.Lock()

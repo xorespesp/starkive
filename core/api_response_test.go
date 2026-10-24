@@ -52,6 +52,36 @@ func TestServeAPIRequestGivesNewRateLimitMark(t *testing.T) {
 	}
 }
 
+// Tests that a panic in the handler is answered with 500, like any other error, and its stack goes to the server log
+func TestServeAPIRequestAnswersPanicWith500(t *testing.T) {
+	var logged bytes.Buffer
+	savedOutput := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(savedOutput) })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://example.test/api/archive-star-items", nil)
+	ServeAPIRequest(rec, req, func(w http.ResponseWriter, r *http.Request) error {
+		var filesAtCommit DBRepoFilesAtCommit
+		filesAtCommit.FileContent(StarItemsDBPath) // A path that wasn't read panics
+		return nil
+	})
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "Internal server error") ||
+		!strings.Contains(logged.String(), "wasn't read") || !strings.Contains(logged.String(), "goroutine") {
+		t.Errorf("answer %d %s, log %q", rec.Code, rec.Body, logged.String())
+	}
+}
+
+// Tests that `RunWithPanicAsError` returns the error of `f` as it is, and turns a panic into an error
+func TestRunWithPanicAsError(t *testing.T) {
+	want := errors.New("plain error")
+	if err := RunWithPanicAsError(func() error { return want }); err != want {
+		t.Errorf("plain error: %v", err)
+	}
+	if err := RunWithPanicAsError(func() error { panic("boom") }); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("panic: %v", err)
+	}
+}
+
 // Tests that `ServeAPIRequest` writes the cause of a 5xx answer to the server log when the answer leaves it out.
 // The browser gets only the message, and the server log gets the cause (here, why GitHub couldn't be reached)
 func TestServeAPIRequestLogsTheCauseOf502(t *testing.T) {

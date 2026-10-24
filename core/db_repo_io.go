@@ -75,7 +75,7 @@ func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref str
 // A file that wasn't read would otherwise look like a file that doesn't exist.
 // A write that adds a file "if it isn't there" would then overwrite one that is.
 // Asking for it is a mistake in the code, and the panic shows it the first time that code runs.
-// In the server it happens on the handler goroutine, so it ends only that request, and nothing is written.
+// In the server it ends only that request with 500 (`ServeAPIRequest`), and nothing is written.
 type DBRepoFilesAtCommit struct {
 	commitSHA string            // The commit the files were read at
 	contents  map[string][]byte // Path -> content at the commit. `nil` if the file doesn't exist there
@@ -117,7 +117,11 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 		wg.Add(1)
 		go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
 			defer wg.Done()
-			contents[i], errs[i] = readDBRepoFileAtRef(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
+			errs[i] = RunWithPanicAsError(func() error { // A panic in a goroutine would end the whole process
+				var err error
+				contents[i], err = readDBRepoFileAtRef(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
+				return err
+			})
 		}()
 	}
 	wg.Wait()

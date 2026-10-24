@@ -56,7 +56,9 @@ const requestTimeLimit = 290 * time.Second
 //   - `HTTPError`: answers with its status code and message.
 //     For a 5xx whose error wraps a cause, the whole error goes to the server log
 //   - `GitHubAPIError` (GitHub answered with a failure): always answers 502
-//   - Any other error: answers 500 "Internal server error", and writes the details only to the server log
+//   - Any other error: answers 500 "Internal server error", and writes the details only to the server log.
+//     A panic in the handler is answered the same way (`RunWithPanicAsError`).
+//     If the handler had already started its answer, the status can't change any more, and the log shows the cause
 //
 // Args:
 //   - `handle`: Per-method handler. Returns `nil` when it has written the whole answer, or an error on failure
@@ -72,7 +74,7 @@ func ServeAPIRequest(w http.ResponseWriter, r *http.Request, handle func(http.Re
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), requestTimeLimit)
 	defer cancel() // `cancel` frees the timer of the deadline when the request ends
 	ctx = addGitHubRateLimitMark(ctx)
-	err := handle(w, r.WithContext(ctx))
+	err := RunWithPanicAsError(func() error { return handle(w, r.WithContext(ctx)) })
 	if err == nil {
 		return
 	}

@@ -202,8 +202,15 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 	// Room for one result keeps the send from waiting for that, so the goroutine can't be left blocked.
 	lookupDone := make(chan repoToAdd, 1)
 	// `go`: runs the function in a goroutine (a lightweight thread), so the save below starts without waiting.
-	// `lookupDone <- v` sends `v` to the channel
-	go func() { lookupDone <- lookUpRepoToAdd(ctx, dbRepo, fullName) }()
+	// `lookupDone <- v` sends `v` to the channel.
+	// A panic in the lookup becomes its error (`core.RunWithPanicAsError`), so the goroutine still sends one result
+	go func() {
+		var found repoToAdd
+		if err := core.RunWithPanicAsError(func() error { found = lookUpRepoToAdd(ctx, dbRepo, fullName); return nil }); err != nil {
+			found = repoToAdd{err: err}
+		}
+		lookupDone <- found
+	}()
 	var lookup *repoToAdd // `nil` until the result is taken from `lookupDone`
 	// Returns the lookup result.
 	// The first call waits for it, and later calls get the same result
