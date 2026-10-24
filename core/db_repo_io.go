@@ -23,10 +23,6 @@ import (
 	"unicode/utf8"
 )
 
-// Maximum number of tries for one save, the first try included.
-// A save is tried again only when another commit got in first
-const maxUpdateAttempts = 5
-
 // Reads one file in the DB repository, at the latest commit of the default branch.
 //
 // Args:
@@ -35,7 +31,7 @@ const maxUpdateAttempts = 5
 // Returns:
 //   - The file content. `nil` if the file doesn't exist
 func ReadDBRepoFile(ctx context.Context, repo *DBRepo, path string) ([]byte, error) {
-	return readDBRepoFileAt(ctx, repo, path, repo.branch)
+	return readDBRepoFileAtRef(ctx, repo, path, repo.branch)
 }
 
 // Reads one file as it was at a given point.
@@ -51,7 +47,7 @@ func ReadDBRepoFile(ctx context.Context, repo *DBRepo, path string) ([]byte, err
 //
 // NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
 // Archive files can grow larger than that, so they are fetched in raw format.
-func readDBRepoFileAt(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, error) {
+func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, error) {
 	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildContentsAPIPath(path)+"?ref="+url.QueryEscape(ref),
 		GitHubAPIRequest{Accept: "application/vnd.github.raw+json"})
 	if err != nil {
@@ -71,147 +67,49 @@ func readDBRepoFileAt(ctx context.Context, repo *DBRepo, path string, ref string
 	return content, nil
 }
 
-// Error for a write that has files to write or delete but a commit message that isn't valid (`isValid`).
-// Commits that don't say what they changed are never made
-var errInvalidCommitMessage = errors.New("refusing to commit changes without a valid commit message")
-
-// Reports whether `p` is a clean path relative to the repository root (e.g. `db/star-items.json`).
-// One file then has only one spelling, so two different paths never name the same file.
-func isValidRepoPath(p string) bool {
-	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") || strings.Contains(p, `\`) {
-		return false
-	}
-	return path.Clean(p) == p // `path.Clean` removes `//`, `./`, `x/..` and a trailing `/`
-}
-
-// Contents of one commit to make: the files to write and delete, and the commit message
-type FileChangesCommit struct {
-	FilesToWrite  map[string][]byte // Path -> new content. A path doesn't have to be one of the files read
-	FilesToDelete []string          // Paths of files to delete. Each must exist at the commit the files were read from, or the whole commit fails (measured)
-	Message       CommitMessage     // Commit message. Required if anything is written or deleted
-}
-
-// Reports whether there is nothing to write or delete, so no commit is needed
-func (changes FileChangesCommit) isEmpty() bool {
-	return len(changes.FilesToWrite) == 0 && len(changes.FilesToDelete) == 0
-}
-
-// Checks that the commit can be made as it is: it changes something, its message is valid, and its paths are clean.
-// A path may appear only once, because writing and deleting the same file in one commit has no single meaning.
-func (changes FileChangesCommit) check() error {
-	if changes.isEmpty() {
-		return errors.New("refusing to make a commit that changes nothing")
-	}
-	if !changes.Message.isValid() {
-		return errInvalidCommitMessage
-	}
-	for p := range changes.FilesToWrite {
-		if !isValidRepoPath(p) {
-			return fmt.Errorf("refusing to write a file path that isn't valid: %q", p)
-		}
-	}
-	pathsSeen := map[string]bool{} // Paths to delete checked so far
-	for _, p := range changes.FilesToDelete {
-		if !isValidRepoPath(p) {
-			return fmt.Errorf("refusing to delete a file path that isn't valid: %q", p)
-		}
-		_, alsoWritten := changes.FilesToWrite[p] // `v, ok := m[k]`: `ok` is false if the key is missing
-		if alsoWritten || pathsSeen[p] {
-			return fmt.Errorf("refusing to change the file path %q twice in one commit", p)
-		}
-		pathsSeen[p] = true
-	}
-	return nil
-}
-
-// Reads several files in the DB repository from one commit, and writes what `buildFileChangesCommit` returns as one commit.
-// Every write to the DB repository goes through this function.
-// The only exception is the first commit in an empty repository.
-// The Git Data API doesn't work in an empty repository (measured), so the setup tool writes that commit with the Contents API.
+// Files read from one commit of the DB repository for a write (`UpdateDBRepoFiles`): the commit, and the content of each path asked for.
+// Only `readDBRepoFilesAtCommit` makes it, and every path it was asked for is a key of `contents`.
+// The fields aren't exported, so other packages can only make an empty one, which panics on any path.
 //
-// Args:
-//   - `paths`: Paths of the files to read. Each must pass `isValidRepoPath`
-//   - `buildFileChangesCommit`: Takes `filesRead`, the files read from one commit (path -> content, `nil` if the file doesn't exist),
-//     and `commitSHA`, the sha of that commit.
-//     Every path in `paths` is a key of `filesRead`, also when the file doesn't exist.
-//     It can read more at the same commit with `commitSHA` (for example a folder listing, `readBlobSHAsInFolder`).
-//     Paths found that way exist in the tree the new commit is built on, so they are safe to put in `FilesToDelete`.
-//     It returns the commit to make (`FileChangesCommit`).
-//     If nothing is written or deleted, or the changes leave every file as it was, nothing is committed.
-//     Otherwise the commit must pass `FileChangesCommit.check`.
-//     If it returns an error, nothing is written
-//
-// Returns:
-//   - An error from `buildFileChangesCommit` or from GitHub.
-//     An error from `FileChangesCommit.check` (`errInvalidCommitMessage` for a message that isn't valid). Then nothing is written.
-//     409 `errBranchMoved` if other commits keep getting in until all retries are used up
-//
-// NOTE:
-//   - Even when several files change, there is only one commit.
-//     So a change like "delete a star list and clean up its members" has no in-between state.
-//   - If another commit (another device, a sync) lands after the read, GitHub refuses to move the branch (`errBranchMoved`).
-//     Then it starts over from the new commit.
-//     This is the only case that is retried.
-//     Errors while making the tree or the commit are not conflicts, so they are returned right away.
-//   - `buildFileChangesCommit` can be called more than once.
-//     If it leaves results in outer variables, it must set them from scratch on every call.
-//   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
-//     plus the requests that `buildFileChangesCommit` sends.
-//     An archive write reads one or two data files, so that is 6 or 7 when `buildFileChangesCommit` sends none.
-//     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
-//     That one is sent again on every attempt.
-//     This is the price of putting several files in one commit with no in-between state.
-func UpdateDBRepoFiles(ctx context.Context, repo *DBRepo, paths []string, buildFileChangesCommit func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error)) error {
-	for _, p := range paths {
-		if !isValidRepoPath(p) {
-			return fmt.Errorf("refusing to read a file path that isn't valid: %q", p)
-		}
-	}
-	// Compare-and-swap loop: the commit is built on the branch tip that was read, and the branch moves only if it is still there.
-	// If another commit (another device, a sync) got in first, the files are read and the commit is built again on the new tip
-	for attempt := 1; ; attempt++ {
-		head, err := readBranchHead(ctx, repo)
-		if err != nil {
-			return err
-		}
-		filesRead, err := readDBRepoFilesAt(ctx, repo, paths, head.commit)
-		if err != nil {
-			return err
-		}
-		changes, err := buildFileChangesCommit(filesRead, head.commit)
-		if err != nil {
-			return err
-		}
-		if changes.isEmpty() { // Nothing to commit, so the message isn't needed either
-			return nil
-		}
-		if err := changes.check(); err != nil {
-			return err
-		}
-
-		err = commitFiles(ctx, repo, head, changes)
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, errBranchMoved) && attempt < maxUpdateAttempts { // The only case that is retried is a moved branch
-			// Right after another commit, a branch read can briefly point to the old commit (measured).
-			// So wait a little longer each time before reading again
-			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
-			continue
-		}
-		return err
-	}
+// NOTE: Asking for a path that wasn't read panics (`FileContent`).
+// A file that wasn't read would otherwise look like a file that doesn't exist.
+// A write that adds a file "if it isn't there" would then overwrite one that is.
+// Asking for it is a mistake in the code, and the panic shows it the first time that code runs.
+// In the server it happens on the handler goroutine, so it ends only that request, and nothing is written.
+type DBRepoFilesAtCommit struct {
+	commitSHA string            // The commit the files were read at
+	contents  map[string][]byte // Path -> content at the commit. `nil` if the file doesn't exist there
 }
 
-// Reads several files at the same commit, in parallel.
+// Returns the sha of the commit the files were read at.
+// More can be read at the same commit with it (for example a folder listing, `readBlobSHAsInFolder`)
+func (files *DBRepoFilesAtCommit) CommitSHA() string { return files.commitSHA }
+
+// Returns the content of the file `path` at the commit.
+// `nil` if the file doesn't exist there.
+// It panics if `path` wasn't among the paths asked for.
+func (files *DBRepoFilesAtCommit) FileContent(path string) []byte {
+	content, requested := files.contents[path] // "comma ok": `requested` tells whether the key is in the map at all
+	if !requested {
+		panic(fmt.Sprintf("%s wasn't read at commit %s", path, files.commitSHA))
+	}
+	return content
+}
+
+// Reports whether the file `path` existed at the commit.
+// It panics if `path` wasn't among the paths asked for (`FileContent`).
+func (files *DBRepoFilesAtCommit) HasFile(path string) bool { return files.FileContent(path) != nil }
+
+// Reads several files at commit `commitSHA`, in parallel.
+// All files are read at the same commit, so they match each other.
 //
 // Args:
 //   - `paths`: Paths of the files to read
-//   - `ref`: The commit sha to read at. All files must be read at the same commit so they match each other
 //
 // Returns:
-//   - Path -> content (`nil` if the file doesn't exist). An error if any file can't be read
-func readDBRepoFilesAt(ctx context.Context, repo *DBRepo, paths []string, ref string) (map[string][]byte, error) {
+//   - The files. Every path in `paths` is a key, with `nil` for a file that doesn't exist.
+//     An error if any file can't be read
+func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, commitSHA string) (*DBRepoFilesAtCommit, error) {
 	contents := make([][]byte, len(paths))
 	errs := make([]error, len(paths))
 	var wg sync.WaitGroup // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
@@ -219,18 +117,18 @@ func readDBRepoFilesAt(ctx context.Context, repo *DBRepo, paths []string, ref st
 		wg.Add(1)
 		go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
 			defer wg.Done()
-			contents[i], errs[i] = readDBRepoFileAt(ctx, repo, path, ref) // Each goroutine writes its own slot, so no lock is needed
+			contents[i], errs[i] = readDBRepoFileAtRef(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
 		}()
 	}
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: combines several errors into one. `nil` if all are `nil`
 		return nil, err
 	}
-	files := make(map[string][]byte, len(paths))
+	filesAtCommit := &DBRepoFilesAtCommit{commitSHA: commitSHA, contents: make(map[string][]byte, len(paths))}
 	for i, path := range paths {
-		files[path] = contents[i]
+		filesAtCommit.contents[path] = contents[i]
 	}
-	return files, nil
+	return filesAtCommit, nil
 }
 
 // Reads the git blob sha of every file under folder `folderPath` at commit `commitSHA`, with one request.
@@ -289,14 +187,6 @@ func computeGitBlobSHA(content []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// Error for a branch that couldn't be moved because another commit landed after the read (returned by `commitFiles`).
-// It is a prebuilt error value, so `errors.Is` compares against it (similar to an error code constant in C++).
-//
-// NOTE: `UpdateDBRepoFiles` retries only on this error.
-// When all retries are used up, it returns this error as is, as a 409.
-// The signal "try again" and the message for the user ("the archive changed while saving") are the same fact, so they share one value.
-var errBranchMoved = Errorf(http.StatusConflict, "The archive changed while saving. Try again")
-
 // The commit at the tip of a branch, and that commit's file tree
 type branchHead struct {
 	commit string // Commit sha
@@ -334,6 +224,168 @@ func readBranchHead(ctx context.Context, repo *DBRepo) (branchHead, error) {
 		return branchHead{}, err
 	}
 	return branchHead{commit: sha, tree: commit.Tree.SHA}, nil
+}
+
+// Asks GitHub whether a branch contains a commit.
+// That is, whether following parents back from the branch tip reaches that commit.
+//
+// Args:
+//   - `branchCommit`: The commit sha that the branch tip points to now
+//   - `newCommit`: The commit sha made for this save
+//
+// Returns:
+//   - `true` if it contains it (also when it is the same commit)
+//
+// NOTE: The compare API (`newCommit...branchCommit`) answers "ahead" or "identical" when `branchCommit` contains `newCommit` (docs).
+func isCommitInBranch(ctx context.Context, repo *DBRepo, branchCommit string, newCommit string) (bool, error) {
+	var compare struct {
+		Status string `json:"status"` // ahead, identical, behind, diverged
+	}
+	if err := callDBRepoAPI(ctx, repo, http.MethodGet, "/compare/"+newCommit+"..."+branchCommit, nil, &compare); err != nil {
+		return false, err
+	}
+	return compare.Status == "ahead" || compare.Status == "identical", nil
+}
+
+// Maximum number of tries for one save, the first try included.
+// A save is tried again only when another commit got in first
+const maxUpdateAttempts = 5
+
+// Error for a write that has files to write or delete but a commit message that isn't valid (`isValid`).
+// Commits that don't say what they changed are never made
+var errInvalidCommitMessage = errors.New("refusing to commit changes without a valid commit message")
+
+// Error for a branch that couldn't be moved because another commit landed after the read (returned by `commitFiles`).
+// It is a prebuilt error value, so `errors.Is` compares against it (similar to an error code constant in C++).
+//
+// NOTE: `UpdateDBRepoFiles` retries only on this error.
+// When all retries are used up, it returns this error as is, as a 409.
+// The signal "try again" and the message for the user ("the archive changed while saving") are the same fact, so they share one value.
+var errBranchMoved = Errorf(http.StatusConflict, "The archive changed while saving. Try again")
+
+// Reports whether `p` is a clean path relative to the repository root (e.g. `db/star-items.json`).
+// One file then has only one spelling, so two different paths never name the same file.
+func isValidRepoPath(p string) bool {
+	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") || strings.Contains(p, `\`) {
+		return false
+	}
+	return path.Clean(p) == p // `path.Clean` removes `//`, `./`, `x/..` and a trailing `/`
+}
+
+// Contents of one commit to make: the files to write and delete, and the commit message
+type FileChangesCommit struct {
+	FilesToWrite  map[string][]byte // Path -> new content. A path doesn't have to be one of the files read
+	FilesToDelete []string          // Paths of files to delete. Each must exist at the commit the files were read from, or the whole commit fails (measured)
+	Message       CommitMessage     // Commit message. Required if anything is written or deleted
+}
+
+// Reports whether there is nothing to write or delete, so no commit is needed
+func (changes FileChangesCommit) isEmpty() bool {
+	return len(changes.FilesToWrite) == 0 && len(changes.FilesToDelete) == 0
+}
+
+// Checks that the commit can be made as it is: it changes something, its message is valid, and its paths are clean.
+// A path may appear only once, because writing and deleting the same file in one commit has no single meaning.
+func (changes FileChangesCommit) check() error {
+	if changes.isEmpty() {
+		return errors.New("refusing to make a commit that changes nothing")
+	}
+	if !changes.Message.isValid() {
+		return errInvalidCommitMessage
+	}
+	for p := range changes.FilesToWrite {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to write a file path that isn't valid: %q", p)
+		}
+	}
+	pathsSeen := map[string]bool{} // Paths to delete checked so far
+	for _, p := range changes.FilesToDelete {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to delete a file path that isn't valid: %q", p)
+		}
+		_, alsoWritten := changes.FilesToWrite[p] // `v, ok := m[k]`: `ok` is false if the key is missing
+		if alsoWritten || pathsSeen[p] {
+			return fmt.Errorf("refusing to change the file path %q twice in one commit", p)
+		}
+		pathsSeen[p] = true
+	}
+	return nil
+}
+
+// Reads several files in the DB repository from one commit, and writes what `buildFileChangesCommit` returns as one commit.
+// Every write to the DB repository goes through this function.
+// The only exception is the first commit in an empty repository.
+// The Git Data API doesn't work in an empty repository (measured), so the setup tool writes that commit with the Contents API.
+//
+// Args:
+//   - `paths`: Paths of the files to read. Each must pass `isValidRepoPath`
+//   - `buildFileChangesCommit`: Takes `filesAtCommit`, the files of `paths` read from one commit.
+//     It can read more at the same commit with `filesAtCommit.CommitSHA()` (for example a folder listing, `readBlobSHAsInFolder`).
+//     Paths found that way exist in the tree the new commit is built on, so they are safe to put in `FilesToDelete`.
+//     It returns the commit to make (`FileChangesCommit`).
+//     If nothing is written or deleted, or the changes leave every file as it was, nothing is committed.
+//     Otherwise the commit must pass `FileChangesCommit.check`.
+//     If it returns an error, nothing is written
+//
+// Returns:
+//   - An error from `buildFileChangesCommit` or from GitHub.
+//     An error from `FileChangesCommit.check` (`errInvalidCommitMessage` for a message that isn't valid). Then nothing is written.
+//     409 `errBranchMoved` if other commits keep getting in until all retries are used up
+//
+// NOTE:
+//   - Even when several files change, there is only one commit.
+//     So a change like "delete a star list and clean up its members" has no in-between state.
+//   - If another commit (another device, a sync) lands after the read, GitHub refuses to move the branch (`errBranchMoved`).
+//     Then it starts over from the new commit.
+//     This is the only case that is retried.
+//     Errors while making the tree or the commit are not conflicts, so they are returned right away.
+//   - `buildFileChangesCommit` can be called more than once.
+//     If it leaves results in outer variables, it must set them from scratch on every call.
+//   - One attempt costs "5 + number of files read" GitHub requests (branch, its commit, one per file read, tree, commit, branch move),
+//     plus the requests that `buildFileChangesCommit` sends.
+//     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
+//     That one is sent again on every attempt.
+//     This is the price of putting several files in one commit with no in-between state.
+func UpdateDBRepoFiles(ctx context.Context, repo *DBRepo, paths []string, buildFileChangesCommit func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error)) error {
+	for _, p := range paths {
+		if !isValidRepoPath(p) {
+			return fmt.Errorf("refusing to read a file path that isn't valid: %q", p)
+		}
+	}
+	// Compare-and-swap loop: the commit is built on the branch tip that was read, and the branch moves only if it is still there.
+	// If another commit (another device, a sync) got in first, the files are read and the commit is built again on the new tip
+	for attempt := 1; ; attempt++ {
+		head, err := readBranchHead(ctx, repo)
+		if err != nil {
+			return err
+		}
+		filesAtCommit, err := readDBRepoFilesAtCommit(ctx, repo, paths, head.commit)
+		if err != nil {
+			return err
+		}
+		changes, err := buildFileChangesCommit(filesAtCommit)
+		if err != nil {
+			return err
+		}
+		if changes.isEmpty() { // Nothing to commit, so the message isn't needed either
+			return nil
+		}
+		if err := changes.check(); err != nil {
+			return err
+		}
+
+		err = commitFiles(ctx, repo, head, changes)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errBranchMoved) && attempt < maxUpdateAttempts { // The only case that is retried is a moved branch
+			// Right after another commit, a branch read can briefly point to the old commit (measured).
+			// So wait a little longer each time before reading again
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+			continue
+		}
+		return err
+	}
 }
 
 // Writes and deletes several files in one commit (GitHub Git Data API):
@@ -434,27 +486,6 @@ func commitFiles(ctx context.Context, repo *DBRepo, head branchHead, changes Fil
 		return nil
 	}
 	return errBranchMoved // Another commit landed in the meantime
-}
-
-// Asks GitHub whether a branch contains a commit.
-// That is, whether following parents back from the branch tip reaches that commit.
-//
-// Args:
-//   - `branchCommit`: The commit sha that the branch tip points to now
-//   - `newCommit`: The commit sha made for this save
-//
-// Returns:
-//   - `true` if it contains it (also when it is the same commit)
-//
-// NOTE: The compare API (`newCommit...branchCommit`) answers "ahead" or "identical" when `branchCommit` contains `newCommit` (docs).
-func isCommitInBranch(ctx context.Context, repo *DBRepo, branchCommit string, newCommit string) (bool, error) {
-	var compare struct {
-		Status string `json:"status"` // ahead, identical, behind, diverged
-	}
-	if err := callDBRepoAPI(ctx, repo, http.MethodGet, "/compare/"+newCommit+"..."+branchCommit, nil, &compare); err != nil {
-		return false, err
-	}
-	return compare.Status == "ahead" || compare.Status == "identical", nil
 }
 
 // Calls a DB repository API (under `/repos/<repository>`: Git Data, compare, Actions, etc.) and fills a value from the JSON response.

@@ -5,7 +5,7 @@
 // reading a saved one back (`ReadReadmeSnapshot`), and the sync step that keeps them up to date (`SyncReadmeSnapshotsWithGitHub`).
 // Picking and fetching READMEs on GitHub is in `github_readmes.go`.
 //
-// NOTE: These files aren't JSON arrays like the other data files, on purpose.
+// NOTE: These files aren't JSON arrays like the data files (`data_file.go`), on purpose.
 // One file per repository keeps each change small.
 // Like the metadata snapshots, they copy text that the repository owner can change, because keeping what it was is the point.
 package core
@@ -267,7 +267,7 @@ func ReadReadmeSnapshot(ctx context.Context, repo *DBRepo, itemID int64) (Readme
 		if snapshot.isAbsent {
 			continue
 		}
-		content, err := readDBRepoFileAt(ctx, repo, snapshot.path, commitSHA)
+		content, err := readDBRepoFileAtRef(ctx, repo, snapshot.path, commitSHA)
 		if err != nil {
 			return ReadmeSnapshotContent{}, err
 		}
@@ -527,11 +527,11 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 }
 
 // Writes the READMEs `fetched` in one commit, and deletes in it the snapshots of items no longer in the archive.
-// It reads the archive and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
+// It reads the archive items and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
 // Nothing is committed if nothing changes.
 func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetched map[int64]FetchedReadme) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
-		starItems, err := starItemsDataFile.decodeForReading(filesRead)
+	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+		starItems, err := starItemsDataFile.decodeForReading(filesAtCommit)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
@@ -539,7 +539,7 @@ func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetche
 		for _, item := range starItems {
 			isArchived[item.ID] = true
 		}
-		snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, repo, commitSHA, ReadmesDBDir)
+		snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, repo, filesAtCommit.CommitSHA(), ReadmesDBDir)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
@@ -572,7 +572,7 @@ func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetche
 		for id, snapshots := range snapshotsByID {
 			// A missing item file reads as an empty archive, and would delete every snapshot.
 			// It may be a passing 404 for a file that is there, so nothing is deleted then
-			if isArchived[id] || filesRead[StarItemsDBPath] == nil {
+			if isArchived[id] || !filesAtCommit.HasFile(starItemsDataFile.path) {
 				continue
 			}
 			removedCount++

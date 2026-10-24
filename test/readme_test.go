@@ -193,7 +193,7 @@ func TestReadReadmeSnapshotRequests(t *testing.T) {
 	}
 }
 
-// Tests that a README given to `core.StarCatalogTransaction.SaveReadme` for an item that isn't in the archive is not saved.
+// Tests that a README given to `core.StarCatalogTransaction.AddReadmeToCommit` for an item that isn't in the archive is not saved.
 // Such a file would have no item to own it.
 // The folder of that item isn't even listed
 func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
@@ -205,8 +205,8 @@ func TestReadmeOfAnItemNotInTheArchiveIsNotSaved(t *testing.T) {
 	if err != nil || fetched[0] == nil {
 		t.Fatalf("fetch: %v, %v", err, fetched)
 	}
-	_, err = core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
-		tx.SaveReadme(999, *fetched[0])
+	err = core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+		tx.AddReadmeToCommit(999, *fetched[0])
 		tx.StarItems[0].Note = "x" // A change to commit, so the commit isn't skipped as empty
 		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
 	})
@@ -607,7 +607,7 @@ func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
 		t.Errorf("sync: %d %v, files %q", checked, err, gh.files)
 	}
 
-	_, err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		tx.StarItems = nil
 		return core.NewCommitMessage("user(star-items)", "remove a/one"), nil
 	})
@@ -646,7 +646,7 @@ func TestUpdateDBRepoFilesWritesAnyBytes(t *testing.T) {
 		core.ReadmesDBDir + "/02/2.md": "#\x00 \x00h\x00i\x00\n\x00",
 		core.ReadmesDBDir + "/01/1.md": "\xC7\xD1\xB1\xDB\n", // EUC-KR
 	}
-	err := core.UpdateDBRepoFiles(ctx, repo, nil, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err := core.UpdateDBRepoFiles(ctx, repo, nil, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		changes := core.FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: core.NewCommitMessage("sync(readmes)", "write test files")}
 		for path, content := range want {
 			changes.FilesToWrite[path] = []byte(content)

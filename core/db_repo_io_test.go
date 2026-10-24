@@ -156,7 +156,7 @@ func TestComputeGitBlobSHA(t *testing.T) {
 	}
 }
 
-// Tests that a file whose body stops partway is a 502, like an answer that never came (`readDBRepoFileAt`).
+// Tests that a file whose body stops partway is a 502, like an answer that never came (`readDBRepoFileAtRef`).
 // The server promises more bytes than it sends, so the connection closes in the middle of the body
 func TestReadDBRepoFileCutInTheBodyIsBadGateway(t *testing.T) {
 	ctx := context.Background()

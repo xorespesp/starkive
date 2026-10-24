@@ -103,8 +103,8 @@ func encodeDBConfigFile(file dbConfigFile) ([]byte, error) {
 // The check and the save happen on the file right before the commit.
 // So even when a settings write and an App write overlap, neither erases the other's values.
 func updateDBConfigFile(ctx context.Context, repo *DBRepo, change func(file *dbConfigFile) (CommitMessage, error)) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{ConfigDBPath}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
-		file, err := decodeDBConfigFile(filesRead[ConfigDBPath])
+	return UpdateDBRepoFiles(ctx, repo, []string{ConfigDBPath}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+		file, err := decodeDBConfigFile(filesAtCommit.FileContent(ConfigDBPath))
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

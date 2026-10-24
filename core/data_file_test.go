@@ -2,23 +2,34 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
-// Tests that a file not given to `UpdateDBRepoFiles` is an error, not an empty file.
-// A file that was read but doesn't exist (`nil`) is an empty list
-func TestDataFileDecodeRefusesFileNotRead(t *testing.T) {
-	if _, err := starItemsDataFile.decodeForReading(map[string][]byte{StarListsDBPath: []byte("[]\n")}); err == nil || !strings.Contains(err.Error(), StarItemsDBPath) {
-		t.Errorf("file not read: %v", err)
-	}
+// Tests that asking for a file not read at the commit panics, instead of looking like a file that doesn't exist.
+// A file that was read but doesn't exist (`nil`) is an empty list, and `DBRepoFilesAtCommit.HasFile` tells it apart.
+// A file that holds `null` is an empty list too
+func TestDataFileRefusesFileNotRead(t *testing.T) {
+	notRead := &DBRepoFilesAtCommit{commitSHA: "c1", contents: map[string][]byte{StarListsDBPath: []byte("[]\n")}}
 	var starItems []StarItem
-	if _, err := starItemsDataFile.decodeForWriting(map[string][]byte{}, &starItems); err == nil {
-		t.Error("file not read, decodeForWriting: no error")
+	for name, ask := range map[string]func(){
+		"decodeForReading": func() { starItemsDataFile.decodeForReading(notRead) },
+		"decodeForWriting": func() { starItemsDataFile.decodeForWriting(notRead, &starItems) },
+		"HasFile":          func() { notRead.HasFile(StarItemsDBPath) },
+		"empty value":      func() { (&DBRepoFilesAtCommit{}).FileContent(StarItemsDBPath) },
+	} {
+		if recovered := catchPanic(ask); recovered == nil || !strings.Contains(fmt.Sprint(recovered), StarItemsDBPath) {
+			t.Errorf("%s, file not read: panic %v", name, recovered)
+		}
 	}
-	items, err := starItemsDataFile.decodeForReading(map[string][]byte{StarItemsDBPath: nil})
-	if err != nil || items == nil || len(items) != 0 {
+	items, err := starItemsDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: nil}})
+	if err != nil || items == nil || len(items) != 0 || (&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: nil}}).HasFile(StarItemsDBPath) {
 		t.Errorf("missing file: %v, %v", items, err)
+	}
+	items, err = starItemsDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: []byte("null")}})
+	if err != nil || items == nil || len(items) != 0 || !(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: []byte("null")}}).HasFile(StarItemsDBPath) {
+		t.Errorf("null file: %v, %v", items, err)
 	}
 }
 
@@ -41,7 +52,7 @@ func TestTrackedDataFileWritesOnlyChangedItems(t *testing.T) {
 		{"slice replaced", []byte(standard), func(starLists *[]StarList) { *starLists = append(*starLists, StarList{ID: 200, Name: "OS"}) }, true},
 	} {
 		var starLists []StarList
-		tracked, err := starListsDataFile.decodeForWriting(map[string][]byte{StarListsDBPath: c.content}, &starLists)
+		tracked, err := starListsDataFile.decodeForWriting(&DBRepoFilesAtCommit{contents: map[string][]byte{StarListsDBPath: c.content}}, &starLists)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -58,4 +69,12 @@ func TestTrackedDataFileWritesOnlyChangedItems(t *testing.T) {
 			t.Errorf("%s: written %q", c.name, written)
 		}
 	}
+}
+
+// Runs `f`, and returns what it panicked with. `nil` if it didn't panic.
+// `recover` stops a panic inside a deferred function, like catching an exception in C++
+func catchPanic(f func()) (recovered any) {
+	defer func() { recovered = recover() }()
+	f()
+	return nil
 }

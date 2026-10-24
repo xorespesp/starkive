@@ -1,7 +1,7 @@
 // The star catalog: the archive items (`db/star-items.json`, `StarItem`) and the star list definitions
 // (`db/star-lists.json`, `StarList`), the user's own data.
 // It holds both types, the rules about star lists (name comparison, ID issuing, the star list IDs stored in items),
-// and the writes: `UpdateStarCatalog` changes both in one commit, `UpdateStarLists` changes the star lists alone,
+// and the writes: `UpdateStarCatalog` changes either or both in one commit, `UpdateStarLists` changes the star lists alone,
 // and `AddStarredReposToStarCatalog` puts GitHub Stars in as new items.
 // The snapshots are in `archive_repo_meta.go` (metadata) and `archive_readmes.go` (README).
 // Reading Stars and star lists from GitHub is in `github_stars.go`.
@@ -20,7 +20,8 @@ import (
 
 // The star catalog: the archive items and the star list definitions.
 // It is the user's own data.
-// The snapshots (metadata, README) aren't in it, because sync updates them on its own.
+// The snapshots (metadata, README) aren't in it.
+// They are records of what GitHub showed, not the user's data.
 type StarCatalog struct {
 	StarItems []StarItem // Archive items (`StarItemsDBPath`)
 	StarLists []StarList // Star list definitions (`StarListsDBPath`)
@@ -38,7 +39,7 @@ type StarItem struct {
 	NodeID      string  `json:"node_id,omitempty"` // ID for GraphQL queries (new format `R_kgDO...`)
 	Name        string  `json:"name"`              // `owner/repo` at the time it was archived. Shown only when the repository is gone and can't be fetched
 	Note        string  `json:"note"`              // The user's note
-	StarListIDs []int64 `json:"star_list_ids"`     // IDs of the star lists it belongs to. Always cleaned by `StarCatalog.CleanStarListIDs`
+	StarListIDs []int64 `json:"star_list_ids"`     // IDs of the star lists it belongs to. No duplicates, sorted by ID (`StarCatalog.CleanStarListIDs`)
 	StarredAt   string  `json:"starred_at"`        // When it was starred on GitHub. For entries added by hand, when it was added
 }
 
@@ -47,7 +48,7 @@ type StarItem struct {
 // It is the same idea as GitHub's star lists.
 // When code refers to a star list on GitHub, its name always has `GitHub` in it (`FetchGitHubStarListsByRepo`)
 type StarList struct {
-	ID          int64  `json:"id"`          // Creation time (milliseconds). The server issues it (`NewStarListID`)
+	ID          int64  `json:"id"`          // Issued by the server (`NewStarListID`). Usually the creation time in milliseconds, and larger than every earlier ID
 	Name        string `json:"name"`        // Name shown on screen. The archive has only one star list per name (by `IsSameStarListName`)
 	Description string `json:"description"` // Description. Empty string if there is none
 }
@@ -118,7 +119,8 @@ func (c *StarCatalog) CheckStarListIDs(ids []int64) ([]int64, error) {
 // Args:
 //   - `ids`: IDs to clean up. IDs that don't exist are dropped without an error
 //
-// NOTE: Every place that writes star list IDs into an item goes through this method.
+// NOTE: Every place that sets the star list IDs of an item goes through this method, except a removal.
+// Removing one ID from a cleaned list keeps it cleaned.
 // So there is one ordering rule for the stored file.
 // The same content always gives the same line, so no diff appears.
 func (c *StarCatalog) CleanStarListIDs(ids []int64) []int64 {
@@ -141,7 +143,7 @@ func (c *StarCatalog) CleanStarListIDs(ids []int64) []int64 {
 //
 // Returns:
 //   - Given name -> star list ID
-//   - Names of star lists made this time (written in the commit message body)
+//   - Names of the star lists made by this call
 //
 // NOTE: Names are turned into IDs only in this method, and after that only IDs are used.
 // Names can change, so using them in place of IDs would drift.
@@ -166,14 +168,14 @@ type StarCatalogTransaction struct {
 	// Working copy. What it holds when `change` returns is committed.
 	// It is embedded (no field name), so its fields and methods are used directly, like `tx.StarItems`.
 	StarCatalog
-	readmesToSave map[int64]FetchedReadme // Not catalog data: READMEs to save in the same commit (`SaveReadme`). Item ID -> README
+	readmesToSave map[int64]FetchedReadme // Not catalog data: READMEs to save in the same commit (`AddReadmeToCommit`). Item ID -> README
 }
 
-// Saves `fetched` as the README snapshot of item `itemID`, in the commit that this transaction makes.
+// Adds `fetched` to the commit that this transaction makes, as the README snapshot of item `itemID`.
 // It is written when the transaction commits, not when this is called.
 // It is dropped if the item isn't in the working copy when `change` returns.
 // The rules for what is written and deleted are in `planReadmeSnapshotUpdate`.
-func (tx *StarCatalogTransaction) SaveReadme(itemID int64, fetched FetchedReadme) {
+func (tx *StarCatalogTransaction) AddReadmeToCommit(itemID int64, fetched FetchedReadme) {
 	if tx.readmesToSave == nil {
 		tx.readmesToSave = map[int64]FetchedReadme{}
 	}
@@ -185,31 +187,28 @@ func (tx *StarCatalogTransaction) SaveReadme(itemID int64, fetched FetchedReadme
 //
 // Args:
 //   - `change`: Changes the working copy in `tx` in place and returns a commit message.
-//     It can ask for READMEs to be saved in the same commit (`SaveReadme`).
+//     It can ask for READMEs to be saved in the same commit (`AddReadmeToCommit`).
 //     If it returns an error, nothing is written.
 //     If another commit gets in, it is called again with a new transaction read at the new commit
-//
-// Returns:
-//   - The catalog as committed. If no file changed, nothing is committed and it is returned as is
 //
 // NOTE: The items and the star lists are read together from the same commit.
 // So checks like "does this star list exist" and the save use data from the same point.
 // The metadata snapshots aren't read.
-// They are the largest archive file, and no change of the catalog uses them (measured, 20,000 items: 6MB of 9.2MB).
+// They are the largest archive file, and no change of the catalog uses them
+// (measured with 20,000 items and 14,000 snapshots: 6MB of the 9.2MB read).
 // Only the files whose data changed are written (`trackedDataFile`).
 // The config file (`config.json`) is not part of the archive, so it is not read here.
 // This keeps each save request from making one extra read for nothing.
 // The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
 // Each removed item and each saved README costs one more request (a listing of its folder).
-func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCatalogTransaction) (CommitMessage, error)) (*StarCatalog, error) {
-	var committed *StarCatalog
-	err := UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, starListsDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
+	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, starListsDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
 		tx := &StarCatalogTransaction{}
-		trackedStarItems, err := starItemsDataFile.decodeForWriting(filesRead, &tx.StarItems)
+		trackedStarItems, err := starItemsDataFile.decodeForWriting(filesAtCommit, &tx.StarItems)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
-		trackedStarLists, err := starListsDataFile.decodeForWriting(filesRead, &tx.StarLists)
+		trackedStarLists, err := starListsDataFile.decodeForWriting(filesAtCommit, &tx.StarLists)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
@@ -244,31 +243,26 @@ func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCa
 			}
 		}
 		for _, id := range removedIDs {
-			readmePaths, err := readReadmeSnapshotPaths(ctx, repo, commitSHA, id)
+			readmePaths, err := readReadmeSnapshotPaths(ctx, repo, filesAtCommit.CommitSHA(), id)
 			if err != nil {
 				return FileChangesCommit{}, err
 			}
 			changes.FilesToDelete = append(changes.FilesToDelete, readmePaths...)
 		}
 
-		// Saves the READMEs given to `SaveReadme`, against the snapshots already saved for those items
+		// Saves the READMEs given to `AddReadmeToCommit`, against the snapshots already saved for those items
 		for id, fetched := range tx.readmesToSave {
 			if !isArchivedAfter[id] {
 				continue // A README of an item not in the archive would have no item to own it
 			}
-			snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, repo, commitSHA, buildReadmeFolderPath(id))
+			snapshotsByID, err := readReadmeSnapshotsInFolder(ctx, repo, filesAtCommit.CommitSHA(), buildReadmeFolderPath(id))
 			if err != nil {
 				return FileChangesCommit{}, err
 			}
 			planReadmeSnapshotUpdate(id, fetched, snapshotsByID[id], &changes)
 		}
-		committed = &tx.StarCatalog // If called again, this becomes the new catalog
 		return changes, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return committed, nil
 }
 
 // Reads the star list definitions from one commit, changes them with `change`, and writes them in one commit if they changed.
@@ -281,9 +275,9 @@ func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCa
 //     If it returns an error, nothing is written.
 //     If another commit gets in, it is called again with the star lists read at the new commit
 func UpdateStarLists(ctx context.Context, repo *DBRepo, change func(starLists *[]StarList) (CommitMessage, error)) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{starListsDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
+	return UpdateDBRepoFiles(ctx, repo, []string{starListsDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
 		var starLists []StarList
-		trackedStarLists, err := starListsDataFile.decodeForWriting(filesRead, &starLists)
+		trackedStarLists, err := starListsDataFile.decodeForWriting(filesAtCommit, &starLists)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
@@ -300,7 +294,7 @@ func UpdateStarLists(ctx context.Context, repo *DBRepo, change func(starLists *[
 }
 
 // Puts GitHub Stars at the front of the archive as new items.
-// Every path that puts Stars into the archive (sync, Import) goes through this function.
+// Every path that puts Stars into the archive goes through this function.
 //   - Skips repositories already in the archive (by ID), and repositories repeated within `starredRepos`.
 //     Existing items are left as they are
 //   - Puts new items in the star lists of `starListIDs` and in the star lists they belonged to on GitHub.
@@ -310,13 +304,13 @@ func UpdateStarLists(ctx context.Context, repo *DBRepo, change func(starLists *[
 //     The body lists the added repositories and the names of new star lists
 //
 // Args:
-//   - `starredRepos`: Candidates to add, added in order (in GitHub's order, the most recently starred come first)
+//   - `starredRepos`: Candidates to add, added in order (in GitHub's order, the most recently starred first, docs)
 //   - `starListIDs`: Star list IDs that all new items go into (chosen by a person). An empty list if none.
 //     A 400 `HTTPError` if an ID isn't in the archive
 //   - `commitPrefix`: First part of the commit subject, `<who>(star-items)` (e.g. `sync(star-items)`)
 //
 // Returns:
-//   - Number of items actually added
+//   - Number of items actually added. 0 if it fails
 //
 // NOTE: The duplicate check and the star list check are both done inside the `change` of `UpdateStarCatalog`.
 // That is, they use the catalog right before the commit.
@@ -329,7 +323,7 @@ func AddStarredReposToStarCatalog(ctx context.Context, repo *DBRepo, starredRepo
 	// They are input from GitHub, not the archive, so another commit doesn't make them stale
 	var githubStarLists map[int64][]string
 	added := 0
-	_, err := UpdateStarCatalog(ctx, repo, func(tx *StarCatalogTransaction) (CommitMessage, error) {
+	err := UpdateStarCatalog(ctx, repo, func(tx *StarCatalogTransaction) (CommitMessage, error) {
 		added = 0 // If called again after a conflict, count again from zero
 		// Both the star list check and the duplicate check below use the catalog right before the commit (`tx`)
 		requested, err := tx.CheckStarListIDs(starListIDs)
@@ -375,5 +369,8 @@ func AddStarredReposToStarCatalog(ctx context.Context, repo *DBRepo, starredRepo
 		return NewCommitMessage(commitPrefix, "archive "+FormatCount(added, "star"),
 			formatCommitList("", names), formatCommitList("New star lists", createdStarLists)), nil
 	})
-	return added, err
+	if err != nil {
+		return 0, err // `added` was counted in `change`, but nothing was committed
+	}
+	return added, nil
 }

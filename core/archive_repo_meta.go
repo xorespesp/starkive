@@ -270,13 +270,13 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 //   - The snapshots as committed. If they didn't change, nothing is committed and they are returned as is
 func UpdateRepoMetaSnapshots(ctx context.Context, repo *DBRepo, change func(starItems []StarItem, repoMeta *[]RepoMeta) (CommitMessage, error)) ([]RepoMeta, error) {
 	var committed []RepoMeta
-	err := UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, repoMetaDataFile.path}, func(filesRead map[string][]byte, commitSHA string) (FileChangesCommit, error) {
-		starItems, err := starItemsDataFile.decodeForReading(filesRead) // Only read, so changes to it aren't written
+	err := UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, repoMetaDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+		starItems, err := starItemsDataFile.decodeForReading(filesAtCommit) // Only read, so changes to it aren't written
 		if err != nil {
 			return FileChangesCommit{}, err
 		}
 		var repoMeta []RepoMeta
-		trackedRepoMeta, err := repoMetaDataFile.decodeForWriting(filesRead, &repoMeta)
+		trackedRepoMeta, err := repoMetaDataFile.decodeForWriting(filesAtCommit, &repoMeta)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

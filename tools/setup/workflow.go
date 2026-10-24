@@ -156,8 +156,8 @@ func checkActionsPermission(ctx context.Context, dbRepo *core.DBRepo) error {
 // The workflow must match that dashboard, so this tool leaves it as it is too.
 func installWorkflowIfAbsent(ctx context.Context, dbRepo *core.DBRepo) error {
 	paths := []string{core.SyncWorkflowPath}
-	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
-		if filesRead[core.SyncWorkflowPath] != nil {
+	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
+		if filesAtCommit.HasFile(core.SyncWorkflowPath) {
 			return core.FileChangesCommit{}, nil // Nothing to write, so no commit
 		}
 		filesToWrite := map[string][]byte{core.SyncWorkflowPath: []byte(syncWorkflowContent)} // Path -> content

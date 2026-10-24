@@ -1,4 +1,4 @@
-// Integration tests for the DB repository: finding and opening it (state, format version, guard), and writing to it (`core.UpdateDBRepoFiles`, `core.UpdateStarCatalog`)
+// Integration tests for the DB repository: finding and opening it (state, format version, guard), and writing to it (`core.UpdateDBRepoFiles` and the archive writes on top of it)
 package test
 
 import (
@@ -118,20 +118,20 @@ func TestInvalidCommitMessageIsRefused(t *testing.T) {
 		"spaces after the prefix": core.NewCommitMessage("user(star-lists)", " "),
 		"no prefix":               core.NewCommitMessage("", "delete Graphics"),
 	} {
-		err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToWrite: map[string][]byte{core.StarListsDBPath: []byte("[]\n")}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("files with %s: %v, commits %d -> %d", name, err, before, len(gh.commits))
 		}
 	}
-	err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{FilesToDelete: []string{core.StarListsDBPath}}, nil
 	})
 	if err == nil || len(gh.commits) != before {
 		t.Errorf("delete with empty message: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
-	err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{}, nil
 	})
 	if err != nil || len(gh.commits) != before {
@@ -150,20 +150,20 @@ func TestInvalidPathIsRefused(t *testing.T) {
 	message := core.NewCommitMessage("user(star-lists)", "delete Graphics")
 	for _, p := range []string{"/" + core.StarListsDBPath, "./" + core.StarListsDBPath} {
 		called := false
-		err := core.UpdateDBRepoFiles(ctx, repo, []string{p}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateDBRepoFiles(ctx, repo, []string{p}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 			called = true
 			return core.FileChangesCommit{}, nil
 		})
 		if err == nil || called {
 			t.Errorf("read %q: %v, buildFileChangesCommit called %v", p, err, called)
 		}
-		err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToWrite: map[string][]byte{p: []byte("[]\n")}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
 			t.Errorf("write %q: %v, commits %d -> %d", p, err, before, len(gh.commits))
 		}
-		err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err = core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 			return core.FileChangesCommit{FilesToDelete: []string{p}, Message: message}, nil
 		})
 		if err == nil || len(gh.commits) != before {
@@ -180,7 +180,7 @@ func TestInvalidPathIsRefused(t *testing.T) {
 		"deleted twice": {FilesToDelete: []string{core.StarListsDBPath, core.StarListsDBPath}},
 	} {
 		changes.Message = message
-		err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+		err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 			return changes, nil
 		})
 		if err == nil || len(gh.commits) != before || gh.treeCalls != treeCallsBefore {
@@ -199,7 +199,7 @@ func TestWriteAndDeleteInOneCommit(t *testing.T) {
 	gh.files[notesPath] = "old notes\n"
 	before := len(gh.commits)
 	message := core.NewCommitMessage("user(star-lists)", "delete Graphics")
-	writeListsAndDeleteNotes := func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	writeListsAndDeleteNotes := func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{
 			FilesToWrite:  map[string][]byte{core.StarListsDBPath: []byte("[]\n")},
 			FilesToDelete: []string{notesPath},
@@ -282,10 +282,10 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 	gh.mu.Unlock()
 	repo := openTestDBRepo(t)
 
-	if _, err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
+	if err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) { return core.CommitMessage{}, nil }); err != nil || len(gh.commits) != before {
 		t.Errorf("nothing changed: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
-	_, err = core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err = core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		tx.StarLists = append(tx.StarLists, core.StarList{ID: 9999, Name: "new"})
 		return core.NewCommitMessage("user(star-lists)", "add new"), nil
 	})
@@ -310,7 +310,7 @@ func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
 	}
 
 	setFile(core.RepoMetaDBPath, "not JSON")
-	_, err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		tx.StarItems[0].Note = "x"
 		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
 	})
@@ -348,9 +348,9 @@ func TestUnchangedTreeIsNotCommitted(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	repo := openTestDBRepo(t)
 	before := len(gh.commits)
-	err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	err := core.UpdateDBRepoFiles(ctx, repo, []string{core.StarListsDBPath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		return core.FileChangesCommit{
-			FilesToWrite: map[string][]byte{core.StarListsDBPath: filesRead[core.StarListsDBPath]}, // The same content again
+			FilesToWrite: map[string][]byte{core.StarListsDBPath: filesAtCommit.FileContent(core.StarListsDBPath)}, // The same content again
 			Message:      core.NewCommitMessage("user(star-lists)", "edit Graphics"),
 		}, nil
 	})

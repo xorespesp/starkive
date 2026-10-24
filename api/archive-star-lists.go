@@ -156,7 +156,7 @@ func handleArchiveStarListsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		i := slices.IndexFunc(tx.StarLists, func(l core.StarList) bool { return l.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "List not found")

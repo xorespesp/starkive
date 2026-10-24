@@ -84,7 +84,7 @@ func parseRepoFullNameOrURL(fullNameOrURL string) string {
 // If that file were read separately, an ID pointing to a star list deleted meanwhile could be saved.
 func updateStarItem(ctx context.Context, dbRepo *core.DBRepo, id int64, change func(tx *core.StarCatalogTransaction, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
 	var updated core.StarItem
-	_, err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
@@ -188,7 +188,8 @@ func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) 
 //
 // NOTE: The lookup on GitHub (`lookUpRepoToAdd`) and the start of the save run at the same time.
 // They don't need each other until `change` adds the item.
-// The lookup takes about 0.8 seconds, and reading the files before `change` about 0.7 seconds with 20,000 items (measured).
+// The lookup takes about 0.8 to 1 second (most of it is the README, `addReadmeTimeout`),
+// and reading the files before `change` about 0.7 seconds with 20,000 items (measured).
 // So Add ends sooner by about the shorter of the two.
 // The lookup is taken once and used again when `change` runs again after a conflict.
 func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
@@ -215,7 +216,7 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 	}
 
 	var item core.StarItem
-	_, err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		found := takeLookup()
 		if found.err != nil {
 			return core.CommitMessage{}, found.err
@@ -231,7 +232,7 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 		item.StarListIDs = ids
 		tx.StarItems = append([]core.StarItem{item}, tx.StarItems...)
 		if found.readme != nil {
-			tx.SaveReadme(item.ID, *found.readme)
+			tx.AddReadmeToCommit(item.ID, *found.readme)
 		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
@@ -387,7 +388,7 @@ func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	_, err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
+	err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
 		if i < 0 {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")

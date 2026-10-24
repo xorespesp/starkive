@@ -10,11 +10,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
 // One data file of the archive: its path, and the Go type of its items (`T`).
+// `[T any]` is a type parameter, like a C++ template.
+// `T` isn't stored. It only fixes the item type that the methods decode.
 // Reach a data file only through the values below.
 // Then each path is always read as the type of its items.
 type dataFile[T any] struct {
@@ -39,35 +40,30 @@ func (f dataFile[T]) readLatestFromDBRepo(ctx context.Context, repo *DBRepo) ([]
 	return decodeJSONArray[T](content)
 }
 
-// Decodes this file from `filesRead`, the files that `UpdateDBRepoFiles` read at one commit (path -> content).
+// Decodes this file from `filesAtCommit`, the files that `UpdateDBRepoFiles` read at one commit.
 // It is for a file that a write only reads: changes to the result aren't written.
 // A file that a write may change is decoded with `decodeForWriting`.
 //
 // Returns:
-//   - The items. An empty list if the file doesn't exist.
-//     An error if this file wasn't among the paths given to `UpdateDBRepoFiles`
-func (f dataFile[T]) decodeForReading(filesRead map[string][]byte) ([]T, error) {
-	// "comma ok": `requested` tells whether the key is in the map at all.
-	// `UpdateDBRepoFiles` puts every path it was given in `filesRead`, with `nil` for a file that doesn't exist.
-	// So a missing key means a file that wasn't read, which would otherwise look like an empty file
-	content, requested := filesRead[f.path]
-	if !requested {
-		return nil, fmt.Errorf("%s wasn't read at this commit", f.path)
-	}
-	return decodeJSONArray[T](content)
+//   - The items. An empty list if the file doesn't exist, the same as for a file that holds `[]`.
+//     `DBRepoFilesAtCommit.HasFile` tells them apart.
+//     It panics if this file wasn't among the paths given to `UpdateDBRepoFiles` (`DBRepoFilesAtCommit.FileContent`)
+func (f dataFile[T]) decodeForReading(filesAtCommit *DBRepoFilesAtCommit) ([]T, error) {
+	return decodeJSONArray[T](filesAtCommit.FileContent(f.path))
 }
 
-// Decodes this file from `filesRead` into `*items`, and starts tracking that variable.
+// Decodes this file from `filesAtCommit` into `*items`, and starts tracking that variable.
 // After the change, `addIfChanged` on the result adds the file to the commit if `*items` changed.
 //
 // Args:
-//   - `filesRead`: The files that `UpdateDBRepoFiles` read at one commit (path -> content)
+//   - `filesAtCommit`: The files that `UpdateDBRepoFiles` read at one commit
 //   - `items`: The variable to decode into. The write must change this variable, not a copy of it
 //
 // Returns:
-//   - An error if the file can't be decoded, or wasn't among the paths given to `UpdateDBRepoFiles`
-func (f dataFile[T]) decodeForWriting(filesRead map[string][]byte, items *[]T) (*trackedDataFile[T], error) {
-	decoded, err := f.decodeForReading(filesRead)
+//   - An error if the file can't be decoded.
+//     It panics if the file wasn't among the paths given to `UpdateDBRepoFiles` (`DBRepoFilesAtCommit.FileContent`)
+func (f dataFile[T]) decodeForWriting(filesAtCommit *DBRepoFilesAtCommit, items *[]T) (*trackedDataFile[T], error) {
+	decoded, err := f.decodeForReading(filesAtCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +84,7 @@ type trackedDataFile[T any] struct {
 }
 
 // Adds the file to `changes` if the items in the tracked variable now differ from the items as read.
-// `changes.FilesToWrite` must not be `nil`.
+// `changes.FilesToWrite` must not be `nil` (writing to a `nil` map panics in Go).
 //
 // NOTE: Both sides are compared in the standard format (`encodeJSONArrayByLine`), not against the bytes as read.
 // So a file with the same data in a different layout (for example, edited by hand) is not rewritten.
@@ -108,13 +104,16 @@ func (t *trackedDataFile[T]) addIfChanged(changes *FileChangesCommit) error {
 // `[T any]` is a type parameter, like a C++ template, so the same function works for each item type.
 //
 // Args:
-//   - `content`: The file content. `nil` (no file) gives an empty list
+//   - `content`: The file content. `nil` (no file) or `null` gives an empty list
 func decodeJSONArray[T any](content []byte) ([]T, error) {
 	items := []T{}
 	if content != nil {
 		if err := json.Unmarshal(content, &items); err != nil {
 			return nil, err
 		}
+	}
+	if items == nil { // A file that holds `null` sets the slice to `nil`
+		items = []T{}
 	}
 	return items, nil
 }

@@ -88,12 +88,12 @@ var dbFolderKeepPath = path.Dir(core.StarItemsDBPath) + "/.gitkeep"
 // So if the setup stopped between the two commits, running it again adds them.
 func addInitialFiles(ctx context.Context, dbRepo *core.DBRepo) error {
 	paths := []string{dbRepoReadmePath, dbFolderKeepPath}
-	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesRead map[string][]byte, commitSHA string) (core.FileChangesCommit, error) {
+	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
 		filesToWrite := map[string][]byte{} // Path -> content
-		if filesRead[dbRepoReadmePath] == nil {
+		if !filesAtCommit.HasFile(dbRepoReadmePath) {
 			filesToWrite[dbRepoReadmePath] = []byte(dbRepoReadmeContent)
 		}
-		if filesRead[dbFolderKeepPath] == nil {
+		if !filesAtCommit.HasFile(dbFolderKeepPath) {
 			filesToWrite[dbFolderKeepPath] = []byte{}
 		}
 		return core.FileChangesCommit{FilesToWrite: filesToWrite, Message: core.NewCommitMessage("feat", "Add initial files")}, nil
