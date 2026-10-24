@@ -303,10 +303,13 @@ func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	repo := openTestDBRepo(t)
+	// Changes a file with a commit from another device, as GitHub always makes a new commit for a change
 	setFile := func(path string, content string) {
 		gh.mu.Lock()
 		defer gh.mu.Unlock()
-		gh.files[path] = content
+		files := copyFiles(gh.files)
+		files[path] = content
+		gh.moveHead(gh.head+"-edit", files)
 	}
 
 	setFile(core.RepoMetaDBPath, "not JSON")
@@ -401,5 +404,50 @@ func TestServerOpensDBRepoOnlyThroughTheGuard(t *testing.T) {
 				return true
 			})
 		}
+	}
+}
+
+// Tests that a write right after this instance's own commit doesn't read that commit again to learn its tree,
+// and that it still builds on that commit, so the change of the first write stays.
+// It holds also when only the response of the branch move was lost.
+// When another commit moves the branch, the commit is read again, and the change of that commit stays.
+func TestWriteAfterOwnCommitSkipsReadingIt(t *testing.T) {
+	ctx := context.Background()
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	repo := openTestDBRepo(t)
+	write := func(path string, scope string, content string) error {
+		return core.UpdateDBRepoFiles(ctx, repo, []string{path}, func(*core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
+			return core.FileChangesCommit{FilesToWrite: map[string][]byte{path: []byte(content)}, Message: core.NewCommitMessage(scope, "test")}, nil
+		})
+	}
+	readsBefore := gh.commitReads
+
+	if err := write(core.StarListsDBPath, "user(star-lists)", "[]\n"); err != nil || gh.commitReads != readsBefore+1 {
+		t.Fatalf("first write: %v, commit reads %d -> %d", err, readsBefore, gh.commitReads)
+	}
+	err := write(core.StarItemsDBPath, "user(star-items)", "[]\n")
+	if err != nil || gh.commitReads != readsBefore+1 || gh.readFile(core.StarListsDBPath) != "[]\n" || gh.readFile(core.StarItemsDBPath) != "[]\n" {
+		t.Fatalf("write after own commit: %v, commit reads %d -> %d, star lists %q", err, readsBefore, gh.commitReads, gh.readFile(core.StarListsDBPath))
+	}
+
+	// 2: the move is applied but its response is lost, and the next write still builds on that commit
+	gh.refLostReply = true
+	if err := write(core.StarListsDBPath, "user(star-lists)", "[\n{\"id\":7}\n]\n"); err != nil {
+		t.Fatalf("write with a lost response: %v", err)
+	}
+	gh.refLostReply = false
+	err = write(core.StarItemsDBPath, "user(star-items)", sampleStarItems)
+	if err != nil || gh.commitReads != readsBefore+1 || !strings.Contains(gh.readFile(core.StarListsDBPath), `"id":7`) {
+		t.Fatalf("write after a lost response: %v, commit reads %d -> %d, star lists %q", err, readsBefore, gh.commitReads, gh.readFile(core.StarListsDBPath))
+	}
+
+	gh.mu.Lock()
+	files := copyFiles(gh.files)
+	files[core.StarItemsDBPath] = "[]\n"
+	gh.moveHead(gh.head+"-other", files) // Another device commits a change
+	gh.mu.Unlock()
+	err = write(core.StarListsDBPath, "user(star-lists)", sampleStarLists)
+	if err != nil || gh.commitReads != readsBefore+2 || gh.readFile(core.StarItemsDBPath) != "[]\n" {
+		t.Errorf("write after another commit: %v, commit reads %d -> %d, star items %q", err, readsBefore, gh.commitReads, gh.readFile(core.StarItemsDBPath))
 	}
 }

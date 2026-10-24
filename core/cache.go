@@ -61,10 +61,10 @@ func buildEnvCacheKey(cfg *EnvConfig) string {
 	return cfg.GitHubAPI + "\n" + cfg.DBRepoAccessToken + "\n" + strconv.FormatInt(cfg.DBRepoID, 10)
 }
 
-// Makes the cache key for values read from a file in the DB repository (the sign-in GitHub App settings).
+// Makes the cache key for values that belong to one branch of the DB repository (a file read there, the branch tip).
 // The key is the GitHub address, the repository name, the branch and the token.
 //
-// NOTE: The token is in the key because the App's client secret is decrypted with a key made from the token.
+// NOTE: The token is in the key because a value can depend on it (the App's client secret is decrypted with a key made from the token).
 // When the token changes, the result changes even for the same file.
 func buildDBRepoCacheKey(repo *DBRepo) string {
 	return repo.cfg.GitHubAPI + "\n" + repo.fullName + "\n" + repo.branch + "\n" + repo.cfg.DBRepoAccessToken

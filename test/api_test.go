@@ -65,6 +65,7 @@ type fakeGitHub struct {
 	interfereAll        bool                          // If `true`, another device commits first on every branch move (constant conflicts)
 	treeStatus          int                           // If not 0, tree creation fails with this status code
 	treeCalls           int                           // Number of tree creation requests
+	commitReads         int                           // Number of requests that read a commit (`/git/commits/<sha>`)
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	blobs               map[string]string             // Created blob sha -> content
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
@@ -315,6 +316,16 @@ func (f *fakeGitHub) readFilesAt(commit string) map[string]string {
 	return f.snapshots[commit]
 }
 
+// Returns the files of a tree sha.
+// It is `tree-of-<commit sha>` from reading a commit, or a tree made with the tree API (`trees`), which a commit made on this fake has.
+// Call it while holding `mu`.
+func (f *fakeGitHub) readFilesOfTree(tree string) map[string]string {
+	if files, ok := f.trees[tree]; ok {
+		return files
+	}
+	return f.readFilesAt(strings.TrimPrefix(tree, "tree-of-"))
+}
+
 // Moves the branch to a new commit.
 // The files of the current `head` stay in `snapshots`, so reads at that commit still work.
 // Call it while holding `mu`.
@@ -533,6 +544,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/commits/") && r.Method == http.MethodGet:
 		// Read a commit.
 		// The tree sha is `tree-of-<commit sha>`, so a new tree based on it can find the commit's files
+		f.commitReads++
 		fmt.Fprintf(w, `{"tree":{"sha":"tree-of-%s"}}`, strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/commits/"))
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/") && r.Method == http.MethodGet:
@@ -583,7 +595,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		files := copyFiles(f.readFilesAt(strings.TrimPrefix(body.BaseTree, "tree-of-")))
+		base := f.readFilesOfTree(body.BaseTree)
+		if base == nil { // A base tree that doesn't exist is refused
+			http.Error(w, `{"message":"GitRPC::BadObjectState"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		files := copyFiles(base)
 		for _, e := range body.Tree {
 			switch {
 			case e.Content != nil:
@@ -605,7 +622,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				delete(files, e.Path)
 			}
 		}
-		if maps.Equal(files, f.readFilesAt(strings.TrimPrefix(body.BaseTree, "tree-of-"))) { // Same files as the base tree give the same tree sha, like git
+		if maps.Equal(files, base) { // Same files as the base tree give the same tree sha, like git
 			fmt.Fprintf(w, `{"sha":%q}`, body.BaseTree)
 			return
 		}
