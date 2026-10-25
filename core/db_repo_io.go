@@ -135,21 +135,21 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 	return filesAtCommit, nil
 }
 
-// Reads the git blob sha of every file under folder `folderPath` at commit `commitSHA`, with one request.
+// Reads the git blob sha of every file under folder `folderPath` at `ref`, with one request.
 // Files in subfolders are included.
 // File contents aren't read.
 //
 // Args:
-//   - `commitSHA`: The commit sha to read at
+//   - `ref`: The point to read at. A commit sha, or a branch named in full (`refs/heads/...`)
 //   - `folderPath`: Folder path in the repository, clean and without a trailing `/` (e.g. `db/readmes/45`)
 //
 // Returns:
 //   - Path in the repository -> git blob sha of the file content. An empty map if the folder doesn't exist.
 //     A 502 `HTTPError` if GitHub cut the list short, because a short list would make present files look absent
 //
-// NOTE: The tree API takes `<commit sha>:<folder path>` in place of a tree sha (measured).
+// NOTE: The tree API takes `<commit sha>:<folder path>` or `<branch>:<folder path>` in place of a tree sha (measured).
 // A list of 74,000 files (23MB) was not cut short (measured).
-func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, commitSHA string, folderPath string) (map[string]string, error) {
+func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, ref string, folderPath string) (map[string]string, error) {
 	if !isValidRepoPath(folderPath) {
 		return nil, fmt.Errorf("refusing to list a folder path that isn't valid: %q", folderPath)
 	}
@@ -162,7 +162,7 @@ func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, commitSHA string, f
 		Truncated bool `json:"truncated"`
 	}
 	escapedFolderPath := (&url.URL{Path: folderPath}).EscapedPath()
-	err := callDBRepoAPI(ctx, repo, http.MethodGet, "/git/trees/"+commitSHA+":"+escapedFolderPath+"?recursive=1", nil, &tree)
+	err := callDBRepoAPI(ctx, repo, http.MethodGet, "/git/trees/"+url.PathEscape(ref)+":"+escapedFolderPath+"?recursive=1", nil, &tree)
 	if hasGitHubStatus(err, http.StatusNotFound) {
 		return map[string]string{}, nil
 	}
@@ -189,6 +189,32 @@ func computeGitBlobSHA(content []byte) string {
 	fmt.Fprintf(hash, "blob %d%c", len(content), 0)
 	hash.Write(content)
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// Reads one file content by its git blob sha (`computeGitBlobSHA`), not by a path.
+// Git stores each file content once, named by the hash of that content (git docs).
+// A commit only maps each path to one of these names, and a folder listing gives them (`readBlobSHAsInFolder`).
+// A read by path and branch goes through the commit the branch points to at that moment, so two reads can give different contents.
+// A read by blob sha skips the commit, so it always gives the same bytes, wherever the branch is.
+//
+// Returns:
+//   - The content. A `GitHubAPIError` if GitHub answers with a failure (wrapped with `ErrGitHubRateLimited` for a rate limit answer).
+//     A sha that GitHub doesn't have is a 404 error, not a missing file, because a blob sha names a content, not a place that can be empty
+func readDBRepoBlob(ctx context.Context, repo *DBRepo, blobSHA string) ([]byte, error) {
+	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildAPIPath("/git/blobs/"+url.PathEscape(blobSHA)),
+		GitHubAPIRequest{Accept: "application/vnd.github.raw+json"}) // Raw format, so files over 1MB come too (docs)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if err := CheckGitHubResponseWithRateLimit(res); err != nil {
+		return nil, err
+	}
+	content, err := io.ReadAll(res.Body)
+	if err != nil { // The body stopped coming (a dropped connection, `githubTimeout` or the deadline of `ctx`)
+		return nil, newGitHubUnreachableError(err)
+	}
+	return content, nil
 }
 
 // The commit at the tip of a branch, and that commit's file tree

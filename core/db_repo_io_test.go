@@ -28,8 +28,8 @@ func startFakeTreeAPI(t *testing.T) (*DBRepo, *atomic.Int32) {
 			http.Error(w, `{"message":"recursive must be 1"}`, http.StatusBadRequest)
 			return
 		}
-		switch r.URL.Path {
-		case "/repos/me/archive/git/trees/c1:db/readmes/45":
+		switch r.URL.EscapedPath() { // As sent, so a branch name must come with its `/` escaped
+		case "/repos/me/archive/git/trees/c1:db/readmes/45", "/repos/me/archive/git/trees/refs%2Fheads%2Fmain:db/readmes/45":
 			fmt.Fprint(w, `{"tree":[`+
 				`{"path":"12345.md","type":"blob","sha":"a"},`+
 				`{"path":"345.no-readme","type":"blob","sha":"b"},`+
@@ -54,6 +54,7 @@ func newTestDBRepo(apiURL string) *DBRepo {
 // Tests how `readBlobSHAsInFolder` reads a folder listing.
 //   - Only files are kept, with the folder path put in front.
 //     Files in subfolders are included
+//   - A branch named in full (`refs/heads/main`) reads like a commit sha
 //   - A folder that doesn't exist gives an empty map, not an error
 //   - A list that GitHub cut short is an error (502)
 //   - A folder path that isn't clean is refused before any request
@@ -71,6 +72,9 @@ func TestReadBlobSHAsInFolder(t *testing.T) {
 	if err != nil || !maps.Equal(got, want) {
 		t.Errorf("folder: %v, %v", got, err)
 	}
+	if got, err := readBlobSHAsInFolder(ctx, repo, "refs/heads/main", "db/readmes/45"); err != nil || !maps.Equal(got, want) {
+		t.Errorf("folder at the branch: %v, %v", got, err)
+	}
 
 	if got, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/missing"); err != nil || got == nil || len(got) != 0 {
 		t.Errorf("missing folder: %v, %v", got, err)
@@ -84,6 +88,26 @@ func TestReadBlobSHAsInFolder(t *testing.T) {
 	requestsBefore := requests.Load()
 	if _, err := readBlobSHAsInFolder(ctx, repo, "c1", "db/readmes/"); err == nil || requests.Load() != requestsBefore {
 		t.Errorf("folder path not clean: %v, requests %d -> %d", err, requestsBefore, requests.Load())
+	}
+}
+
+// Tests that `readDBRepoBlob` reads a content by its blob sha in raw format, and that a sha GitHub doesn't have is an error, not an empty file
+func TestReadDBRepoBlob(t *testing.T) {
+	content := "[\n{\"id\":1}\n]\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/me/archive/git/blobs/"+computeGitBlobSHA([]byte(content)) && r.Header.Get("Accept") == "application/vnd.github.raw+json" {
+			fmt.Fprint(w, content)
+			return
+		}
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+	repo := newTestDBRepo(server.URL)
+	if got, err := readDBRepoBlob(t.Context(), repo, computeGitBlobSHA([]byte(content))); err != nil || string(got) != content {
+		t.Errorf("blob: %q, %v", got, err)
+	}
+	if got, err := readDBRepoBlob(t.Context(), repo, computeGitBlobSHA([]byte("other"))); !hasGitHubStatus(err, http.StatusNotFound) || got != nil {
+		t.Errorf("unknown blob: %q, %v", got, err)
 	}
 }
 
