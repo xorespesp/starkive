@@ -1244,10 +1244,11 @@ function inSelectedList(item) {
  * Builds the list with the sidebar choice, language filter, search text and sort order applied.
  * The search text is split on spaces, and only items that contain every word remain.
  *
- * @returns {object[]} Archive items. `newest` and `oldest` sort by `starred_at` (when it was starred, or when it was added for items added directly)
+ * @returns {object[]} Archive items. `newest` and `oldest` sort by `starred_at` (when it was starred, or when it was added for items added directly), then by `id`
  *
  * NOTE: `starred_at` values mix formats with and without milliseconds (`2026-01-01T00:00:00Z` and `2026-01-01T00:00:00.000Z`).
  * So they are compared as times, not as strings.
+ * Items with the same time are ordered by `id`, so the order doesn't depend on the order the server gives the items in.
  */
 function filteredStarItems() {
   const terms = state.query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1260,7 +1261,7 @@ function filteredStarItems() {
   if (state.sort === 'name') return items.sort((a, b) => view(a).name.localeCompare(view(b).name));
   const starredTime = new Map(items.map((item) => [item, Date.parse(item.starred_at) || 0])); // Parsed in advance, so sorting doesn't parse the same value again and again
   const sign = state.sort === 'oldest' ? 1 : -1;
-  return items.sort((a, b) => sign * (starredTime.get(a) - starredTime.get(b)));
+  return items.sort((a, b) => sign * (starredTime.get(a) - starredTime.get(b) || a.id - b.id));
 }
 
 /**
