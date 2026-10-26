@@ -317,7 +317,7 @@ func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
 		tx.StarItems[0].Note = "x"
 		return core.NewCommitMessage("user(star-items)", "edit note of a/one"), nil
 	})
-	if err != nil || gh.readFile(core.RepoMetaDBPath) != "not JSON" || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"note":"x"`) {
+	if err != nil || gh.readFile(core.RepoMetaDBPath) != "not JSON" || !strings.Contains(gh.readStarItems(), `"note":"x"`) {
 		t.Errorf("star catalog: %v, files %q", err, gh.files)
 	}
 
@@ -338,7 +338,7 @@ func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
 		*repoMeta = []core.RepoMeta{{ID: starItems[0].ID, Name: starItems[0].Name, Topics: []string{}}}
 		return core.NewCommitMessage("sync(repo-meta)", "refresh 1 repo, 0 unavailable"), nil
 	})
-	if err != nil || len(committed) != 1 || gh.readFile(core.StarListsDBPath) != "not JSON" || gh.readFile(core.StarItemsDBPath) != sampleStarItems ||
+	if err != nil || len(committed) != 1 || gh.readFile(core.StarListsDBPath) != "not JSON" || gh.readStarItems() != sampleStarItems ||
 		!strings.Contains(gh.readFile(core.RepoMetaDBPath), `"id":1`) {
 		t.Errorf("metadata snapshots: %v, %v, files %q", err, committed, gh.files)
 	}

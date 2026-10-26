@@ -57,7 +57,7 @@ func TestRemovingAnItemDeletesItsReadmeSnapshots(t *testing.T) {
 
 	delete(gh.files, core.ReadmesDBDir+"/02/2.md")
 	rec := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id=2", "", cookie)
-	if rec.Code != 200 || strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":2,`) || gh.treeListCalls != 2 {
+	if rec.Code != 200 || strings.Contains(gh.readStarItems(), `"id":2,`) || gh.treeListCalls != 2 {
 		t.Errorf("remove item 2 with no snapshot: %d %s, listings %d", rec.Code, rec.Body, gh.treeListCalls)
 	}
 }
@@ -142,7 +142,7 @@ func TestAddWithFailingOrConflictingReadme(t *testing.T) {
 	gh.readmeQueryFails = func(queryNumber int) bool { return true }
 	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
 	_, saved := gh.files[readmePath]
-	if rec.Code != 200 || saved || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":2325298`) {
+	if rec.Code != 200 || saved || !strings.Contains(gh.readStarItems(), `"id":2325298`) {
 		t.Errorf("README queries fail: %d %s, README saved %v", rec.Code, rec.Body, saved)
 	}
 
@@ -151,7 +151,7 @@ func TestAddWithFailingOrConflictingReadme(t *testing.T) {
 	gh.readmeRateLimitFrom = 1
 	rec = call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, login(t))
 	_, saved = gh.files[readmePath]
-	if rec.Code != 200 || saved || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":2325298`) {
+	if rec.Code != 200 || saved || !strings.Contains(gh.readStarItems(), `"id":2325298`) {
 		t.Errorf("rate limit: %d %s, README saved %v", rec.Code, rec.Body, saved)
 	}
 
@@ -304,7 +304,7 @@ func TestSyncReadmeSnapshotsWithGitHubChecksTheRightItems(t *testing.T) {
 	}
 
 	// An item without `node_id` can't be asked by GraphQL, so it isn't asked either
-	gh.files[core.StarItemsDBPath] = strings.Replace(gh.files[core.StarItemsDBPath], `"node_id":"R_2",`, "", 1)
+	putStarItems(gh.files, strings.Replace(joinStarItems(gh.files), `"node_id":"R_2",`, "", 1))
 	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(2), false); err != nil || checked != 0 || gh.readmeQueries != queriesBefore {
 		t.Errorf("item without node_id: %d %v, README queries %d -> %d", checked, err, queriesBefore, gh.readmeQueries)
 	}

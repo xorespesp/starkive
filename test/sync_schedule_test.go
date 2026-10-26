@@ -116,8 +116,8 @@ func TestScheduledSync(t *testing.T) {
 	if rec := callScheduledSync(); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"synced"}` {
 		t.Fatalf("daily: %d %s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(gh.readFile(core.StarItemsDBPath), "a/one") || gh.readmeQueries == 0 {
-		t.Errorf("star items: %s, README queries %d", gh.readFile(core.StarItemsDBPath), gh.readmeQueries)
+	if !strings.Contains(gh.readStarItems(), "a/one") || gh.readmeQueries == 0 {
+		t.Errorf("star items: %s, README queries %d", gh.readStarItems(), gh.readmeQueries)
 	}
 
 	cookie := login(t)

@@ -32,7 +32,7 @@ func TestWriteFinishesAfterTheBrowserLeaves(t *testing.T) {
 	req.Header.Set("Cookie", cookie)
 	rec := httptest.NewRecorder()
 	api.HandleArchiveStarItems(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(gh.readFile(core.StarItemsDBPath), `"note":"kept"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(gh.readStarItems(), `"note":"kept"`) {
 		t.Errorf("write after the browser left: %d %s", rec.Code, rec.Body)
 	}
 }

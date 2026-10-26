@@ -906,6 +906,34 @@ func (f *fakeGitHub) readFile(path string) string {
 	return f.files[path]
 }
 
+// Returns the archive items at the branch tip as one JSON array, one item per line (`joinStarItems`).
+// Tests use it to check what the server wrote.
+func (f *fakeGitHub) readStarItems() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return joinStarItems(f.files)
+}
+
+// Puts archive items `content` (a JSON array, one item per line) into `files` the way the DB repository stores them.
+// An empty string means no item, so there is no item file.
+//
+// NOTE: A test about the items, not about how they are stored, puts and reads them only through three helpers.
+// They are `putStarItems`, `joinStarItems` and `fakeGitHub.readStarItems`.
+// So a change of the storage layout changes only these helpers and the tests about the layout itself.
+func putStarItems(files map[string]string, content string) {
+	if content == "" {
+		delete(files, core.StarItemsDBPath)
+		return
+	}
+	files[core.StarItemsDBPath] = content
+}
+
+// Returns the archive items in `files` as one JSON array, one item per line, as `putStarItems` takes them.
+// An empty string if there is no item file.
+func joinStarItems(files map[string]string) string {
+	return files[core.StarItemsDBPath]
+}
+
 // Dashboard address that test requests arrive at.
 // `call` sends requests to `http://example.test`.
 // The server (`core.ReadAPIRequestSiteURL`) treats any address that isn't localhost as https, so this becomes the address
@@ -916,7 +944,8 @@ const testDashboardURL = "https://example.test"
 // the config file has the sign-in GitHub App (encrypted with the server token, owned by `testUserID`) and the dashboard address (`testDashboardURL`).
 //
 // Args:
-//   - `starItems`, `starLists`: Contents of `db/star-items.json` and `db/star-lists.json`. An empty string means no file
+//   - `starItems`: The archive items as one JSON array, put in with `putStarItems`. An empty string means no item
+//   - `starLists`: Content of `db/star-lists.json`. An empty string means no file
 //
 // Returns:
 //   - The fake GitHub. Tests change its fields to set GitHub's behavior, and check the results (files, commits, request counts)
@@ -936,7 +965,8 @@ var fakeGitHubServers atomic.Int64
 // To test with an empty or foreign repository, change `files` or turn on `repoEmpty` after calling it.
 //
 // Args:
-//   - `starItems`, `starLists`: Contents of `db/star-items.json` and `db/star-lists.json`. An empty string means no file
+//   - `starItems`: The archive items as one JSON array, put in with `putStarItems`. An empty string means no item
+//   - `starLists`: Content of `db/star-lists.json`. An empty string means no file
 //
 // Returns:
 //   - The fake GitHub
@@ -947,9 +977,7 @@ func setupWithoutGitHubApp(t *testing.T, starItems string, starLists string) *fa
 	gh := &fakeGitHub{files: map[string]string{}, head: "commit-0", snapshots: map[string]map[string]string{},
 		trees: map[string]map[string]string{}, pending: map[string]fakeCommit{}, parents: map[string]string{},
 		readmes: map[int64]fakeReadme{}, blobs: map[string]string{}, workflowState: "active"}
-	if starItems != "" {
-		gh.files[core.StarItemsDBPath] = starItems
-	}
+	putStarItems(gh.files, starItems)
 	if starLists != "" {
 		gh.files[core.StarListsDBPath] = starLists
 	}
@@ -1544,8 +1572,8 @@ func TestStarItemsPatchAndDelete(t *testing.T) {
 	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=999", `{"note":"x"}`, cookie); rec.Code != 404 {
 		t.Errorf("missing id: got %d", rec.Code)
 	}
-	if rec := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id=1", "", cookie); rec.Code != 200 || strings.Contains(gh.readFile(core.StarItemsDBPath), `"id":1,`) {
-		t.Errorf("delete: %d %s", rec.Code, gh.readFile(core.StarItemsDBPath))
+	if rec := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id=1", "", cookie); rec.Code != 200 || strings.Contains(gh.readStarItems(), `"id":1,`) {
+		t.Errorf("delete: %d %s", rec.Code, gh.readStarItems())
 	}
 	want := []string{"user(star-items): change star lists of b/two", "user(star-items): remove a/one"}
 	if strings.Join(gh.commits, "|") != strings.Join(want, "|") {
@@ -1560,10 +1588,10 @@ func TestUpdateRetriesOnConflict(t *testing.T) {
 	cookie := login(t)
 	// Another device deleted a/one right before the note-saving commit
 	gh.interfereOnce = func(files map[string]string) {
-		files[core.StarItemsDBPath] = strings.Replace(files[core.StarItemsDBPath], strings.Split(sampleStarItems, "\n")[1]+"\n", "", 1)
+		putStarItems(files, strings.Replace(joinStarItems(files), strings.Split(sampleStarItems, "\n")[1]+"\n", "", 1))
 	}
 	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"after conflict"}`, cookie)
-	content := gh.readFile(core.StarItemsDBPath)
+	content := gh.readStarItems()
 	if rec.Code != 200 || !strings.Contains(content, "after conflict") || strings.Contains(content, `"id":1,`) {
 		t.Errorf("both changes should survive: %d\n%s", rec.Code, content)
 	}
@@ -1598,7 +1626,7 @@ func TestStarLists(t *testing.T) {
 	if rec := call(api.HandleArchiveStarLists, "DELETE", "/api/archive-star-lists?id=100", "", cookie); rec.Code != 200 {
 		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
 	}
-	if strings.Contains(gh.readFile(core.StarItemsDBPath), "[100]") || strings.Contains(gh.readFile(core.StarListsDBPath), `"id":100,`) {
+	if strings.Contains(gh.readStarItems(), "[100]") || strings.Contains(gh.readFile(core.StarListsDBPath), `"id":100,`) {
 		t.Errorf("star list 100 should be gone everywhere")
 	}
 	// Deleting the star list and cleaning up the items is one commit
@@ -1634,9 +1662,9 @@ func TestSync(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, "", "")
 	gh.starred = []string{"new/first", "new/second", "new/third", "old/archived"}
-	gh.files[core.StarItemsDBPath] = fmt.Sprintf("["+"\n"+
+	putStarItems(gh.files, fmt.Sprintf("["+"\n"+
 		`{"id":%d,"node_id":"R_%d","name":"old/archived","note":"memo","star_list_ids":[],"starred_at":"x"}`+
-		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived"))
+		"\n"+"]"+"\n", makeRepoID("old/archived"), makeRepoID("old/archived")))
 
 	repo := openTestDBRepo(t)
 	result, err := core.SyncArchiveWithGitHub(ctx, repo, testLongStepsEndBy(), false)
@@ -1913,7 +1941,7 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 	}
 
 	var archive []core.StarItem
-	json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &archive)
+	json.Unmarshal([]byte(gh.readStarItems()), &archive)
 	seen := map[int64]bool{}
 	for _, s := range archive {
 		if seen[s.ID] {
@@ -1948,8 +1976,8 @@ func TestStarItemsImportSkipsWhatAppearedMeanwhile(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"starred_repo_ids": []int64{all[0].Repo.ID, all[1].Repo.ID, all[2].Repo.ID}})
 	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", string(body), cookie)
-	if !strings.Contains(rec.Body.String(), `"added":2`) || strings.Count(gh.readFile(core.StarItemsDBPath), "race/repo-0000") != 1 {
-		t.Errorf("got %s\n%s", rec.Body, gh.readFile(core.StarItemsDBPath))
+	if !strings.Contains(rec.Body.String(), `"added":2`) || strings.Count(gh.readStarItems(), "race/repo-0000") != 1 {
+		t.Errorf("got %s\n%s", rec.Body, gh.readStarItems())
 	}
 }
 
@@ -2008,7 +2036,7 @@ func TestImportAndSyncKeepGitHubStarLists(t *testing.T) {
 	}
 	rust := starLists[2].ID
 	var archive []core.StarItem
-	json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &archive)
+	json.Unmarshal([]byte(gh.readStarItems()), &archive)
 	byName := map[string][]int64{}
 	for _, s := range archive {
 		byName[s.Name] = s.StarListIDs
@@ -2172,8 +2200,8 @@ func TestStarListDeletedWhileAssigning(t *testing.T) {
 	}
 	rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"star_list_ids":[100]}`, cookie)
 	// The archive read again has no Graphics, so the save is refused, and no ID pointing to a missing star list is saved
-	if rec.Code != 400 || strings.Contains(gh.readFile(core.StarItemsDBPath), `"name":"b/two","note":"","star_list_ids":[100]`) {
-		t.Errorf("got %d %s\n%s", rec.Code, rec.Body, gh.readFile(core.StarItemsDBPath))
+	if rec.Code != 400 || strings.Contains(gh.readStarItems(), `"name":"b/two","note":"","star_list_ids":[100]`) {
+		t.Errorf("got %d %s\n%s", rec.Code, rec.Body, gh.readStarItems())
 	}
 }
 
