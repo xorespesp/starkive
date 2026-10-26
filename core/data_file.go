@@ -12,8 +12,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -133,22 +135,103 @@ func (f shardedStarItemsDataFile) buildPaths() []string {
 	return paths
 }
 
+// Reads all shards at commit `commitSHA` into one list, for code that reads the items without writing.
+// A write reads the shards through `UpdateDBRepoFiles` instead, together with its other files.
+//
+// Returns:
+//   - The items, as `decodeForReading` gives them, or its error. An error if a shard can't be read
+func (f shardedStarItemsDataFile) readFromDBRepoAtCommit(ctx context.Context, repo *DBRepo, commitSHA string) ([]StarItem, error) {
+	filesAtCommit, err := readDBRepoFilesAtCommit(ctx, repo, f.buildPaths(), commitSHA)
+	if err != nil {
+		return nil, err
+	}
+	return f.decodeForReading(filesAtCommit)
+}
+
+// Reads all shards at the latest commit of the default branch into one list, for code that reads the items without writing.
+// The items always come from one commit.
+//
+// Returns:
+//   - The items, as `decodeShardContents` gives them, or its error. An error if the listing or a shard can't be read
+//
+// NOTE: The listing of `StarItemsDBDir` and the shards are asked for at the same time, so the answer comes in about one round trip.
+// The listing decides which content each shard has.
+// A shard whose read doesn't match the blob sha in the listing (a commit landed between the reads), or gave 404, is read again by that blob sha.
+// So only a shard missing from the listing is an error (502), and a passing 404 of one read is not.
+// The branch is named in full (`refs/heads/...`), because git looks up a short name as a tag before a branch (docs).
+func (f shardedStarItemsDataFile) readLatestFromDBRepo(ctx context.Context, repo *DBRepo) ([]StarItem, error) {
+	ref := "refs/heads/" + repo.branch
+	var blobSHAByPath map[string]string // Path -> blob sha, from the listing
+	var contents [StarItemShardCount][]byte
+	errs := make([]error, StarItemShardCount+1) // One for each shard, and the last for the listing
+	var wg sync.WaitGroup                       // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
+	wg.Add(1)
+	go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
+		defer wg.Done()
+		errs[StarItemShardCount] = RunWithPanicAsError(func() error { // A panic in a goroutine would end the whole process
+			var err error
+			blobSHAByPath, err = readBlobSHAsInFolder(ctx, repo, ref, StarItemsDBDir)
+			return err
+		})
+	}()
+	for index, shard := range f.shards {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[index] = RunWithPanicAsError(func() error {
+				var err error
+				contents[index], err = readDBRepoFileAtRef(ctx, repo, shard.path, ref) // Each goroutine writes its own slot, so no lock is needed
+				return err
+			})
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil { // `errors.Join`: combines several errors into one. `nil` if all are `nil`
+		return nil, err
+	}
+	for index, shard := range f.shards {
+		blobSHA, isListed := blobSHAByPath[shard.path]
+		switch {
+		case !isListed:
+			contents[index] = nil // Missing at the commit of the listing, whatever the read gave
+		case contents[index] == nil || computeGitBlobSHA(contents[index]) != blobSHA:
+			var err error
+			if contents[index], err = readDBRepoBlob(ctx, repo, blobSHA); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return f.decodeShardContents(contents)
+}
+
 // Decodes all shards from `filesAtCommit`, the files that `UpdateDBRepoFiles` read at one commit, into one list.
 // It is for a write that only reads the items: changes to the result aren't written.
 // A write that may change the items uses `decodeForWriting`.
 //
 // Returns:
-//   - The items, shard by shard in index order, and in file order within a shard.
-//     An error if a shard can't be decoded, or is missing or breaks the layout (`checkStarItemShard`).
+//   - The items, as `decodeShardContents` gives them, or its error.
 //     It panics if a shard wasn't among the paths given to `UpdateDBRepoFiles` (`DBRepoFilesAtCommit.FileContent`)
 func (f shardedStarItemsDataFile) decodeForReading(filesAtCommit *DBRepoFilesAtCommit) ([]StarItem, error) {
+	var contents [StarItemShardCount][]byte
+	for index, shard := range f.shards {
+		contents[index] = filesAtCommit.FileContent(shard.path)
+	}
+	return f.decodeShardContents(contents)
+}
+
+// Decodes the shards `contents` (by shard index, `nil` for a shard that doesn't exist) into one list.
+//
+// Returns:
+//   - The items, shard by shard in index order, and in file order within a shard.
+//     An error if a shard can't be decoded, or is missing or breaks the layout (`checkStarItemShard`)
+func (f shardedStarItemsDataFile) decodeShardContents(contents [StarItemShardCount][]byte) ([]StarItem, error) {
 	items := []StarItem{}
 	for index, shard := range f.shards {
-		shardItems, err := shard.decodeForReading(filesAtCommit)
+		shardItems, err := decodeJSONArray[StarItem](contents[index])
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", shard.path, err)
 		}
-		if err := checkStarItemShard(filesAtCommit, index, shardItems); err != nil {
+		if err := checkStarItemShard(index, contents[index], shardItems); err != nil {
 			return nil, err
 		}
 		items = append(items, shardItems...)
@@ -176,7 +259,7 @@ func (f shardedStarItemsDataFile) decodeForWriting(filesAtCommit *DBRepoFilesAtC
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", shard.path, err)
 		}
-		if err := checkStarItemShard(filesAtCommit, index, tracked.shardItems[index]); err != nil {
+		if err := checkStarItemShard(index, filesAtCommit.FileContent(shard.path), tracked.shardItems[index]); err != nil {
 			return nil, err
 		}
 		decoded = append(decoded, tracked.shardItems[index]...)
@@ -223,21 +306,21 @@ func (t *trackedShardedStarItemsDataFile) addIfChanged(changes *FileChangesCommi
 	return nil
 }
 
-// Checks shard `shardIndex`, whose items `items` were decoded from `filesAtCommit`.
+// Checks shard `shardIndex`, read as `content` (`nil` if it doesn't exist) and decoded into `items`.
 // The shard must exist, and every item must have a positive ID that belongs to this shard (`computeShardIndexOfStarItem`).
 // No ID may appear twice.
 //
 // Returns:
-//   - A 502 (`newMissingStarItemShardError`) if the shard doesn't exist at the commit.
-//     A data file that doesn't exist decodes as an empty list (`dataFile.decodeForReading`), so this keeps a missing shard from reading as an empty one.
+//   - A 502 (`newMissingStarItemShardError`) if the shard doesn't exist.
+//     A missing file decodes as an empty list (`decodeJSONArray`), so this keeps a missing shard from reading as an empty one.
 //     An error if an item breaks the layout
 //
 // NOTE: An item in the wrong shard would show in the list, but a write would look for it only in its own shard.
 // It could then never be changed or deleted, and Add would put a second copy in the right shard.
 // So a shard that breaks the rule is refused as a whole, and a person fixes the file.
-func checkStarItemShard(filesAtCommit *DBRepoFilesAtCommit, shardIndex int, items []StarItem) error {
+func checkStarItemShard(shardIndex int, content []byte, items []StarItem) error {
 	path := BuildStarItemShardPath(shardIndex)
-	if !filesAtCommit.HasFile(path) {
+	if content == nil {
 		return newMissingStarItemShardError(path)
 	}
 	isSeen := make(map[int64]bool, len(items)) // Item ID -> `true` once seen in this shard
