@@ -85,6 +85,58 @@ func TestOneItemWriteReadsOnlyItsShard(t *testing.T) {
 	}
 }
 
+// Returns how many reads of archive item shards the fake GitHub answered with the content, not with 304
+func countShardDownloads(gh *fakeGitHub) int {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	count := 0
+	for _, path := range gh.fileDownloads {
+		if strings.HasPrefix(path, core.StarItemsDBDir+"/") {
+			count++
+		}
+	}
+	return count
+}
+
+// Tests that one sync downloads each archive item shard only once, though it reads the archive several times.
+// The later reads ask with the `ETag` of the first, and GitHub answers 304 for the shards that didn't change.
+// A shard the sync wrote itself (a new Star) answers 304 too, because the write keeps it with its `ETag`
+func TestSyncDownloadsEachShardOnce(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"a/three"} // One new Star, so the sync writes shard 3 before the later reads
+	gh.mu.Lock()
+	gh.fileDownloads = nil
+	gh.mu.Unlock()
+	if rec := callScheduledSync(); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"synced"}` {
+		t.Fatalf("sync: %d %s", rec.Code, rec.Body)
+	}
+	if downloads := countShardDownloads(gh); downloads != core.StarItemShardCount || !strings.Contains(gh.readStarItems(), "a/three") {
+		t.Errorf("shard downloads %d, archive %s", downloads, gh.readStarItems())
+	}
+}
+
+// Tests that a sync whose first commit loses to another device's commit keeps both changes,
+// and that its retry downloads again only the shard the other commit changed (the others answer 304)
+func TestSyncRetryDownloadsOnlyTheShardAnotherWriteChanged(t *testing.T) {
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	gh.starred = []string{"a/three"} // One new Star, so the sync's first write is a whole-catalog write
+	gh.mu.Lock()
+	gh.fileDownloads = nil
+	// Another device edits the note of b/two (shard 2) right before the sync's first commit moves the branch
+	gh.interfereOnce = func(files map[string]string) {
+		putStarItems(files, strings.Replace(joinStarItems(files), `"name":"b/two","note":""`, `"name":"b/two","note":"other device"`, 1))
+	}
+	gh.mu.Unlock()
+	if rec := callScheduledSync(); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"status":"synced"}` {
+		t.Fatalf("sync: %d %s", rec.Code, rec.Body)
+	}
+	archive := gh.readStarItems()
+	if downloads := countShardDownloads(gh); downloads != core.StarItemShardCount+1 ||
+		!strings.Contains(archive, "a/three") || !strings.Contains(archive, `"note":"other device"`) {
+		t.Errorf("shard downloads %d, archive %s", downloads, archive)
+	}
+}
+
 // Tests that a missing shard is a 502 for the list and for a write, and nothing is read as an empty archive or written
 func TestMissingStarItemShardIsBadGateway(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)

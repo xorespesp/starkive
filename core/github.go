@@ -34,10 +34,11 @@ var httpClient = &http.Client{Timeout: githubTimeout}
 // Options of a GitHub API request.
 // Empty fields use the default
 type GitHubAPIRequest struct {
-	Method string // HTTP method. GET if empty
-	Accept string // `Accept` header. `application/vnd.github+json` if empty
-	Body   any    // Body to send as JSON. `nil` if there is none
-	Token  string // Token to send instead of the DB repository token. The DB repository token if empty
+	Method      string // HTTP method. GET if empty
+	Accept      string // `Accept` header. `application/vnd.github+json` if empty
+	Body        any    // Body to send as JSON. `nil` if there is none
+	Token       string // Token to send instead of the DB repository token. The DB repository token if empty
+	IfNoneMatch string // `If-None-Match` header: an `ETag` GitHub gave before, so it can answer 304 if nothing changed. Not sent if empty
 }
 
 // Sends a request to the GitHub API (REST or GraphQL).
@@ -48,7 +49,7 @@ type GitHubAPIRequest struct {
 //     Every function that reaches GitHub takes one as its first argument, or reads it from the request (`r.Context()`),
 //     and passes it down, so no request outlives the deadline
 //   - `path`: Path and query after `cfg.GitHubAPI` (e.g. `/repos/me/archive/git/ref/heads/main`)
-//   - `opt`: Method, `Accept`, body and token
+//   - `opt`: Method, `Accept`, body, token and `If-None-Match`
 //
 // Returns:
 //   - The response. Failure answers (4xx, 5xx) are returned without an error too.
@@ -85,6 +86,9 @@ func CallGitHubAPI(ctx context.Context, cfg *EnvConfig, path string, opt GitHubA
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", opt.Accept)
+	if opt.IfNoneMatch != "" {
+		req.Header.Set("If-None-Match", opt.IfNoneMatch)
+	}
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "starkive")
 	req.Header.Set("X-Github-Next-Global-ID", "1") // Gets the `node_id` of old repositories in the new format (`R_kgDO...`) too. GitHub plans to retire the old format (`MDEw...`) (docs)

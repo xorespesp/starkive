@@ -47,15 +47,29 @@ func ReadDBRepoFile(ctx context.Context, repo *DBRepo, path string) ([]byte, err
 //
 // NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
 // Archive files can grow larger than that, so they are fetched in raw format.
+// A file that this request already read is asked for with the `ETag` it came with (`dbRepoFileCache`).
+// GitHub then answers 304 with no body if the content is the same, also at another commit or by branch name,
+// and a 304 doesn't count toward the rate limit (measured).
+// So reading the same file again in one request (a retry after a conflict, the next step of a sync) downloads nothing if it didn't change,
+// and the content that comes back is always the one at `ref`.
+// A file that this request wrote is kept too (`keepCommittedDBRepoFiles`).
 func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, error) {
-	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildContentsAPIPath(path)+"?ref="+url.QueryEscape(ref),
-		GitHubAPIRequest{Accept: "application/vnd.github.raw+json"})
+	cache := readDBRepoFileCache(ctx)
+	kept, isKept := cache.get(path)
+	request := GitHubAPIRequest{Accept: "application/vnd.github.raw+json"}
+	if isKept {
+		request.IfNoneMatch = kept.etag
+	}
+	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildContentsAPIPath(path)+"?ref="+url.QueryEscape(ref), request)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
 		return nil, nil
+	}
+	if isKept && res.StatusCode == http.StatusNotModified {
+		return kept.content, nil
 	}
 	if err := CheckGitHubResponseWithRateLimit(res); err != nil {
 		return nil, err
@@ -64,6 +78,7 @@ func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref str
 	if err != nil { // The body stopped coming (a dropped connection, `githubTimeout` or the deadline of `ctx`)
 		return nil, newGitHubUnreachableError(err)
 	}
+	cache.put(path, res.Header.Get("ETag"), content)
 	return content, nil
 }
 
@@ -432,6 +447,7 @@ func UpdateDBRepoFiles(ctx context.Context, repo *DBRepo, paths []string, buildF
 
 		err = commitFiles(ctx, repo, head, changes)
 		if err == nil {
+			keepCommittedDBRepoFiles(ctx, changes)
 			return nil
 		}
 		if errors.Is(err, errBranchMoved) && attempt < maxUpdateAttempts { // The only case that is retried is a moved branch

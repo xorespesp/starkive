@@ -69,6 +69,7 @@ type fakeGitHub struct {
 	blobs               map[string]string             // Created blob sha -> content
 	blobReads           int                           // Number of blob reads by sha (`/git/blobs/<sha>`)
 	fileReads           []string                      // Paths of the file reads (Contents API), in the order they came
+	fileDownloads       []string                      // Paths of the file reads answered with the content, not with 304 (`If-None-Match`)
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
 	readmeQueries       int                           // Number of README queries by GraphQL (folder listings and file contents)
 	readmeListedIDs     [][]string                    // `node_id`s of each README folder listing query, in the order the queries came
@@ -494,6 +495,16 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		content, ok := files[path]
+		// The `ETag` of a file is its blob sha, and a request with the same `If-None-Match` gets 304 with no body,
+		// also at another commit and by branch name (measured)
+		if etag := `"` + computeGitBlobSHA(content) + `"`; ok && r.Header.Get("If-None-Match") == etag {
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		} else if ok {
+			w.Header().Set("ETag", etag)
+			f.fileDownloads = append(f.fileDownloads, path)
+		}
 		if !ok {
 			// For a folder instead of a file, answers with a list like GitHub (here an empty array)
 			for name := range files {

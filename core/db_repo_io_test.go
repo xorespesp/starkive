@@ -111,6 +111,44 @@ func TestReadDBRepoBlob(t *testing.T) {
 	}
 }
 
+// Tests that a file read again in one request is asked for with its `ETag`, so an unchanged file downloads nothing.
+//   - In a request (`withDBRepoFileCache`), the second read sends `If-None-Match`, gets 304, and gives the same content
+//   - A file that changed since comes in full, and its new content is what later reads compare against
+//   - Without a request (no cache), every read is a plain read
+func TestReadDBRepoFileAtRefReadsAgainWithETag(t *testing.T) {
+	content := "[]\n"
+	var downloads atomic.Int32 // Answers with the content, not 304
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		etag := `"` + computeGitBlobSHA([]byte(content)) + `"`
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		downloads.Add(1)
+		fmt.Fprint(w, content)
+	}))
+	t.Cleanup(server.Close)
+	repo := newTestDBRepo(server.URL)
+	ctx := withDBRepoFileCache(t.Context())
+
+	for i := range 2 {
+		if got, err := readDBRepoFileAtRef(ctx, repo, StarListsDBPath, "main"); err != nil || string(got) != "[]\n" || downloads.Load() != 1 {
+			t.Errorf("read %d: %q, %v, downloads %d", i+1, got, err, downloads.Load())
+		}
+	}
+	content = "[\n{\"id\":1}\n]\n" // Another commit changed it
+	if got, err := readDBRepoFileAtRef(ctx, repo, StarListsDBPath, "main"); err != nil || string(got) != content || downloads.Load() != 2 {
+		t.Errorf("changed: %q, %v, downloads %d", got, err, downloads.Load())
+	}
+	if got, err := readDBRepoFileAtRef(ctx, repo, StarListsDBPath, "main"); err != nil || string(got) != content || downloads.Load() != 2 {
+		t.Errorf("changed, read again: %q, %v, downloads %d", got, err, downloads.Load())
+	}
+	if got, err := readDBRepoFileAtRef(t.Context(), repo, StarListsDBPath, "main"); err != nil || string(got) != content || downloads.Load() != 3 {
+		t.Errorf("no request: %q, %v, downloads %d", got, err, downloads.Load())
+	}
+}
+
 // Tests which commits `FileChangesCommit.check` accepts.
 //   - A commit that changes nothing is refused, even with a valid message
 //   - A commit with changes needs a valid message (`errInvalidCommitMessage`)
