@@ -136,7 +136,7 @@ func WriteAPIJSONResponse(w http.ResponseWriter, status int, body any) {
 // If the browser accepts it, the answer is compressed with gzip.
 //
 // Args:
-//   - `path`: File path in the DB repository (`StarItemsDBPath` and so on)
+//   - `path`: File path in the DB repository (`StarListsDBPath` and so on). The archive items have their own answer, `WriteAPIAllStarItemsResponse`
 //
 // Returns:
 //   - The error if the file couldn't be read. If the file doesn't exist yet, it answers with an empty list `[]`
@@ -153,17 +153,41 @@ func WriteAPIDBFileResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo
 	if content == nil {
 		content = []byte("[]")
 	}
+	return writeAPIBodyGzipIfAccepted(w, r, content)
+}
+
+// Answers with all archive items as one JSON array, one item per line.
+// It reads every shard at the latest commit (`shardedStarItemsDataFile.readLatestFromDBRepo`), so the items are from one commit and are checked.
+// If the browser accepts it, the answer is compressed with gzip.
+func WriteAPIAllStarItemsResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo) error {
+	ctx := r.Context() // The deadline that `ServeAPIRequest` set for this request
+	timingStep := beginServerTimingStep(ctx, "github-read")
+	items, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
+	timingStep.endWithDesc(StarItemsDBDir)
+	if err != nil {
+		return err
+	}
+	content, err := encodeJSONArrayByLine(items)
+	if err != nil {
+		return err
+	}
+	return writeAPIBodyGzipIfAccepted(w, r, content)
+}
+
+// Writes the JSON array `content` as the answer, compressed with gzip if the browser accepts it.
+//
+// NOTE: The whole archive goes in one answer, so Vercel's response limit (4.5MB, docs) caps the archive size.
+// Compression makes it about 4 times smaller (measured).
+func writeAPIBodyGzipIfAccepted(w http.ResponseWriter, r *http.Request, content []byte) error {
 	setAPIJSONResponseHeaders(w)
 	w.Header().Add("Vary", "Accept-Encoding") // Tells that the body differs by request header even at the same address
 	if !isGzipAccepted(r) {
-		_, err = w.Write(content)
+		_, err := w.Write(content)
 		return err
 	}
-	// The whole file goes in one answer, so Vercel's response limit (4.5MB, docs) caps the archive size.
-	// Compression makes it about 4 times smaller (measured)
 	w.Header().Set("Content-Encoding", "gzip")
 	zw := gzip.NewWriter(w) // Writer that compresses what is written and passes it on to `w`. `Close` writes the remaining data and the end mark
-	if _, err = zw.Write(content); err != nil {
+	if _, err := zw.Write(content); err != nil {
 		return err
 	}
 	return zw.Close()

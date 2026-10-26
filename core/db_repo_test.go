@@ -14,7 +14,8 @@ import (
 )
 
 // Catches changes that may require raising the format version.
-// It writes out the DB repository layout (path constants and sample README paths), the marker, the line that marks a truncated README,
+// It writes out the DB repository layout (path constants, the shard count, where sample IDs go and sample README paths),
+// the marker, the line that marks a truncated README,
 // and the JSON shape of the config file (`dbConfigFile`) and the data files (`StarItem`, `StarList`, `RepoMeta`), and pins their hash.
 // When they change, the test fails.
 // Then decide whether `DBRepoFormat` must go up (a layout or shape change is a major change),
@@ -24,8 +25,12 @@ import (
 func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 	readmePath := FetchedReadme{extension: "md"}.buildSnapshotPath(12345)
 	absentMarkerPath := FetchedReadme{isAbsent: true}.buildSnapshotPath(12345)
+	shardRule := fmt.Sprint(StarItemShardCount) // The shard count and where sample IDs go fix the item layout
+	for _, id := range []int64{1, 8, 12345, 1420266966} {
+		shardRule += " " + BuildStarItemShardPath(computeShardIndexOfStarItem(id))
+	}
 	shape := strings.Join([]string{
-		MarkerDBPath, ConfigDBPath, StarItemsDBPath, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
+		MarkerDBPath, ConfigDBPath, StarItemsDBDir, shardRule, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
 		ReadmesDBDir, readmePath, absentMarkerPath, readmeTruncationLine,
 		string(EncodeDBRepoMarker()),
 		describeJSONShape(reflect.TypeOf(dbConfigFile{})),
@@ -33,7 +38,7 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 		describeJSONShape(reflect.TypeOf(StarList{})),
 		describeJSONShape(reflect.TypeOf(RepoMeta{})),
 	}, "\n")
-	const reviewed = "92527a64acfc9fde37ddffc3214feeb94bbb4f7236928d20fea754abc2c998c0"
+	const reviewed = "f2639a82a616b0b209d19d3b1f8e4c74e72410556cabe0aabcab12309ce73e56"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(shape))); got != reviewed {
 		t.Errorf("the DB repository format changed (sha256 %s). Decide whether core.DBRepoFormat must go up, then update the hash in this test:\n%s", got, shape)
 	}

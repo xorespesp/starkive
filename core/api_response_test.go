@@ -62,7 +62,7 @@ func TestServeAPIRequestAnswersPanicWith500(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.test/api/archive-star-items", nil)
 	ServeAPIRequest(rec, req, func(w http.ResponseWriter, r *http.Request) error {
 		var filesAtCommit DBRepoFilesAtCommit
-		filesAtCommit.FileContent(StarItemsDBPath) // A path that wasn't read panics
+		filesAtCommit.FileContent(StarListsDBPath) // A path that wasn't read panics
 		return nil
 	})
 	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "Internal server error") ||

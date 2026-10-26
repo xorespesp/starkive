@@ -67,6 +67,7 @@ type fakeGitHub struct {
 	treeCalls           int                           // Number of tree creation requests
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	blobs               map[string]string             // Created blob sha -> content
+	blobReads           int                           // Number of blob reads by sha (`/git/blobs/<sha>`)
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
 	readmeQueries       int                           // Number of README queries by GraphQL (folder listings and file contents)
 	readmeListedIDs     [][]string                    // `node_id`s of each README folder listing query, in the order the queries came
@@ -97,6 +98,7 @@ type fakeGitHub struct {
 	ownerCalls          int                           // Number of `/user` requests with the server token
 	contentsHangup      bool                          // If `true`, file read requests are cut off without a response (network error)
 	branchReadsLag      bool                          // If `true`, files read by branch name have the previous commit's content (GitHub briefly shows a just-moved branch at the old commit). Reads by commit sha are correct
+	branchReadNotFound  string                        // If not empty, a read of this path by branch name gives 404 (a passing 404 for a file that exists). Reads by commit sha are correct
 	requests            int                           // Number of all requests received
 	workflowState       string                        // State of the sync workflow (`active`, `disabled_manually`, `disabled_inactivity`, etc.)
 	workflowToggles     int                           // Number of requests to turn the workflow on or off
@@ -477,13 +479,18 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ref := r.URL.Query().Get("ref")
-		files := f.files // For the branch name (`main`), the current files
-		if ref != "main" {
+		isBranch := ref == "main" || ref == "refs/heads/main"
+		files := f.files // For the branch name (`main` or `refs/heads/main`), the current files
+		if !isBranch {
 			files = f.readFilesAt(ref)
 		} else if previous, ok := f.snapshots[f.parents[f.head]]; f.branchReadsLag && ok {
 			files = previous
 		}
 		path := strings.TrimPrefix(r.URL.Path, contents)
+		if isBranch && path == f.branchReadNotFound {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
 		content, ok := files[path]
 		if !ok {
 			// For a folder instead of a file, answers with a list like GitHub (here an empty array)
@@ -559,12 +566,16 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/") && r.Method == http.MethodGet:
 		// List a folder at a commit (`<commit sha>:<folder path>`, `recursive=1`).
+		// The branch named in full (`refs/heads/main`) works in place of the commit sha.
 		// Paths are relative to the folder.
 		// Only files are listed, because the server reads only files.
 		// A folder with no file gives 404, which the server reads as an empty folder.
 		// A request without `recursive=1` also gives 404, because the server always sends it
 		f.treeListCalls++
 		commitSHA, folderPath, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/trees/"), ":")
+		if commitSHA == "refs/heads/main" {
+			commitSHA = f.head
+		}
 		entries := []string{}
 		for path, content := range f.readFilesAt(commitSHA) {
 			if relativePath, inFolder := strings.CutPrefix(path, folderPath+"/"); inFolder {
@@ -639,6 +650,20 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sha := fmt.Sprintf("tree-%d", len(f.trees)+1)
 		f.trees[sha] = files
 		fmt.Fprintf(w, `{"sha":%q}`, sha)
+
+	case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/blobs/") && r.Method == http.MethodGet:
+		// Read a blob by its sha, in raw format: any file content of a commit, a made tree, or a made blob
+		f.blobReads++
+		sha := strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/blobs/")
+		for _, files := range slices.Concat([]map[string]string{f.files, f.blobs}, slices.Collect(maps.Values(f.snapshots)), slices.Collect(maps.Values(f.trees))) {
+			for _, content := range files {
+				if computeGitBlobSHA(content) == sha {
+					io.WriteString(w, content)
+					return
+				}
+			}
+		}
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 
 	case r.URL.Path == "/repos/me/archive/git/blobs" && r.Method == http.MethodPost:
 		// Create a blob from base64 content.
@@ -906,7 +931,7 @@ func (f *fakeGitHub) readFile(path string) string {
 	return f.files[path]
 }
 
-// Returns the archive items at the branch tip as one JSON array, one item per line (`joinStarItems`).
+// Returns the archive items of all shards at the branch tip as one JSON array, one item per line, shard by shard (`joinStarItems`).
 // Tests use it to check what the server wrote.
 func (f *fakeGitHub) readStarItems() string {
 	f.mu.Lock()
@@ -914,24 +939,87 @@ func (f *fakeGitHub) readStarItems() string {
 	return joinStarItems(f.files)
 }
 
-// Puts archive items `content` (a JSON array, one item per line) into `files` the way the DB repository stores them.
-// An empty string means no item, so there is no item file.
+// Puts archive items `content` (a JSON array, one item per line) into `files` as the shards, split by ID like the server.
+// Each item keeps its line as it is, and every shard is written (an empty one as `[]`).
+// An empty string means no item.
+// Content that isn't a JSON array goes into shard 00 as it is, and the other shards are empty.
 //
 // NOTE: A test about the items, not about how they are stored, puts and reads them only through three helpers.
 // They are `putStarItems`, `joinStarItems` and `fakeGitHub.readStarItems`.
 // So a change of the storage layout changes only these helpers and the tests about the layout itself.
 func putStarItems(files map[string]string, content string) {
-	if content == "" {
-		delete(files, core.StarItemsDBPath)
-		return
+	lines := make([][]string, core.StarItemShardCount) // Item lines of each shard
+	var raws []json.RawMessage                         // `json.RawMessage`: the bytes of each element as they are
+	if content != "" {
+		if err := json.Unmarshal([]byte(content), &raws); err != nil {
+			for index := range core.StarItemShardCount {
+				files[core.BuildStarItemShardPath(index)] = "[]\n"
+			}
+			files[core.BuildStarItemShardPath(0)] = content
+			return
+		}
 	}
-	files[core.StarItemsDBPath] = content
+	for _, raw := range raws {
+		var item struct {
+			ID int64 `json:"id"`
+		}
+		json.Unmarshal(raw, &item)
+		lines[shardIndexOf(item.ID)] = append(lines[shardIndexOf(item.ID)], string(raw))
+	}
+	for index := range core.StarItemShardCount {
+		files[core.BuildStarItemShardPath(index)] = joinJSONLines(lines[index])
+	}
 }
 
-// Returns the archive items in `files` as one JSON array, one item per line, as `putStarItems` takes them.
-// An empty string if there is no item file.
+// Returns the archive items of all shards in `files` as one JSON array, one item per line, shard by shard in index order.
+// It is the form `putStarItems` takes.
+// A shard that isn't a JSON array is put in as one line as it is.
 func joinStarItems(files map[string]string) string {
-	return files[core.StarItemsDBPath]
+	lines := []string{}
+	for index := range core.StarItemShardCount {
+		content := files[core.BuildStarItemShardPath(index)]
+		var raws []json.RawMessage
+		if err := json.Unmarshal([]byte(content), &raws); err != nil {
+			lines = append(lines, content)
+			continue
+		}
+		for _, raw := range raws {
+			lines = append(lines, string(raw))
+		}
+	}
+	return joinJSONLines(lines)
+}
+
+// Joins JSON values, one per line, into a JSON array in the data file format (`[]` and a line break if there are none)
+func joinJSONLines(lines []string) string {
+	if len(lines) == 0 {
+		return "[]\n"
+	}
+	return "[\n" + strings.Join(lines, ",\n") + "\n]\n"
+}
+
+// Returns the index of the shard that holds the item with ID `id`, like the server (`id % core.StarItemShardCount`)
+func shardIndexOf(id int64) int { return int(id % int64(core.StarItemShardCount)) }
+
+// Reports whether the names that appear in `order` keep that order inside each shard of `archiveNames` (the archive in shard order).
+// The shard of a name comes from its fake repository ID (`makeRepoID`). Names not in `order` are skipped
+func isInShardOrder(archiveNames []string, order []string) bool {
+	last := make([]int, core.StarItemShardCount) // Position in `order` of the last name seen in each shard
+	for i := range last {
+		last[i] = -1
+	}
+	for _, name := range archiveNames {
+		position := slices.Index(order, name)
+		if position < 0 {
+			continue
+		}
+		shard := shardIndexOf(makeRepoID(name))
+		if position < last[shard] {
+			return false
+		}
+		last[shard] = position
+	}
+	return true
 }
 
 // Dashboard address that test requests arrive at.
@@ -1516,9 +1604,9 @@ func TestStarItemsAdd(t *testing.T) {
 	if rec.Code != 200 || added.Name != "torvalds/linux" || len(added.StarListIDs) != 1 || added.StarListIDs[0] != 200 {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body)
 	}
-	firstLine := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")[1]
+	firstLine := strings.Split(gh.readFile(core.BuildStarItemShardPath(shardIndexOf(2325298))), "\n")[1]
 	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_2325298","name":"torvalds/linux","note":"","star_list_ids":[200],`) {
-		t.Errorf("new entry should be first: %s", firstLine)
+		t.Errorf("new entry should be first in its shard: %s", firstLine)
 	}
 
 	cases := []struct {
@@ -1566,7 +1654,7 @@ func TestStarItemsPatchAndDelete(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
 	}
-	if line := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")[2]; !strings.Contains(line, `"note":"메모 <중요>","star_list_ids":[100,200]`) {
+	if line := strings.Split(gh.readFile(core.BuildStarItemShardPath(shardIndexOf(2))), "\n")[1]; !strings.Contains(line, `"note":"메모 <중요>","star_list_ids":[100,200]`) {
 		t.Errorf("patched line: %s", line)
 	}
 	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=999", `{"note":"x"}`, cookie); rec.Code != 404 {
@@ -1653,7 +1741,7 @@ func TestRepoMetaDropsInaccessible(t *testing.T) {
 }
 
 // Tests the sync (`core.SyncArchiveWithGitHub`).
-//   - New Stars go at the top of the archive in GitHub's order. Existing items (including notes) aren't touched
+//   - New Stars go at the top of their shards in GitHub's order. Existing items (including notes) aren't touched
 //   - Metadata snapshots are made in archive order
 //   - There are three commits: adding, refreshing metadata snapshots, and refreshing README snapshots.
 //     The add commit's body lists the added repositories
@@ -1674,15 +1762,25 @@ func TestSync(t *testing.T) {
 	if result != (core.ArchiveSyncResult{NumStarredRepos: 4, NumAddedRepos: 3, NumMetaCheckedRepos: 4, NumUnavailableRepos: 0, NumCheckedReadmes: 4}) {
 		t.Errorf("result = %+v", result)
 	}
-	lines := strings.Split(gh.readFile(core.StarItemsDBPath), "\n")
-	// Three new Stars go at the top in GitHub's order.
+	var archive []core.StarItem
+	json.Unmarshal([]byte(gh.readStarItems()), &archive)
+	archiveNames := []string{} // Names in archive order (shard by shard)
+	for _, s := range archive {
+		archiveNames = append(archiveNames, s.Name)
+	}
+	// Three new Stars go at the top of their shards in GitHub's order.
 	// Existing items (including notes) stay as they are
-	if len(lines) != 7 || !strings.Contains(lines[1], `"name":"new/first"`) || !strings.Contains(lines[4], `"note":"memo"`) {
-		t.Errorf("archive:"+"\n"+"%s", strings.Join(lines, "\n"))
+	if len(archive) != 4 || !strings.Contains(gh.readStarItems(), `"name":"old/archived","note":"memo"`) || !isInShardOrder(archiveNames, gh.starred) {
+		t.Errorf("archive:"+"\n"+"%s", gh.readStarItems())
 	}
 	// Four snapshots are made, also in archive order
 	metas := readMeta(t, gh)
-	if len(metas) != 4 || metas[0].Name != "new/first" || metas[0].Description != "about new/first" || metas[0].License != "MIT" || metas[0].UpdatedAt == "" {
+	metaNames := []string{}
+	for _, m := range metas {
+		metaNames = append(metaNames, m.Name)
+	}
+	first := slices.IndexFunc(metas, func(m core.RepoMeta) bool { return m.Name == "new/first" })
+	if len(metas) != 4 || !slices.Equal(metaNames, archiveNames) || first < 0 || metas[first].Description != "about new/first" || metas[first].License != "MIT" || metas[first].UpdatedAt == "" {
 		t.Errorf("meta = %+v", metas)
 	}
 
@@ -1690,7 +1788,7 @@ func TestSync(t *testing.T) {
 	want := []string{
 		"sync(star-items): archive 3 stars\n\n- new/first\n- new/second\n- new/third",
 		"sync(repo-meta): refresh 4 repos, 0 unavailable",
-		"sync(readmes): update readmes of 4 repos\n\nNo README:\n- new/first\n- new/second\n- new/third\n- old/archived",
+		"sync(readmes): update readmes of 4 repos\n\nNo README:\n- " + strings.Join(archiveNames, "\n- "), // In archive order
 	}
 	if strings.Join(gh.commits, "|") != strings.Join(want, "|") {
 		t.Errorf("commits = %q", gh.commits)
@@ -1949,9 +2047,18 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 		}
 		seen[s.ID] = true
 	}
-	// Items go at the top in GitHub's order, and the starred time is GitHub's value
-	if len(archive) != 2502 || archive[0].Name != all[0].Repo.FullName || archive[0].StarredAt != "2026-10-01T00:00:00Z" || archive[0].StarListIDs[0] != 200 {
-		t.Errorf("archive has %d entries (want 2500 + 2 existing), first %+v", len(archive), archive[0])
+	// Items go at the top of their shards in GitHub's order, and the starred time is GitHub's value
+	archiveNames := []string{}
+	gitHubOrder := []string{}
+	for _, s := range archive {
+		archiveNames = append(archiveNames, s.Name)
+	}
+	for _, s := range all {
+		gitHubOrder = append(gitHubOrder, s.Repo.FullName)
+	}
+	newest := slices.IndexFunc(archive, func(s core.StarItem) bool { return s.Name == all[0].Repo.FullName })
+	if len(archive) != 2502 || newest < 0 || archive[newest].StarredAt != "2026-10-01T00:00:00Z" || archive[newest].StarListIDs[0] != 200 || !isInShardOrder(archiveNames, gitHubOrder) {
+		t.Errorf("archive has %d entries (want 2500 + 2 existing), newest at %d", len(archive), newest)
 	}
 
 	// Bad input: empty, or both shapes mixed

@@ -1,7 +1,7 @@
-// `/api/archive-star-items`: API that reads and changes the archive items (`db/star-items.json`).
+// `/api/archive-star-items`: API that reads and changes the archive items (the shards under `db/star-items/`).
 // Add and delete also write or delete the item's README snapshot (`db/readmes/`) in the same commit.
 //
-//	GET              -> The raw item file (a JSON array, one item per line). `[]` if the file doesn't exist yet
+//	GET              -> All items as one JSON array, one item per line
 //	POST             { repo_full_name_or_url, star_list_id? } -> The added item (Add: adds one repository directly, without a Star)
 //	                 `repo_full_name_or_url` is `owner/repo` or a GitHub repository address.
 //	                 `star_list_id` is the star list to put it in (none if missing or 0)
@@ -96,7 +96,7 @@ func updateStarItem(ctx context.Context, dbRepo *core.DBRepo, id int64, change f
 	return updated, err
 }
 
-// Returns the raw item file to a signed-in user.
+// Returns all archive items to a signed-in user.
 // Answers 401 if not signed in.
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
 func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
@@ -104,7 +104,7 @@ func handleArchiveStarItemsGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return core.WriteAPIDBFileResponse(w, r, dbRepo, core.StarItemsDBPath)
+	return core.WriteAPIAllStarItemsResponse(w, r, dbRepo)
 }
 
 // Largest number of repository IDs in one Import request.

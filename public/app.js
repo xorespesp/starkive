@@ -38,7 +38,7 @@ const UNAVAILABLE = ':unavailable'; // Repositories that GitHub can no longer fi
 // All page state.
 // `render` draws from this alone
 const state = {
-  allStarItems: [], // All archive items (`db/star-items.json` as is), including the ones being removed
+  allStarItems: [], // All archive items (as `/api/archive-star-items` gives them), including the ones being removed
   removingIds: new Set(), // IDs of items whose removal was sent and not answered yet
   // Archive items to show: `allStarItems` without the ones being removed.
   // The page reads and writes the archive only through this, so no reader has to leave them out on its own
@@ -401,7 +401,7 @@ function scheduleRender() {
  * Builds the repository details for the page.
  * It merges the archive item, the snapshot and the live details from GitHub.
  *
- * @param {object} item Archive item (one line of `db/star-items.json`)
+ * @param {object} item Archive item (one element of what `/api/archive-star-items` gives)
  * @returns {object} Details for the page:
  *   `available` (whether GitHub can find it), `unavailableSince` (when it became unavailable, an empty string if unknown),
  *   `name` (current name), `previousName` (the name at archive time, if it differs), `url`, `description`, `language`, `languageColor`, `topics`,

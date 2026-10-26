@@ -34,7 +34,7 @@ type serverTimings struct {
 	requestedAt time.Time  // When the request started. `total` is measured from it
 	instance    string     // Which request of the instance this is, and how long the instance has been up
 	mu          sync.Mutex // Lock for `entries`
-	entries     []string   // `Server-Timing` items like `github-read;dur=242.1;desc="db/star-items.json"`, in the order the steps ended
+	entries     []string   // `Server-Timing` items like `github-read;dur=242.1;desc="db/star-items"`, in the order the steps ended
 }
 
 // Key of the `serverTimings` in a `ctx`.

@@ -144,7 +144,7 @@ func handleArchiveStarListsPatch(w http.ResponseWriter, r *http.Request) error {
 // The repositories (items) stay in the archive.
 // Answers 400 if `id` isn't a number, and 404 if the star list doesn't exist.
 //
-// NOTE: The star list definitions (`db/star-lists.json`) and the item membership (`db/star-items.json`) change together in one commit.
+// NOTE: The star list definitions (`db/star-lists.json`) and the item membership (the archive item shards) change together in one commit.
 // So no in-between state, such as "an item that points to a deleted star list", is left in the repository.
 func handleArchiveStarListsDelete(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()

@@ -268,8 +268,9 @@ func TestReformattedConfigFileIsNotRewritten(t *testing.T) {
 func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
+	shardPath := core.BuildStarItemShardPath(1) // The shard of a/one (ID 1)
 	var items []map[string]any
-	if err := json.Unmarshal([]byte(gh.readFile(core.StarItemsDBPath)), &items); err != nil {
+	if err := json.Unmarshal([]byte(gh.readFile(shardPath)), &items); err != nil {
 		t.Fatal(err)
 	}
 	reformatted, err := json.MarshalIndent(items, "", "  ")
@@ -277,7 +278,7 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	gh.mu.Lock()
-	gh.files[core.StarItemsDBPath] = string(reformatted)
+	gh.files[shardPath] = string(reformatted)
 	before := len(gh.commits)
 	gh.mu.Unlock()
 	repo := openTestDBRepo(t)
@@ -289,7 +290,7 @@ func TestReformattedArchiveFileIsNotRewritten(t *testing.T) {
 		tx.StarLists = append(tx.StarLists, core.StarList{ID: 9999, Name: "new"})
 		return core.NewCommitMessage("user(star-lists)", "add new"), nil
 	})
-	if err != nil || len(gh.commits) != before+1 || gh.readFile(core.StarItemsDBPath) != string(reformatted) || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
+	if err != nil || len(gh.commits) != before+1 || gh.readFile(shardPath) != string(reformatted) || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
 		t.Errorf("star lists changed: %v, commits %d -> %d", err, before, len(gh.commits))
 	}
 }
@@ -321,16 +322,20 @@ func TestArchiveWritesReadOnlyTheirFiles(t *testing.T) {
 		t.Errorf("star catalog: %v, files %q", err, gh.files)
 	}
 
-	setFile(core.StarItemsDBPath, "not JSON")
+	setFile(core.BuildStarItemShardPath(0), "not JSON")
 	err = core.UpdateStarLists(ctx, repo, func(starLists *[]core.StarList) (core.CommitMessage, error) {
 		*starLists = append(*starLists, core.StarList{ID: 9999, Name: "new"})
 		return core.NewCommitMessage("user(star-lists)", "create new"), nil
 	})
-	if err != nil || gh.readFile(core.StarItemsDBPath) != "not JSON" || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
+	if err != nil || gh.readFile(core.BuildStarItemShardPath(0)) != "not JSON" || !strings.Contains(gh.readFile(core.StarListsDBPath), `"new"`) {
 		t.Errorf("star lists: %v, files %q", err, gh.files)
 	}
 
-	setFile(core.StarItemsDBPath, sampleStarItems)
+	gh.mu.Lock()
+	sampleFiles := copyFiles(gh.files)
+	putStarItems(sampleFiles, sampleStarItems) // Back to the sample items in every shard
+	gh.moveHead(gh.head+"-edit", sampleFiles)
+	gh.mu.Unlock()
 	setFile(core.RepoMetaDBPath, "[]\n")
 	setFile(core.StarListsDBPath, "not JSON")
 	committed, err := core.UpdateRepoMetaSnapshots(ctx, repo, func(starItems []core.StarItem, repoMeta *[]core.RepoMeta) (core.CommitMessage, error) {

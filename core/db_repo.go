@@ -21,13 +21,13 @@ import (
 //	.starkive                             marker of a starkive repository, and its format version
 //	config.json                           settings and the sign-in GitHub App
 //	db/                                   the archive
+//	db/star-items/00.json ... 07.json     archive items, split by ID into fixed files (`StarItemsDBDir`)
 //	db/readmes/                           README snapshots, one file per repository (`ReadmesDBDir`)
 //	.github/workflows/starkive-sync.yml   sync workflow (installed by the setup tool)
 //	README.md                             readme (installed by the setup tool)
 const (
-	MarkerDBPath    = ".starkive"          // Content is `{"format":{"major":1,"minor":0}}` (`EncodeDBRepoMarker`). Only a repository with this file is used by starkive
+	MarkerDBPath    = ".starkive"          // Content is the format version (`EncodeDBRepoMarker`). Only a repository with this file is used by starkive
 	ConfigDBPath    = "config.json"        // Sync interval, dashboard address, sign-in GitHub App (`dbConfigFile`)
-	StarItemsDBPath = "db/star-items.json" // Archive entries (`StarItem`)
 	StarListsDBPath = "db/star-lists.json" // Star list definitions (`StarList`)
 	RepoMetaDBPath  = "db/repo-meta.json"  // Snapshots of repository metadata (`RepoMeta`)
 )
@@ -74,12 +74,11 @@ type DBRepoFormatVersion struct {
 // Raise the major version when the file layout or format changes,
 // or the contract between the workflow and the server changes (config keys, request and headers, response `status`).
 // Raise the minor version for a change that installed workflows need but that keeps the contract, such as a fix for a bug in the workflow script.
-// But for now, before the implementation is final, it stays at 1.0.
-// After it is final, it is raised by this rule.
 //
 // History:
 //   - 1.0 (2026-10-20): The first format
-var DBRepoFormat = DBRepoFormatVersion{Major: 1, Minor: 0}
+//   - 2.0: The archive items are split by ID into fixed files (`StarItemsDBDir`)
+var DBRepoFormat = DBRepoFormatVersion{Major: 2, Minor: 0}
 
 // Reports whether this code can read and write a DB repository of format version `v` (the major versions are the same).
 func (v DBRepoFormatVersion) IsCompatible() bool {
@@ -356,7 +355,7 @@ type dbRepoMarker struct {
 	Format *DBRepoFormatVersion `json:"format"` // A pointer: `nil` if the key is missing, so a marker without a version isn't read as 0.0
 }
 
-// Makes the content of the marker file, `{"format":{"major":1,"minor":0}}`.
+// Makes the content of the marker file, like `{"format":{"major":2,"minor":0}}` (`DBRepoFormat`).
 // Only the setup tool writes the marker, but this lives in `core` so its shape matches what `readDBRepoState` reads.
 func EncodeDBRepoMarker() []byte {
 	content, _ := json.Marshal(dbRepoMarker{Format: &DBRepoFormat}) // A struct of numbers always encodes, so the error is ignored

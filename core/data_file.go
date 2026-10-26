@@ -1,5 +1,5 @@
 // Data files of the archive: the files that hold one item per line as a JSON array
-// (`db/star-items.json`, `db/star-lists.json`, `db/repo-meta.json`, and the item shards under `StarItemsDBDir`).
+// (`db/star-lists.json`, `db/repo-meta.json`, and the item shards under `StarItemsDBDir`).
 // This file holds their format (`encodeJSONArrayByLine`, `FormatNow`), which path holds which item type (`dataFile`),
 // and how a write tells whether a file changed (`trackedDataFile`).
 // The archive items are split by ID into shards, each a data file of its own.
@@ -22,7 +22,7 @@ import (
 // One data file of the archive: its path, and the Go type of its items (`T`).
 // `[T any]` is a type parameter, like a C++ template.
 // `T` isn't stored. It only fixes the item type that the methods decode.
-// Reach a data file only through the values below, and a shard of the archive items only through `starItemsShardedDataFile`.
+// Reach a data file only through the values below, and a shard of the archive items only through `starItemsDataFile`.
 // Then each path is always read as the type of its items.
 type dataFile[T any] struct {
 	path string // Path in the DB repository
@@ -30,7 +30,6 @@ type dataFile[T any] struct {
 
 // The data files of the archive
 var (
-	starItemsDataFile = dataFile[StarItem]{path: StarItemsDBPath}
 	starListsDataFile = dataFile[StarList]{path: StarListsDBPath}
 	repoMetaDataFile  = dataFile[RepoMeta]{path: RepoMetaDBPath}
 )
@@ -114,8 +113,10 @@ type shardedStarItemsDataFile struct {
 	shards [StarItemShardCount]dataFile[StarItem] // Data file of each shard, by shard index
 }
 
-// The archive items split into shards. Reach the shards only through this value
-var starItemsShardedDataFile = newShardedStarItemsDataFile()
+// The archive items.
+// NOTE: It isn't one file like the other data files: it is the set of the shard files under `StarItemsDBDir` (`shardedStarItemsDataFile`).
+// Reach the shards only through this value.
+var starItemsDataFile = newShardedStarItemsDataFile()
 
 // Builds the data file of the archive items, with one data file per shard (`BuildStarItemShardPath`).
 func newShardedStarItemsDataFile() shardedStarItemsDataFile {
@@ -365,7 +366,7 @@ func decodeJSONArray[T any](content []byte) ([]T, error) {
 
 // Encodes a list of items as a JSON array with one item per line, the data file format.
 // The result looks like `[\n{...},\n{...}\n]\n`, or `[]\n` if empty.
-// All data file content is made by this function.
+// All data file content that the server writes is made by this function.
 //
 // Args:
 //   - `items`: The items. The key order is the field order of the item struct

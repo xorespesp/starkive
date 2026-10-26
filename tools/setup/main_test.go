@@ -14,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -405,6 +407,34 @@ func newFakeDBRepo(t *testing.T, existing []string) (*core.DBRepo, *fakeDBRepoWr
 		switch {
 		case r.URL.Path == "/repos/me/archive/commits" && r.URL.Query().Get("sha") == "refs/heads/main":
 			w.Write([]byte(`[{"sha":"c1","commit":{"tree":{"sha":"t1"}}}]`))
+		case r.URL.Path == "/repos/me/archive/git/trees/c1":
+			// The root of the commit, without subfolders: one entry for each top-level name of `existing`
+			entries := []string{}
+			for _, path := range existing {
+				name, _, inFolder := strings.Cut(path, "/")
+				entryType := "blob"
+				if inFolder {
+					entryType = "tree"
+				}
+				if entry := fmt.Sprintf(`{"path":%q,"type":%q}`, name, entryType); !slices.Contains(entries, entry) {
+					entries = append(entries, entry)
+				}
+			}
+			fmt.Fprintf(w, `{"tree":[%s]}`, strings.Join(entries, ","))
+		case strings.HasPrefix(r.URL.Path, "/repos/me/archive/git/trees/c1:"):
+			// The files under a folder of the commit, with paths relative to it. A folder with no file gives 404
+			folder := strings.TrimPrefix(r.URL.Path, "/repos/me/archive/git/trees/c1:") + "/"
+			entries := []string{}
+			for _, path := range existing {
+				if relativePath, inFolder := strings.CutPrefix(path, folder); inFolder {
+					entries = append(entries, fmt.Sprintf(`{"path":%q,"type":"blob","sha":"sha-of-%s"}`, relativePath, path))
+				}
+			}
+			if len(entries) == 0 {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprintf(w, `{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
 		case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
 			for _, path := range existing {
 				if r.URL.Path == "/repos/me/archive/contents/"+path {
@@ -516,23 +546,41 @@ func TestInitializeDBRepoWaitsForTheBranchTip(t *testing.T) {
 }
 
 // Guards the initial files of the DB repository (fake GitHub).
-//   - Missing files (the README and the empty file that keeps `db/`) are added in one commit, `feat: Add initial files`
-//   - A README that is already there isn't overwritten. Only the missing file is added
+//   - Missing files are added in one commit, `feat: Add initial files`: the README, and the empty archive item shards in a new repository
+//   - A README that is already there isn't overwritten. Only the missing files are added
 //   - If nothing is missing, it sends no write request (no commit)
+//   - A repository with a data folder but a missing shard stops with an error, and no shard is filled in
 func TestAddInitialFiles(t *testing.T) {
 	ctx := context.Background()
+	emptyShards := map[string]string{} // Path -> content of every empty shard
+	allShardPaths := []string{}
+	for index := range core.StarItemShardCount {
+		emptyShards[core.BuildStarItemShardPath(index)] = "[]\n"
+		allShardPaths = append(allShardPaths, core.BuildStarItemShardPath(index))
+	}
+	withReadme := maps.Clone(emptyShards)
+	withReadme[dbRepoReadmePath] = dbRepoReadmeContent
 	for _, c := range []struct {
 		name     string
 		existing []string          // Files already in the repository
 		want     map[string]string // Files the commit must write: path -> content. Empty means no commit
+		wantErr  string            // Part of the error, if it must fail
 	}{
-		{"new repository", nil, map[string]string{dbRepoReadmePath: dbRepoReadmeContent, dbFolderKeepPath: ""}},
-		{"README kept", []string{dbRepoReadmePath}, map[string]string{dbFolderKeepPath: ""}},
-		{"nothing missing", []string{dbRepoReadmePath, dbFolderKeepPath}, nil},
+		{"new repository", nil, withReadme, ""},
+		{"README kept", []string{dbRepoReadmePath}, emptyShards, ""},
+		{"nothing missing", append([]string{dbRepoReadmePath}, allShardPaths...), nil, ""},
+		{"shard missing", []string{dbRepoReadmePath, core.BuildStarItemShardPath(0)}, nil, "is missing"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dbRepo, got := newFakeDBRepo(t, c.existing)
-			if err := addInitialFiles(ctx, dbRepo); err != nil {
+			err := addInitialFiles(ctx, dbRepo)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) || got.count != 0 {
+					t.Errorf("error %v, %d write requests", err, got.count)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			if c.want == nil {

@@ -13,7 +13,7 @@ import (
 )
 
 // Format of the header: the steps, then `total` with the Go version and the instance
-var serverTimingPattern = regexp.MustCompile(`^w-head;dur=[0-9.]+, github-read;dur=[0-9.]+;desc=` + regexp.QuoteMeta(fmt.Sprintf("%q", StarItemsDBPath)) +
+var serverTimingPattern = regexp.MustCompile(`^w-head;dur=[0-9.]+, github-read;dur=[0-9.]+;desc=` + regexp.QuoteMeta(fmt.Sprintf("%q", StarListsDBPath)) +
 	`, total;dur=[0-9.]+;desc="go[^"]*, request [0-9]+, up [0-9]+s"$`)
 
 // Runs `handle` through `ServeAPIRequest` after two steps, and returns the `Server-Timing` header as it went out
@@ -23,7 +23,7 @@ func serveWithTwoSteps(handle func(w http.ResponseWriter, r *http.Request) error
 		timingStep := beginServerTimingStep(r.Context(), "w-head")
 		timingStep.end()
 		timingStep = beginServerTimingStep(r.Context(), "github-read")
-		timingStep.endWithDesc(StarItemsDBPath)
+		timingStep.endWithDesc(StarListsDBPath)
 		return handle(w, r)
 	})
 	return rec.Result().Header.Get("Server-Timing") // `Result` gives the headers as they were when they went out

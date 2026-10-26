@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"time"
 
@@ -76,13 +78,11 @@ This is your personal archive repository for the [starkive](https://github.com/x
 - Deleting this repository deletes your archive.
 `
 
-// Path of the empty file that keeps the data folder (`db/`) in the DB repository before the first data file is written.
-// Git doesn't store empty folders, so without it the folder doesn't show on GitHub
-var dbFolderKeepPath = path.Dir(core.StarItemsDBPath) + "/.gitkeep"
-
 // Adds the initial files that are missing from the DB repository, in one commit.
 // If none is missing, it doesn't commit.
 // A file that is already there isn't overwritten, because the user may have edited it.
+// The archive item shards are made only in a new repository, one whose root has no data folder (`addEmptyStarItemShardsIfNewDBRepo`).
+// If the data folder is there, every shard must be there too, and missing ones aren't filled in.
 //
 // NOTE: The first commit of an empty repository can hold only the marker.
 // GitHub refuses to make a tree or a commit with several files in an empty repository (Git Data API 409, GraphQL "Branch not found", measured).
@@ -90,17 +90,76 @@ var dbFolderKeepPath = path.Dir(core.StarItemsDBPath) + "/.gitkeep"
 // It runs on every setup, not only right after initialization.
 // So if the setup stopped between the two commits, running it again adds them.
 func addInitialFiles(ctx context.Context, dbRepo *core.DBRepo) error {
-	paths := []string{dbRepoReadmePath, dbFolderKeepPath}
-	return core.UpdateDBRepoFiles(ctx, dbRepo, paths, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
-		filesToWrite := map[string][]byte{} // Path -> content
+	return core.UpdateDBRepoFiles(ctx, dbRepo, []string{dbRepoReadmePath}, func(filesAtCommit *core.DBRepoFilesAtCommit) (core.FileChangesCommit, error) {
+		changes := core.FileChangesCommit{FilesToWrite: map[string][]byte{}, Message: core.NewCommitMessage("feat", "Add initial files")}
 		if !filesAtCommit.HasFile(dbRepoReadmePath) {
-			filesToWrite[dbRepoReadmePath] = []byte(dbRepoReadmeContent)
+			changes.FilesToWrite[dbRepoReadmePath] = []byte(dbRepoReadmeContent)
 		}
-		if !filesAtCommit.HasFile(dbFolderKeepPath) {
-			filesToWrite[dbFolderKeepPath] = []byte{}
+		if err := addEmptyStarItemShardsIfNewDBRepo(ctx, dbRepo, filesAtCommit.CommitSHA(), &changes); err != nil {
+			return core.FileChangesCommit{}, err
 		}
-		return core.FileChangesCommit{FilesToWrite: filesToWrite, Message: core.NewCommitMessage("feat", "Add initial files")}, nil
+		return changes, nil
 	})
+}
+
+// Adds the empty archive item shards to `changes.FilesToWrite` if the DB repository at commit `commitSHA` has no data folder (`db/`) yet.
+// That is a new repository.
+// If it has one, every shard must be there, and none is filled in.
+// `changes.FilesToWrite` must not be `nil` (writing to a `nil` map panics in Go).
+//
+// Returns:
+//   - An error naming a missing shard if the data folder is there but a shard isn't (a broken repository, or a passing 404 of the listing).
+//     Nothing is added then
+//
+// NOTE: A listing of the root tells "no data folder" for sure, unlike a 404 for one file, which can be a passing one.
+// An empty shard written over a real one would lose its items.
+// An empty shard is `[]` and a line break, the same bytes the server writes for no items.
+// The server reads any JSON array, so a different layout would only be rewritten on the next change of that shard.
+func addEmptyStarItemShardsIfNewDBRepo(ctx context.Context, dbRepo *core.DBRepo, commitSHA string, changes *core.FileChangesCommit) error {
+	var root struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"` // `blob` for a file, `tree` for a folder
+		} `json:"tree"`
+	}
+	if err := getGitHubJSON(ctx, dbRepo.EnvConfig(), dbRepo.BuildAPIPath("/git/trees/"+url.PathEscape(commitSHA)), &root); err != nil {
+		return err
+	}
+	dataFolder := path.Dir(core.StarItemsDBDir) // `db`
+	hasDataFolder := false
+	for _, entry := range root.Tree {
+		if entry.Path == dataFolder && entry.Type == "tree" {
+			hasDataFolder = true
+		}
+	}
+	if !hasDataFolder {
+		for index := range core.StarItemShardCount {
+			changes.FilesToWrite[core.BuildStarItemShardPath(index)] = []byte("[]\n")
+		}
+		return nil
+	}
+
+	var shardFolder struct {
+		Tree []struct {
+			Path string `json:"path"` // Relative to the folder
+		} `json:"tree"`
+	}
+	err := getGitHubJSON(ctx, dbRepo.EnvConfig(), dbRepo.BuildAPIPath("/git/trees/"+url.PathEscape(commitSHA)+":"+core.StarItemsDBDir), &shardFolder)
+	var githubErr *core.GitHubAPIError
+	if err != nil && !(errors.As(err, &githubErr) && githubErr.Status == http.StatusNotFound) { // A folder that doesn't exist gives 404, the same as one with no shard
+		return err
+	}
+	isListed := map[string]bool{} // File name in the folder -> `true`
+	for _, entry := range shardFolder.Tree {
+		isListed[entry.Path] = true
+	}
+	for index := range core.StarItemShardCount {
+		shardPath := core.BuildStarItemShardPath(index)
+		if !isListed[path.Base(shardPath)] {
+			return fmt.Errorf("%s is missing in the DB repository. If GitHub answered slowly, run the setup again. If it is still missing, the repository is broken", shardPath)
+		}
+	}
+	return nil
 }
 
 // The last step of the setup.

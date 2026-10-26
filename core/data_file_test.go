@@ -17,23 +17,23 @@ import (
 // A file that holds `null` is an empty list too
 func TestDataFileRefusesFileNotRead(t *testing.T) {
 	notRead := &DBRepoFilesAtCommit{commitSHA: "c1", contents: map[string][]byte{StarListsDBPath: []byte("[]\n")}}
-	var starItems []StarItem
+	var repoMeta []RepoMeta
 	for name, ask := range map[string]func(){
-		"decodeForReading": func() { starItemsDataFile.decodeForReading(notRead) },
-		"decodeForWriting": func() { starItemsDataFile.decodeForWriting(notRead, &starItems) },
-		"HasFile":          func() { notRead.HasFile(StarItemsDBPath) },
-		"empty value":      func() { (&DBRepoFilesAtCommit{}).FileContent(StarItemsDBPath) },
+		"decodeForReading": func() { repoMetaDataFile.decodeForReading(notRead) },
+		"decodeForWriting": func() { repoMetaDataFile.decodeForWriting(notRead, &repoMeta) },
+		"HasFile":          func() { notRead.HasFile(RepoMetaDBPath) },
+		"empty value":      func() { (&DBRepoFilesAtCommit{}).FileContent(RepoMetaDBPath) },
 	} {
-		if recovered := catchPanic(ask); recovered == nil || !strings.Contains(fmt.Sprint(recovered), StarItemsDBPath) {
+		if recovered := catchPanic(ask); recovered == nil || !strings.Contains(fmt.Sprint(recovered), RepoMetaDBPath) {
 			t.Errorf("%s, file not read: panic %v", name, recovered)
 		}
 	}
-	items, err := starItemsDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: nil}})
-	if err != nil || items == nil || len(items) != 0 || (&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: nil}}).HasFile(StarItemsDBPath) {
+	items, err := repoMetaDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{RepoMetaDBPath: nil}})
+	if err != nil || items == nil || len(items) != 0 || (&DBRepoFilesAtCommit{contents: map[string][]byte{RepoMetaDBPath: nil}}).HasFile(RepoMetaDBPath) {
 		t.Errorf("missing file: %v, %v", items, err)
 	}
-	items, err = starItemsDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: []byte("null")}})
-	if err != nil || items == nil || len(items) != 0 || !(&DBRepoFilesAtCommit{contents: map[string][]byte{StarItemsDBPath: []byte("null")}}).HasFile(StarItemsDBPath) {
+	items, err = repoMetaDataFile.decodeForReading(&DBRepoFilesAtCommit{contents: map[string][]byte{RepoMetaDBPath: []byte("null")}})
+	if err != nil || items == nil || len(items) != 0 || !(&DBRepoFilesAtCommit{contents: map[string][]byte{RepoMetaDBPath: []byte("null")}}).HasFile(RepoMetaDBPath) {
 		t.Errorf("null file: %v, %v", items, err)
 	}
 }
@@ -181,7 +181,7 @@ func TestStarItemShardPaths(t *testing.T) {
 			t.Errorf("shard of %d: %d, want %d", id, got, want)
 		}
 	}
-	if paths := starItemsShardedDataFile.buildPaths(); len(paths) != StarItemShardCount || paths[0] != "db/star-items/00.json" || paths[7] != "db/star-items/07.json" {
+	if paths := starItemsDataFile.buildPaths(); len(paths) != StarItemShardCount || paths[0] != "db/star-items/00.json" || paths[7] != "db/star-items/07.json" {
 		t.Errorf("all shard paths: %v", paths)
 	}
 }
@@ -194,20 +194,20 @@ func TestStarItemShardPaths(t *testing.T) {
 func TestShardedStarItemsDataFileRefusesBrokenShards(t *testing.T) {
 	readers := map[string]func(contentByIndex map[int]string) ([]StarItem, error){
 		"decode for reading": func(contentByIndex map[int]string) ([]StarItem, error) {
-			return starItemsShardedDataFile.decodeForReading(newTestShardFiles(contentByIndex))
+			return starItemsDataFile.decodeForReading(newTestShardFiles(contentByIndex))
 		},
 		"decode for writing": func(contentByIndex map[int]string) ([]StarItem, error) {
 			var items []StarItem
-			_, err := starItemsShardedDataFile.decodeForWriting(newTestShardFiles(contentByIndex), &items)
+			_, err := starItemsDataFile.decodeForWriting(newTestShardFiles(contentByIndex), &items)
 			return items, err
 		},
 		"read at a commit": func(contentByIndex map[int]string) ([]StarItem, error) {
 			repo, _ := startFakeShardAPI(t, newTestShardContents(contentByIndex), nil)
-			return starItemsShardedDataFile.readFromDBRepoAtCommit(t.Context(), repo, "c1")
+			return starItemsDataFile.readFromDBRepoAtCommit(t.Context(), repo, "c1")
 		},
 		"read the latest": func(contentByIndex map[int]string) ([]StarItem, error) {
 			repo, _ := startFakeShardAPI(t, newTestShardContents(contentByIndex), nil)
-			return starItemsShardedDataFile.readLatestFromDBRepo(t.Context(), repo)
+			return starItemsDataFile.readLatestFromDBRepo(t.Context(), repo)
 		},
 	}
 	for readerName, read := range readers {
@@ -245,7 +245,7 @@ func TestShardedStarItemsDataFileRefusesBrokenShards(t *testing.T) {
 //   - An ID that isn't positive or appears twice is refused, and nothing is added
 func TestTrackedShardedStarItemsDataFileAddsOnlyChangedShards(t *testing.T) {
 	var items []StarItem
-	tracked, err := starItemsShardedDataFile.decodeForWriting(newTestShardFiles(map[int]string{
+	tracked, err := starItemsDataFile.decodeForWriting(newTestShardFiles(map[int]string{
 		1: "[\n  {\"id\":1,\"node_id\":\"\",\"name\":\"a/one\",\"note\":\"\",\"star_list_ids\":[],\"starred_at\":\"\"}\n]\n", // Another layout
 		2: "[\n{\"id\":2,\"name\":\"b/two\",\"note\":\"\",\"star_list_ids\":[],\"starred_at\":\"\"}\n]\n",
 	}), &items)
@@ -290,7 +290,7 @@ func TestTrackedShardedStarItemsDataFileAddsOnlyChangedShards(t *testing.T) {
 // The items share their `StarListIDs` arrays with the shards as decoded, so each shard as read must be encoded before the change
 func TestTrackedShardedStarItemsDataFileSeesAChangeMadeInPlace(t *testing.T) {
 	var items []StarItem
-	tracked, err := starItemsShardedDataFile.decodeForWriting(newTestShardFiles(map[int]string{
+	tracked, err := starItemsDataFile.decodeForWriting(newTestShardFiles(map[int]string{
 		1: "[\n{\"id\":1,\"node_id\":\"\",\"name\":\"a/one\",\"note\":\"\",\"star_list_ids\":[100,200],\"starred_at\":\"\"}\n]\n",
 	}), &items)
 	if err != nil {
@@ -327,7 +327,7 @@ func TestShardedStarItemsDataFileReadsTheShardsOfOneCommit(t *testing.T) {
 		"passing 404":    {map[string]string{shard2: ""}, 1},
 	} {
 		repo, blobReads := startFakeShardAPI(t, files, c.branchReads)
-		items, err := starItemsShardedDataFile.readLatestFromDBRepo(ctx, repo)
+		items, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
 		if ids := listTestStarItemIDs(items); err != nil || !slices.Equal(ids, []int64{9, 2}) || items[0].Note != "new" || blobReads.Load() != c.wantBlobReads {
 			t.Errorf("%s: %v %+v, %v, blob reads %d", name, ids, items, err, blobReads.Load())
 		}
@@ -336,12 +336,12 @@ func TestShardedStarItemsDataFileReadsTheShardsOfOneCommit(t *testing.T) {
 	withoutShard3 := newTestShardContents(map[int]string{3: ""})
 	repo, _ := startFakeShardAPI(t, withoutShard3, map[string]string{shard3: "[]\n"})
 	var httpErr *HTTPError
-	if _, err := starItemsShardedDataFile.readLatestFromDBRepo(ctx, repo); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway || !strings.Contains(err.Error(), shard3) {
+	if _, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo); !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway || !strings.Contains(err.Error(), shard3) {
 		t.Errorf("not listed: %v", err)
 	}
 
 	repo, blobReads := startFakeShardAPI(t, files, map[string]string{shard1: `[{"id":9,"name":"a/nine","note":"old"}]`})
-	if items, err := starItemsShardedDataFile.readFromDBRepoAtCommit(ctx, repo, "c1"); err != nil || len(items) != 2 || items[0].Note != "new" || blobReads.Load() != 0 {
+	if items, err := starItemsDataFile.readFromDBRepoAtCommit(ctx, repo, "c1"); err != nil || len(items) != 2 || items[0].Note != "new" || blobReads.Load() != 0 {
 		t.Errorf("at a commit: %+v, %v, blob reads %d", items, err, blobReads.Load())
 	}
 }

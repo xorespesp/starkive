@@ -1,4 +1,4 @@
-// The star catalog: the archive items (`db/star-items.json`, `StarItem`) and the star list definitions
+// The star catalog: the archive items (the shards under `db/star-items/`, `StarItem`) and the star list definitions
 // (`db/star-lists.json`, `StarList`), the user's own data.
 // It holds both types, the rules about star lists (name comparison, ID issuing, the star list IDs stored in items),
 // and the writes: `UpdateStarCatalog` changes either or both in one commit, `UpdateStarLists` changes the star lists alone,
@@ -23,11 +23,11 @@ import (
 // The snapshots (metadata, README) aren't in it.
 // They are records of what GitHub showed, not the user's data.
 type StarCatalog struct {
-	StarItems []StarItem // Archive items (`StarItemsDBPath`)
+	StarItems []StarItem // Archive items (the shards under `StarItemsDBDir`)
 	StarLists []StarList // Star list definitions (`StarListsDBPath`)
 }
 
-// One archive entry (one line of `db/star-items.json`).
+// One archive entry (one line of an archive item shard).
 // The field order is the key order in the file.
 // Changing the order turns the whole file into a diff.
 //
@@ -182,11 +182,12 @@ func (tx *StarCatalogTransaction) AddReadmeToCommit(itemID int64, fetched Fetche
 	tx.readmesToSave[itemID] = fetched
 }
 
-// Reads the star catalog from one commit, changes it with `change`, and writes only the changed files in one commit.
+// Reads the whole star catalog from one commit, changes it with `change`, and writes only the changed files in one commit.
 // It works on top of `UpdateDBRepoFiles`.
 //
 // Args:
 //   - `change`: Changes the working copy in `tx` in place and returns a commit message.
+//     `tx.StarItems` is the whole archive (every shard is read).
 //     It can ask for READMEs to be saved in the same commit (`AddReadmeToCommit`).
 //     If it returns an error, nothing is written.
 //     If another commit gets in, it is called again with a new transaction read at the new commit
@@ -196,13 +197,14 @@ func (tx *StarCatalogTransaction) AddReadmeToCommit(itemID int64, fetched Fetche
 // The metadata snapshots aren't read.
 // They are the largest archive file, and no change of the catalog uses them
 // (measured with 20,000 items and 14,000 snapshots: 6MB of the 9.2MB read).
-// Only the files whose data changed are written (`trackedDataFile`).
+// Only the shards and files whose data changed are written (`trackedShardedStarItemsDataFile`, `trackedDataFile`).
 // The config file (`config.json`) is not part of the archive, so it is not read here.
 // This keeps each save request from making one extra read for nothing.
 // The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
 // Each removed item and each saved README costs one more request (a listing of its folder).
 func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path, starListsDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+	paths := append(starItemsDataFile.buildPaths(), starListsDataFile.path)
+	return UpdateDBRepoFiles(ctx, repo, paths, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
 		tx := &StarCatalogTransaction{}
 		trackedStarItems, err := starItemsDataFile.decodeForWriting(filesAtCommit, &tx.StarItems)
 		if err != nil {
@@ -236,13 +238,13 @@ func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCa
 		for _, item := range tx.StarItems {
 			isArchivedAfter[item.ID] = true
 		}
-		removedIDs := []int64{}
+		// Each ID is in `idsBefore` once, because a shard with an ID listed twice isn't read (`checkStarItemShard`).
+		// So no file is put in `FilesToDelete` twice, which would fail the whole commit
 		for _, id := range idsBefore {
-			if !isArchivedAfter[id] && !slices.Contains(removedIDs, id) { // An ID listed twice in the archive is removed once
-				removedIDs = append(removedIDs, id)
+			if isArchivedAfter[id] {
+				continue // The item is still there after `change`, so its snapshots stay
 			}
-		}
-		for _, id := range removedIDs {
+			// The item was removed: list its README folder and delete all its files (a README, an absent marker, or both)
 			readmePaths, err := readReadmeSnapshotPaths(ctx, repo, filesAtCommit.CommitSHA(), id)
 			if err != nil {
 				return FileChangesCommit{}, err

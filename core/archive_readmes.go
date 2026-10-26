@@ -334,7 +334,7 @@ const readmeCommitReserve = 2 * githubTimeout
 //
 // Snapshots of items no longer in the archive are deleted in every commit it makes.
 // With nothing to check, it still runs the commit step for them, and a commit is made only if there is something to delete.
-// So files that a deletion outside the server left behind (for example, a hand edit of `db/star-items.json`) go away.
+// So files that a deletion outside the server left behind (for example, a hand edit of an archive item shard) go away.
 func SyncReadmeSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, endBy time.Time, skippedIDs []int64, now time.Time, refreshEarly bool) (int, error) {
 	checked, err := syncReadmeSnapshotBatches(ctx, repo, endBy, skippedIDs, now, refreshEarly)
 	if err != nil && isTemporaryGitHubError(ctx, err) {
@@ -351,7 +351,7 @@ func syncReadmeSnapshotBatches(ctx context.Context, repo *DBRepo, endBy time.Tim
 	if err != nil {
 		return 0, err
 	}
-	starItems, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
+	starItems, err := starItemsDataFile.readFromDBRepoAtCommit(ctx, repo, commitSHA) // The same commit as the snapshot listing below
 	if err != nil {
 		return 0, err
 	}
@@ -537,7 +537,7 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 // It reads the archive items and lists `ReadmesDBDir` at the commit it builds on, so items removed meanwhile are skipped.
 // Nothing is committed if nothing changes.
 func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetched map[int64]FetchedReadme) error {
-	return UpdateDBRepoFiles(ctx, repo, []string{starItemsDataFile.path}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+	return UpdateDBRepoFiles(ctx, repo, starItemsDataFile.buildPaths(), func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
 		starItems, err := starItemsDataFile.decodeForReading(filesAtCommit)
 		if err != nil {
 			return FileChangesCommit{}, err
@@ -575,12 +575,15 @@ func writeFetchedReadmesInSingleCommit(ctx context.Context, repo *DBRepo, fetche
 				}
 			}
 		}
+		// Deletes in this same commit the snapshots whose item is no longer in the archive.
+		// Such files are left when an item is removed outside the server (a hand edit of a shard),
+		// or removed on another device while the READMEs were fetched.
 		removedCount := 0 // Number of items no longer in the archive whose snapshots are deleted
 		for id, snapshots := range snapshotsByID {
-			// A missing item file reads as an empty archive, and would delete every snapshot.
-			// It may be a passing 404 for a file that is there, so nothing is deleted then
-			if isArchived[id] || !filesAtCommit.HasFile(starItemsDataFile.path) {
-				continue
+			// Every shard was read, and a missing one is an error (`checkStarItemShard`).
+			// So an ID not in `isArchived` is really gone, not just unread
+			if isArchived[id] {
+				continue // The item is still in the archive, so its snapshots stay
 			}
 			removedCount++
 			for _, snapshot := range snapshots {

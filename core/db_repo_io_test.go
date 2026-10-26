@@ -189,7 +189,7 @@ func TestReadDBRepoFileCutInTheBodyIsBadGateway(t *testing.T) {
 		fmt.Fprint(w, "partial")
 	}))
 	t.Cleanup(server.Close)
-	if content, err := ReadDBRepoFile(ctx, newTestDBRepo(server.URL), StarItemsDBPath); content != nil || !isBadGateway(err) {
+	if content, err := ReadDBRepoFile(ctx, newTestDBRepo(server.URL), StarListsDBPath); content != nil || !isBadGateway(err) {
 		t.Errorf("body cut: %q, %v", content, err)
 	}
 }

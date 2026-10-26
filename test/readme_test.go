@@ -4,6 +4,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -422,20 +423,21 @@ func TestSyncReadmeSnapshotsWithGitHubDeletesSnapshotsOfRemovedItems(t *testing.
 	}
 }
 
-// Tests that the README sync step deletes no snapshot when the item file reads as missing.
-// A missing file reads as an empty archive, and every snapshot would look like one of a removed item
-func TestSyncReadmeSnapshotsWithGitHubKeepsSnapshotsWithoutTheItemFile(t *testing.T) {
+// Tests that the README sync step stops with a 502 and deletes no snapshot when an archive item shard is missing.
+// All shards always exist, so a missing one is a broken repository, never an empty archive whose snapshots would all look removed
+func TestSyncReadmeSnapshotsWithGitHubStopsWithoutAShard(t *testing.T) {
 	ctx := context.Background()
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	repo := openTestDBRepo(t)
 	gh.files[core.ReadmesDBDir+"/01/1.md"] = "# One\n"
 	gh.files[core.ReadmesDBDir+"/02/2.no-readme"] = ""
-	delete(gh.files, core.StarItemsDBPath)
+	delete(gh.files, core.BuildStarItemShardPath(1))
 	commitsBefore := len(gh.commits)
 	_, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(0), false)
 	_, readmeLeft := gh.files[core.ReadmesDBDir+"/01/1.md"]
 	_, markerLeft := gh.files[core.ReadmesDBDir+"/02/2.no-readme"]
-	if err != nil || !readmeLeft || !markerLeft || len(gh.commits) != commitsBefore {
+	var httpErr *core.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadGateway || !readmeLeft || !markerLeft || len(gh.commits) != commitsBefore {
 		t.Errorf("%v, README left %v, marker left %v, commits %d -> %d", err, readmeLeft, markerLeft, commitsBefore, len(gh.commits))
 	}
 }
@@ -590,10 +592,11 @@ func TestSyncReadmeSnapshotsWithGitHubCommitFailures(t *testing.T) {
 	}
 }
 
-// Tests that an ID listed twice in the archive (for example, after a hand edit) doesn't make README writes fail.
-//   - The sync step plans the item once, so the same file isn't deleted twice in one commit
-//   - Removing both entries deletes the item's snapshots once
-func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
+// Tests that an ID listed twice in a shard (for example, after a hand edit) stops reads and writes, and changes no file.
+// The item would have no single "current" entry, so the shard is refused as a whole (`core` checks every shard it reads)
+//   - The README sync step stops with the error and writes no README
+//   - A write of the star catalog stops too, and deletes no snapshot
+func TestShardWithAnIDListedTwiceIsRefused(t *testing.T) {
 	ctx := context.Background()
 	twice := "[\n" +
 		`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[],"starred_at":"x"}` + ",\n" +
@@ -602,17 +605,18 @@ func TestReadmeSnapshotsOfAnIDListedTwice(t *testing.T) {
 	repo := openTestDBRepo(t)
 	gh.files[core.ReadmesDBDir+"/01/1.no-readme"] = ""
 	gh.readmes[1] = fakeReadme{name: "README.md", content: "# One\n"}
+	commitsBefore := len(gh.commits)
 
-	if checked, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1), false); err != nil || checked != 1 || gh.readFile(core.ReadmesDBDir+"/01/1.md") != "# One\n" {
-		t.Errorf("sync: %d %v, files %q", checked, err, gh.files)
+	if _, err := core.SyncReadmeSnapshotsWithGitHub(ctx, repo, testLongStepsEndBy(), nil, syncDay(1), false); err == nil || !strings.Contains(err.Error(), "appears twice") {
+		t.Errorf("sync: %v", err)
 	}
-
 	err := core.UpdateStarCatalog(ctx, repo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
 		tx.StarItems = nil
 		return core.NewCommitMessage("user(star-items)", "remove a/one"), nil
 	})
-	if _, left := gh.files[core.ReadmesDBDir+"/01/1.md"]; err != nil || left {
-		t.Errorf("remove: %v, README left %v", err, left)
+	_, markerLeft := gh.files[core.ReadmesDBDir+"/01/1.no-readme"]
+	if err == nil || !markerLeft || len(gh.commits) != commitsBefore {
+		t.Errorf("remove: %v, marker left %v, commits %d -> %d", err, markerLeft, commitsBefore, len(gh.commits))
 	}
 }
 

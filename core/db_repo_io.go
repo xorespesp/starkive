@@ -26,7 +26,7 @@ import (
 // Reads one file in the DB repository, at the latest commit of the default branch.
 //
 // Args:
-//   - `path`: File path in the repository (e.g. `db/star-items.json`)
+//   - `path`: File path in the repository (e.g. `db/star-lists.json`)
 //
 // Returns:
 //   - The file content. `nil` if the file doesn't exist
@@ -313,7 +313,7 @@ var errInvalidCommitMessage = errors.New("refusing to commit changes without a v
 // The signal "try again" and the message for the user ("the archive changed while saving") are the same fact, so they share one value.
 var errBranchMoved = Errorf(http.StatusConflict, "The archive changed while saving. Try again")
 
-// Reports whether `p` is a clean path relative to the repository root (e.g. `db/star-items.json`).
+// Reports whether `p` is a clean path relative to the repository root (e.g. `db/star-lists.json`).
 // One file then has only one spelling, so two different paths never name the same file.
 func isValidRepoPath(p string) bool {
 	if p == "" || p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") || strings.Contains(p, `\`) {
