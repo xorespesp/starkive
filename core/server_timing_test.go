@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -51,6 +52,47 @@ func TestServerTimingHeader(t *testing.T) {
 		if got := serveWithTwoSteps(handle); !serverTimingPattern.MatchString(got) {
 			t.Errorf("%s: %q", name, got)
 		}
+	}
+}
+
+// Tests that the file reads of a write show how many files came from the cache of the request (`w-read`).
+// The second write in one request reads the same file again, and GitHub answers 304
+func TestServerTimingShowsFilesFromTheCache(t *testing.T) {
+	content := "[]\n"
+	var repo *DBRepo
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/me/archive/commits":
+			fmt.Fprint(w, `[{"sha":"c1","commit":{"tree":{"sha":"t1"}}}]`)
+		case "/repos/me/archive/contents/" + StarListsDBPath:
+			etag := `"` + computeGitBlobSHA([]byte(content)) + `"`
+			w.Header().Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			fmt.Fprint(w, content)
+		default:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	repo = newTestDBRepo(server.URL)
+	rec := httptest.NewRecorder()
+	ServeAPIRequest(rec, httptest.NewRequest("GET", "http://example.test/api/archive-star-lists", nil), func(w http.ResponseWriter, r *http.Request) error {
+		for range 2 {
+			if err := UpdateDBRepoFiles(r.Context(), repo, []string{StarListsDBPath}, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
+				return FileChangesCommit{}, nil // Nothing to write
+			}); err != nil {
+				return err
+			}
+		}
+		WriteAPIJSONResponse(w, http.StatusOK, map[string]bool{"ok": true})
+		return nil
+	})
+	header := rec.Result().Header.Get("Server-Timing")
+	if !strings.Contains(header, `w-read;`) || !strings.Contains(header, `desc="1 file, 0 from cache (304)"`) || !strings.Contains(header, `desc="1 file, 1 from cache (304)"`) {
+		t.Errorf("Server-Timing %q", header)
 	}
 }
 

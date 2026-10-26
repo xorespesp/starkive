@@ -108,7 +108,8 @@ func newTestShardFiles(contentByIndex map[int]string) *DBRepoFilesAtCommit {
 }
 
 // Starts a test server that answers like GitHub for the DB repository `me/archive`, whose branch `main` is at commit `c1`.
-// It answers the listing of `StarItemsDBDir` at the branch, file reads at `c1` and at the branch, and blob reads by sha.
+// It answers the listing of `StarItemsDBDir` at the branch (with an `ETag`, and 304 for `If-None-Match`), file reads at `c1` and at the branch,
+// and blob reads by sha.
 //
 // Args:
 //   - `files`: Path -> content at `c1`. The listing and the blob reads come from these
@@ -128,7 +129,15 @@ func startFakeShardAPI(t *testing.T, files map[string]string, branchReads map[st
 					entries = append(entries, fmt.Sprintf(`{"path":%q,"type":"blob","sha":%q}`, name, computeGitBlobSHA([]byte(content))))
 				}
 			}
-			fmt.Fprintf(w, `{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
+			slices.Sort(entries) // The same listing gives the same body, so its `ETag` stays the same
+			body := fmt.Sprintf(`{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
+			etag := `"listing-` + computeGitBlobSHA([]byte(body)) + `"`
+			w.Header().Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			fmt.Fprint(w, body)
 			return
 		case strings.HasPrefix(r.URL.Path, "/repos/me/archive/contents/"):
 			path := strings.TrimPrefix(r.URL.Path, "/repos/me/archive/contents/")
@@ -373,6 +382,31 @@ func TestShardedStarItemsDataFileReadsTheShardsOfOneCommit(t *testing.T) {
 	repo, blobReads := startFakeShardAPI(t, files, map[string]string{shard1: `[{"id":9,"name":"a/nine","note":"old"}]`})
 	if items, err := starItemsDataFile.readFromDBRepoAtCommit(ctx, repo, "c1"); err != nil || len(items) != 2 || items[0].Note != "new" || blobReads.Load() != 0 {
 		t.Errorf("at a commit: %+v, %v, blob reads %d", items, err, blobReads.Load())
+	}
+}
+
+// Tests reading the shards at the branch only if they changed since a listing.
+//   - Without an `ETag`, it reads the items and gives the listing's `ETag`
+//   - With that `ETag` and no shard changed, it gives `isNotModified` and no items, and reads no shard
+//   - After a shard changed, it reads the items again with a new `ETag`
+func TestShardedStarItemsDataFileReadsTheLatestIfChanged(t *testing.T) {
+	ctx := t.Context()
+	files := newTestShardContents(map[int]string{1: `[{"id":9,"name":"a/nine","note":"old"}]`})
+	repo, _ := startFakeShardAPI(t, files, nil)
+	first, err := starItemsDataFile.readLatestFromDBRepoIfChanged(ctx, repo, "")
+	if err != nil || len(first.items) != 1 || first.etag == "" || first.isNotModified {
+		t.Fatalf("first: %+v, %v", first, err)
+	}
+
+	repo, blobReads := startFakeShardAPI(t, files, map[string]string{BuildStarItemShardPath(1): ""}) // A shard read would give 404, and the shard would be read again as a blob
+	if again, err := starItemsDataFile.readLatestFromDBRepoIfChanged(ctx, repo, first.etag); err != nil || again.items != nil || again.etag != first.etag || !again.isNotModified || blobReads.Load() != 0 {
+		t.Errorf("unchanged: %+v, %v, blob reads %d", again, err, blobReads.Load())
+	}
+
+	changed := newTestShardContents(map[int]string{1: `[{"id":9,"name":"a/nine","note":"new"}]`})
+	repo, _ = startFakeShardAPI(t, changed, nil)
+	if again, err := starItemsDataFile.readLatestFromDBRepoIfChanged(ctx, repo, first.etag); err != nil || len(again.items) != 1 || again.items[0].Note != "new" || again.etag == first.etag || again.isNotModified {
+		t.Errorf("changed: %+v, %v", again, err)
 	}
 }
 

@@ -326,7 +326,7 @@ func updateStarCatalogInShards(ctx context.Context, repo *DBRepo, shardIndexes [
 		for _, item := range tx.StarItems {
 			isArchivedAfter[item.ID] = true
 		}
-		// Each ID is in `idsBefore` once, because a shard with an ID listed twice isn't read (`checkStarItemShard`).
+		// Each ID is in `idsBefore` once: a shard that lists an ID twice or holds an item of another shard isn't read (`checkStarItemShard`).
 		// So no file is put in `FilesToDelete` twice, which would fail the whole commit
 		for _, id := range idsBefore {
 			if isArchivedAfter[id] {
@@ -383,7 +383,7 @@ func UpdateStarLists(ctx context.Context, repo *DBRepo, change func(starLists *[
 	})
 }
 
-// Puts GitHub Stars at the front of the archive as new items.
+// Puts GitHub Stars into the archive as new items, each at the front of its shard.
 // Every path that puts Stars into the archive goes through this function.
 //   - Skips repositories already in the archive (by ID), and repositories repeated within `starredRepos`.
 //     Existing items are left as they are

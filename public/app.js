@@ -143,9 +143,11 @@ const isCancelled = (err) => err?.name === 'AbortError';
  * The browser adds the session cookie, because it is a same-origin request.
  *
  * @param {string} path The path and query after `/api/` (e.g. `archive-star-items?id=3`)
- * @param {{ method?: string, body?: object, beforeSignIn?: boolean }} [options] HTTP method (GET by default) and the body to send as JSON.
+ * @param {{ method?: string, body?: object, beforeSignIn?: boolean, revalidate?: boolean }} [options] HTTP method (GET by default) and the body to send as JSON.
  *   `beforeSignIn`: the request is sent before we know whether the user is signed in.
- *   A 401 then doesn't close the session, and is thrown to the caller
+ *   A 401 then doesn't close the session, and is thrown to the caller.
+ *   `revalidate`: the browser may answer from its cache after the server says the answer didn't change (304, for the archive files).
+ *   Otherwise the cache isn't used at all
  * @returns {Promise<any>} The JSON from the server
  * @throws {ApiError} If the server answers with a failure. The message is the server's `error`
  * @throws {DOMException} `AbortError` if the request was cancelled because the session closed (`isCancelled`)
@@ -158,11 +160,11 @@ const isCancelled = (err) => err?.name === 'AbortError';
  * So a loop that swallows errors must still rethrow cancel errors.
  * Otherwise, after the session closes, its next request goes out with no session (or with a new one).
  */
-async function api(path, { method = 'GET', body, beforeSignIn = false } = {}) {
+async function api(path, { method = 'GET', body, beforeSignIn = false, revalidate = false } = {}) {
   const signal = path.startsWith('login-session') ? undefined : sessionScope?.signal;
   const res = await fetch(`/api/${path}`, {
     method,
-    cache: 'no-store',
+    cache: revalidate ? 'no-cache' : 'no-store', // `no-cache` sends the kept answer's `ETag` and uses it only on 304
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body && JSON.stringify(body),
     signal,
@@ -206,8 +208,8 @@ function clearLoadedData() {
  */
 function fetchArchiveFiles(beforeSignIn = false) {
   return {
-    lists: Promise.all([api('archive-star-items', { beforeSignIn }), api('archive-star-lists', { beforeSignIn })]),
-    meta: api('archive-repo-meta', { beforeSignIn }),
+    lists: Promise.all([api('archive-star-items', { beforeSignIn, revalidate: true }), api('archive-star-lists', { beforeSignIn, revalidate: true })]),
+    meta: api('archive-repo-meta', { beforeSignIn, revalidate: true }),
   };
 }
 

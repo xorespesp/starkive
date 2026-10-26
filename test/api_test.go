@@ -599,7 +599,17 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, `{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
+		slices.Sort(entries) // A map has no order, so the listing gets one, and the same files give the same body
+		body := fmt.Sprintf(`{"tree":[%s],"truncated":false}`, strings.Join(entries, ","))
+		// The `ETag` of a listing follows its body, and a request with the same `If-None-Match` gets 304 with no body,
+		// also at another commit and by branch name (measured)
+		etag := `"` + computeGitBlobSHA(body) + `"`
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		io.WriteString(w, body)
 
 	case r.URL.Path == "/repos/me/archive/git/trees" && r.Method == http.MethodPost:
 		// Create a tree: the received files overwrite the files of `base_tree`, and entries with a `null` sha delete theirs.

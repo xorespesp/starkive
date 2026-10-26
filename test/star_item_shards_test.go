@@ -137,6 +137,28 @@ func TestSyncRetryDownloadsOnlyTheShardAnotherWriteChanged(t *testing.T) {
 	}
 }
 
+// Tests that deleting a star list whose members are in several shards cleans up every member in one commit.
+// The members are a/one and i/nine (shard 1) and b/two (shard 2), and b/two keeps its other star list
+func TestStarListDeleteCleansUpMembersInEveryShard(t *testing.T) {
+	gh := setup(t, "[\n"+
+		`{"id":1,"node_id":"R_1","name":"a/one","note":"","star_list_ids":[100],"starred_at":"2026-01-01T00:00:00Z"}`+",\n"+
+		`{"id":2,"node_id":"R_2","name":"b/two","note":"","star_list_ids":[100,200],"starred_at":"2026-01-01T00:00:00Z"}`+",\n"+
+		`{"id":9,"node_id":"R_9","name":"i/nine","note":"","star_list_ids":[100],"starred_at":"2026-01-01T00:00:00Z"}`+
+		"\n]\n", sampleStarLists)
+	cookie := login(t)
+	commitsBefore := len(gh.commits)
+	if rec := call(api.HandleArchiveStarLists, "DELETE", "/api/archive-star-lists?id=100", "", cookie); rec.Code != 200 {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
+	}
+	shard1, shard2 := gh.readFile(core.BuildStarItemShardPath(1)), gh.readFile(core.BuildStarItemShardPath(2))
+	if strings.Contains(shard1, "100") || strings.Count(shard1, `"star_list_ids":[]`) != 2 || !strings.Contains(shard2, `"star_list_ids":[200]`) {
+		t.Errorf("shard 1 %s, shard 2 %s", shard1, shard2)
+	}
+	if len(gh.commits) != commitsBefore+1 || !strings.Contains(gh.commits[len(gh.commits)-1], "Removed from 3 repos") {
+		t.Errorf("commits: %q", gh.commits[commitsBefore:])
+	}
+}
+
 // Tests that a missing shard is a 502 for the list and for a write, and nothing is read as an empty archive or written
 func TestMissingStarItemShardIsBadGateway(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)

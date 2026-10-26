@@ -149,6 +149,77 @@ func TestReadDBRepoFileAtRefReadsAgainWithETag(t *testing.T) {
 	}
 }
 
+// Starts a test server that answers one file and the listing of its folder like GitHub, with `ETag` and 304 (`If-None-Match`).
+// The file is `db/star-lists.json`, and the folder `db` lists only it. Change `*content` to make another commit change the file.
+//
+// Returns:
+//   - The DB repository whose requests go to the server (`newTestDBRepo`), and the number of answers with a body (not 304)
+func startFakeConditionalAPI(t *testing.T, content *string) (*DBRepo, *atomic.Int32) {
+	bodies := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body, etag string
+		switch r.URL.Path {
+		case "/repos/me/archive/contents/" + StarListsDBPath:
+			body, etag = *content, `"`+computeGitBlobSHA([]byte(*content))+`"`
+		case "/repos/me/archive/git/trees/main:db":
+			body = fmt.Sprintf(`{"tree":[{"path":"star-lists.json","type":"blob","sha":%q}],"truncated":false}`, computeGitBlobSHA([]byte(*content)))
+			etag = `"listing-` + computeGitBlobSHA([]byte(body)) + `"` // Not a git sha, like GitHub's listing `ETag` (measured)
+		default:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		bodies.Add(1)
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(server.Close)
+	return newTestDBRepo(server.URL), bodies
+}
+
+// Tests the reads that answer only if the file or the listing changed.
+//   - A plain read gives the content (or listing) and GitHub's `ETag`
+//   - Asked with that `ETag`, an unchanged one is `isNotModified` with no content, and nothing is downloaded
+//   - A changed one comes in full with its new `ETag`
+//   - A file that doesn't exist is no content and no `ETag`, not an error
+func TestReadsIfChanged(t *testing.T) {
+	ctx := t.Context()
+	content := "[]\n"
+	repo, bodies := startFakeConditionalAPI(t, &content)
+
+	read, err := readDBRepoFileAtRefIfChanged(ctx, repo, StarListsDBPath, "main", "")
+	if err != nil || string(read.content) != "[]\n" || read.etag == "" || read.isNotModified {
+		t.Fatalf("plain read: %+v, %v", read, err)
+	}
+	if again, err := readDBRepoFileAtRefIfChanged(ctx, repo, StarListsDBPath, "main", read.etag); err != nil || !again.isNotModified || again.content != nil || again.etag != read.etag {
+		t.Errorf("unchanged: %+v, %v", again, err)
+	}
+	listing, err := readBlobSHAsInFolderIfChanged(ctx, repo, "main", "db", "")
+	if err != nil || len(listing.blobSHAByPath) != 1 || listing.etag == "" || listing.isNotModified {
+		t.Fatalf("plain listing: %+v, %v", listing, err)
+	}
+	if again, err := readBlobSHAsInFolderIfChanged(ctx, repo, "main", "db", listing.etag); err != nil || !again.isNotModified || again.blobSHAByPath != nil {
+		t.Errorf("unchanged listing: %+v, %v", again, err)
+	}
+	if bodies.Load() != 2 {
+		t.Errorf("bodies %d, want 2 (the two plain reads)", bodies.Load())
+	}
+
+	content = "[\n{\"id\":1}\n]\n" // Another commit changed it
+	if changed, err := readDBRepoFileAtRefIfChanged(ctx, repo, StarListsDBPath, "main", read.etag); err != nil || string(changed.content) != content || changed.etag == read.etag || changed.isNotModified {
+		t.Errorf("changed: %+v, %v", changed, err)
+	}
+	if changed, err := readBlobSHAsInFolderIfChanged(ctx, repo, "main", "db", listing.etag); err != nil || changed.isNotModified || changed.etag == listing.etag {
+		t.Errorf("changed listing: %+v, %v", changed, err)
+	}
+	if missing, err := readDBRepoFileAtRefIfChanged(ctx, repo, RepoMetaDBPath, "main", ""); err != nil || missing.content != nil || missing.etag != "" || missing.isNotModified {
+		t.Errorf("missing file: %+v, %v", missing, err)
+	}
+}
+
 // Tests which commits `FileChangesCommit.check` accepts.
 //   - A commit that changes nothing is refused, even with a valid message
 //   - A commit with changes needs a valid message (`errInvalidCommitMessage`)

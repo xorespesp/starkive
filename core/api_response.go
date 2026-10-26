@@ -7,6 +7,7 @@ package core
 import (
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -136,6 +137,8 @@ func WriteAPIJSONResponse(w http.ResponseWriter, status int, body any) {
 
 // Answers with a data file of the DB repository as it is.
 // If the browser accepts it, the answer is compressed with gzip.
+// The browser may keep it and ask again with its `ETag` (`buildAPIETag`): if the file didn't change, the answer is 304 with no body,
+// and GitHub's 304 behind it doesn't count toward the rate limit (measured).
 //
 // Args:
 //   - `path`: File path in the DB repository (`StarListsDBPath` and so on). The archive items have their own answer, `WriteAPIAllStarItemsResponse`
@@ -147,42 +150,123 @@ func WriteAPIJSONResponse(w http.ResponseWriter, status int, body any) {
 func WriteAPIDBFileResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo, path string) error {
 	ctx := r.Context() // The deadline that `ServeAPIRequest` set for this request
 	timingStep := beginServerTimingStep(ctx, "github-read")
-	content, err := ReadDBRepoFile(ctx, repo, path)
+	read, err := readDBRepoFileAtRefIfChanged(ctx, repo, path, repo.branch, parseSourceETagFromAPIETag(r))
 	timingStep.endWithDesc(path)
 	if err != nil {
 		return err
 	}
+	if read.isNotModified {
+		writeAPINotModified(w, buildAPIETag(r, read.etag))
+		return nil
+	}
+	content := read.content
 	if content == nil {
 		content = []byte("[]")
 	}
-	return writeAPIBodyGzipIfAccepted(w, r, content)
+	return writeAPIBodyGzipIfAccepted(w, r, content, buildAPIETag(r, read.etag))
 }
 
 // Answers with all archive items as one JSON array, one item per line.
-// It reads every shard at the latest commit (`shardedStarItemsDataFile.readLatestFromDBRepo`), so the items are from one commit and are checked.
+// It reads every shard at the latest commit (`shardedStarItemsDataFile.readLatestFromDBRepoIfChanged`), so the items are from one commit and are checked.
 // If the browser accepts it, the answer is compressed with gzip.
+// Like `WriteAPIDBFileResponse`, it answers 304 if the browser's `ETag` still matches, and then reads no shard.
+// The `ETag` comes from GitHub's listing of the shard folder, which changes only when a shard changes.
 func WriteAPIAllStarItemsResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo) error {
 	ctx := r.Context() // The deadline that `ServeAPIRequest` set for this request
 	timingStep := beginServerTimingStep(ctx, "github-read")
-	items, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
+	read, err := starItemsDataFile.readLatestFromDBRepoIfChanged(ctx, repo, parseSourceETagFromAPIETag(r))
 	timingStep.endWithDesc(StarItemsDBDir)
 	if err != nil {
 		return err
 	}
-	content, err := encodeJSONArrayByLine(items)
+	if read.isNotModified {
+		writeAPINotModified(w, buildAPIETag(r, read.etag))
+		return nil
+	}
+	content, err := encodeJSONArrayByLine(read.items)
 	if err != nil {
 		return err
 	}
-	return writeAPIBodyGzipIfAccepted(w, r, content)
+	return writeAPIBodyGzipIfAccepted(w, r, content, buildAPIETag(r, read.etag))
+}
+
+// Makes our `ETag` of an archive file answer: the build of this deployment, the encoding of the body,
+// and `sourceETag`, the `ETag` of the source the answer was made from (GitHub's, for a file or a folder listing),
+// like `"sk1-0123456789ab-gz-<sourceETag in base64>"`.
+// The source `ETag` goes inside, so the next request can send it back to the source (`parseSourceETagFromAPIETag`).
+//
+// Returns:
+//   - Our `ETag`. Empty if this deployment has no build commit (`readDeploymentCommitSHA`) or the source gave no `ETag`.
+//     Then the browser doesn't keep the answer
+//
+// NOTE: The build is in it because the server joins and encodes the archive.
+// A new build may answer the same source files with another body, and a kept old body must not be used then.
+// Without a build commit (dev-server), there is no such guard, so no `ETag` is given at all.
+// The encoding is in it because the gzip and plain bodies differ for the same files.
+// The source `ETag` is in base64 because it has quotes of its own, which can't be inside our `ETag` (docs: RFC 9110),
+// and the code doesn't assume what else it holds.
+func buildAPIETag(r *http.Request, sourceETag string) string {
+	const prefix = "sk1" // Version of the shape: changing the shape changes it, so a value of the old shape never matches
+	build := readDeploymentCommitSHA()
+	if build == "" || sourceETag == "" {
+		return ""
+	}
+	encoding := "id"
+	if isGzipAccepted(r) {
+		encoding = "gz"
+	}
+	return `"` + strings.Join([]string{prefix, build, encoding, base64.RawURLEncoding.EncodeToString([]byte(sourceETag))}, "-") + `"`
+}
+
+// Parses the source `ETag` out of our `ETag` in the `If-None-Match` of request `r` (`buildAPIETag`),
+// if the value is one of ours made by this build for this encoding.
+// Values of another build, another encoding or another shape are ignored, so the file is read again.
+//
+// Returns:
+//   - The source `ETag` to send as `GitHubAPIRequest.IfNoneMatch`. Empty if there is none to use
+func parseSourceETagFromAPIETag(r *http.Request) string {
+	for _, candidate := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		candidate = strings.Trim(strings.TrimPrefix(strings.TrimSpace(candidate), "W/"), `"`) // A proxy may have made it weak (`W/`)
+		parts := strings.SplitN(candidate, "-", 4)                                            // At most 4 parts, so a `-` in the base64 of the last one stays in it
+		if len(parts) != 4 {
+			continue
+		}
+		source, err := base64.RawURLEncoding.DecodeString(parts[3])
+		if err != nil || buildAPIETag(r, string(source)) != `"`+candidate+`"` { // Same build, same encoding and same shape
+			continue
+		}
+		return string(source)
+	}
+	return ""
+}
+
+// Sets the headers that let the browser keep an archive file answer and ask again with its `ETag`.
+// `private` keeps caches on the way from keeping it, and `no-cache` makes the browser ask the server every time before using it.
+// So a kept answer is never shown without the server checking the session first.
+func setAPICacheableHeaders(w http.ResponseWriter, etag string) {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", etag)
+}
+
+// Answers 304 Not Modified with `ETag` `etag`: the browser uses the answer it kept.
+func writeAPINotModified(w http.ResponseWriter, etag string) {
+	setAPIJSONResponseHeaders(w)
+	w.Header().Add("Vary", "Accept-Encoding")
+	setAPICacheableHeaders(w, etag)
+	w.WriteHeader(http.StatusNotModified)
 }
 
 // Writes the JSON array `content` as the answer, compressed with gzip if the browser accepts it.
+// With a non-empty `etag`, the browser may keep the answer (`setAPICacheableHeaders`). Otherwise it doesn't keep it (`no-store`).
 //
-// NOTE: The whole archive goes in one answer, so Vercel's response limit (4.5MB, docs) caps the archive size.
+// NOTE: `content` goes in one answer, so Vercel's response limit (4.5MB, docs) caps the archive size.
 // Compression makes it about 4 times smaller (measured).
-func writeAPIBodyGzipIfAccepted(w http.ResponseWriter, r *http.Request, content []byte) error {
+func writeAPIBodyGzipIfAccepted(w http.ResponseWriter, r *http.Request, content []byte, etag string) error {
 	setAPIJSONResponseHeaders(w)
 	w.Header().Add("Vary", "Accept-Encoding") // Tells that the body differs by request header even at the same address
+	if etag != "" {
+		setAPICacheableHeaders(w, etag)
+	}
 	if !isGzipAccepted(r) {
 		_, err := w.Write(content)
 		return err

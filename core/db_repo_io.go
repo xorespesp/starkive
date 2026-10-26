@@ -44,42 +44,80 @@ func ReadDBRepoFile(ctx context.Context, repo *DBRepo, path string) ([]byte, err
 //   - The file content. `nil` if the file doesn't exist (404)
 //   - A `GitHubAPIError` if GitHub answers with another failure.
 //     It is wrapped with `ErrGitHubRateLimited` if it is a rate limit answer
+func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, error) {
+	content, _, err := readDBRepoFileThroughCache(ctx, repo, path, ref)
+	return content, err
+}
+
+// Does the work of `readDBRepoFileAtRef`, and also tells whether the content came from the cache of the request.
 //
-// NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
-// Archive files can grow larger than that, so they are fetched in raw format.
-// A file that this request already read is asked for with the `ETag` it came with (`dbRepoFileCache`).
-// GitHub then answers 304 with no body if the content is the same, also at another commit or by branch name,
-// and a 304 doesn't count toward the rate limit (measured).
+// Returns:
+//   - The content, as `readDBRepoFileAtRef` gives it, or its error.
+//     `true` if GitHub answered 304 and the content is the one kept in `dbRepoFileCache`
+//
+// NOTE: A file that this request already read is asked for with the `ETag` it came with (`dbRepoFileCache`, `readDBRepoFileAtRefIfChanged`).
 // So reading the same file again in one request (a retry after a conflict, the next step of a sync) downloads nothing if it didn't change,
 // and the content that comes back is always the one at `ref`.
 // A file that this request wrote is kept too (`keepCommittedDBRepoFiles`).
-func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, error) {
+func readDBRepoFileThroughCache(ctx context.Context, repo *DBRepo, path string, ref string) ([]byte, bool, error) {
 	cache := readDBRepoFileCache(ctx)
 	kept, isKept := cache.get(path)
-	request := GitHubAPIRequest{Accept: "application/vnd.github.raw+json"}
-	if isKept {
-		request.IfNoneMatch = kept.etag
-	}
-	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildContentsAPIPath(path)+"?ref="+url.QueryEscape(ref), request)
+	read, err := readDBRepoFileAtRefIfChanged(ctx, repo, path, ref, kept.etag)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if isKept && read.isNotModified {
+		return kept.content, true, nil
+	}
+	if read.content != nil {
+		cache.put(path, read.etag, read.content)
+	}
+	return read.content, false, nil
+}
+
+// Result of a read that asks GitHub to answer only if the resource changed (`If-None-Match`)
+type conditionalDBRepoRead struct {
+	content       []byte // The content. `nil` if the file doesn't exist, or if `isNotModified`
+	etag          string // GitHub's `ETag` of the content, to ask with next time. Empty if the file doesn't exist or GitHub gave none
+	isNotModified bool   // `true` if GitHub answered 304: the content is the same as the one whose `ETag` was asked with
+}
+
+// Reads one file at `ref`, unless its content is the same as the one whose GitHub `ETag` is `ifNoneMatch`.
+// With an empty `ifNoneMatch`, it is a plain read.
+//
+// Returns:
+//   - The content and its `ETag`, or `isNotModified` with no content if GitHub answered 304 (the content didn't change).
+//     A file that doesn't exist (404) is no content and no `ETag`.
+//     Errors are those of `readDBRepoFileAtRef`
+//
+// NOTE: The default Contents API response leaves the content empty for files over 1MB (docs).
+// Archive files can grow larger than that, so they are fetched in raw format.
+// GitHub answers 304 if the content is the same, also at another commit or by branch name,
+// and a 304 doesn't count toward the rate limit (measured).
+// The `ETag` of a file is its git blob sha in quotes (measured).
+// A read treats it only as a value to send back.
+// The cache also makes one from the content of a written file (`keepCommittedDBRepoFiles`), and a wrong guess there only costs a download.
+func readDBRepoFileAtRefIfChanged(ctx context.Context, repo *DBRepo, path string, ref string, ifNoneMatch string) (conditionalDBRepoRead, error) {
+	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildContentsAPIPath(path)+"?ref="+url.QueryEscape(ref),
+		GitHubAPIRequest{Accept: "application/vnd.github.raw+json", IfNoneMatch: ifNoneMatch})
+	if err != nil {
+		return conditionalDBRepoRead{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
-		return nil, nil
+		return conditionalDBRepoRead{}, nil
 	}
-	if isKept && res.StatusCode == http.StatusNotModified {
-		return kept.content, nil
+	if ifNoneMatch != "" && res.StatusCode == http.StatusNotModified {
+		return conditionalDBRepoRead{etag: ifNoneMatch, isNotModified: true}, nil
 	}
 	if err := CheckGitHubResponseWithRateLimit(res); err != nil {
-		return nil, err
+		return conditionalDBRepoRead{}, err
 	}
 	content, err := io.ReadAll(res.Body)
 	if err != nil { // The body stopped coming (a dropped connection, `githubTimeout` or the deadline of `ctx`)
-		return nil, newGitHubUnreachableError(err)
+		return conditionalDBRepoRead{}, newGitHubUnreachableError(err)
 	}
-	cache.put(path, res.Header.Get("ETag"), content)
-	return content, nil
+	return conditionalDBRepoRead{content: content, etag: res.Header.Get("ETag")}, nil
 }
 
 // Files read from one commit of the DB repository for a write (`UpdateDBRepoFiles`): the commit, and the content of each path asked for.
@@ -92,8 +130,9 @@ func readDBRepoFileAtRef(ctx context.Context, repo *DBRepo, path string, ref str
 // Asking for it is a mistake in the code, and the panic shows it the first time that code runs.
 // In the server it ends only that request with 500 (`ServeAPIRequest`), and nothing is written.
 type DBRepoFilesAtCommit struct {
-	commitSHA string            // The commit the files were read at
-	contents  map[string][]byte // Path -> content at the commit. `nil` if the file doesn't exist there
+	commitSHA      string            // The commit the files were read at
+	contents       map[string][]byte // Path -> content at the commit. `nil` if the file doesn't exist there
+	fromCacheCount int               // How many of the files came from the cache of the request (GitHub answered 304). Only shown in `Server-Timing`
 }
 
 // Returns the sha of the commit the files were read at.
@@ -126,6 +165,7 @@ func (files *DBRepoFilesAtCommit) HasFile(path string) bool { return files.FileC
 //     An error if any file can't be read
 func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, commitSHA string) (*DBRepoFilesAtCommit, error) {
 	contents := make([][]byte, len(paths))
+	isFromCache := make([]bool, len(paths))
 	errs := make([]error, len(paths))
 	var wg sync.WaitGroup // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
 	for i, path := range paths {
@@ -134,7 +174,7 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 			defer wg.Done()
 			errs[i] = RunWithPanicAsError(func() error { // A panic in a goroutine would end the whole process
 				var err error
-				contents[i], err = readDBRepoFileAtRef(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
+				contents[i], isFromCache[i], err = readDBRepoFileThroughCache(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
 				return err
 			})
 		}()
@@ -143,7 +183,7 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: combines several errors into one. `nil` if all are `nil`
 		return nil, err
 	}
-	filesAtCommit := &DBRepoFilesAtCommit{commitSHA: commitSHA, contents: make(map[string][]byte, len(paths))}
+	filesAtCommit := &DBRepoFilesAtCommit{commitSHA: commitSHA, contents: make(map[string][]byte, len(paths)), fromCacheCount: countTrue(isFromCache)}
 	for i, path := range paths {
 		filesAtCommit.contents[path] = contents[i]
 	}
@@ -165,8 +205,31 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 // NOTE: The tree API takes `<commit sha>:<folder path>` or `<branch>:<folder path>` in place of a tree sha (measured).
 // A list of 74,000 files (23MB) was not cut short (measured).
 func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, ref string, folderPath string) (map[string]string, error) {
+	listing, err := readBlobSHAsInFolderIfChanged(ctx, repo, ref, folderPath, "")
+	return listing.blobSHAByPath, err
+}
+
+// Result of a folder listing that asks GitHub to answer only if the listing changed (`If-None-Match`)
+type conditionalFolderListing struct {
+	blobSHAByPath map[string]string // As `readBlobSHAsInFolder` gives it. `nil` if `isNotModified`
+	etag          string            // GitHub's `ETag` of the listing, to ask with next time. Empty if the folder doesn't exist or GitHub gave none
+	isNotModified bool              // `true` if GitHub answered 304: no file under the folder changed since the listing of that `ETag`
+}
+
+// Reads the listing of folder `folderPath` at `ref` like `readBlobSHAsInFolder`,
+// unless it is the same as the listing whose GitHub `ETag` is `ifNoneMatch`.
+// With an empty `ifNoneMatch`, it is a plain listing.
+//
+// Returns:
+//   - The listing and its `ETag`, or `isNotModified` with no listing if GitHub answered 304.
+//     Errors are those of `readBlobSHAsInFolder`
+//
+// NOTE: The `ETag` of a listing isn't the tree sha of the folder (measured), so the code treats it only as a value to send back.
+// GitHub answers 304 while no file under the folder changes, also at another commit or by branch name,
+// and a 304 doesn't count toward the rate limit (measured).
+func readBlobSHAsInFolderIfChanged(ctx context.Context, repo *DBRepo, ref string, folderPath string, ifNoneMatch string) (conditionalFolderListing, error) {
 	if !isValidRepoPath(folderPath) {
-		return nil, fmt.Errorf("refusing to list a folder path that isn't valid: %q", folderPath)
+		return conditionalFolderListing{}, fmt.Errorf("refusing to list a folder path that isn't valid: %q", folderPath)
 	}
 	var tree struct {
 		Tree []struct {
@@ -177,15 +240,26 @@ func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, ref string, folderP
 		Truncated bool `json:"truncated"`
 	}
 	escapedFolderPath := (&url.URL{Path: folderPath}).EscapedPath()
-	err := callDBRepoAPI(ctx, repo, http.MethodGet, "/git/trees/"+url.PathEscape(ref)+":"+escapedFolderPath+"?recursive=1", nil, &tree)
-	if hasGitHubStatus(err, http.StatusNotFound) {
-		return map[string]string{}, nil
-	}
+	res, err := CallGitHubAPI(ctx, repo.cfg, repo.BuildAPIPath("/git/trees/"+url.PathEscape(ref)+":"+escapedFolderPath+"?recursive=1"),
+		GitHubAPIRequest{IfNoneMatch: ifNoneMatch})
 	if err != nil {
-		return nil, err
+		return conditionalFolderListing{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return conditionalFolderListing{blobSHAByPath: map[string]string{}}, nil
+	}
+	if ifNoneMatch != "" && res.StatusCode == http.StatusNotModified {
+		return conditionalFolderListing{etag: ifNoneMatch, isNotModified: true}, nil
+	}
+	if err := CheckGitHubResponseWithRateLimit(res); err != nil {
+		return conditionalFolderListing{}, err
+	}
+	if err := DecodeGitHubResponse(res, &tree); err != nil {
+		return conditionalFolderListing{}, err
 	}
 	if tree.Truncated {
-		return nil, Errorf(http.StatusBadGateway, "GitHub cut short the file list of %s", folderPath)
+		return conditionalFolderListing{}, Errorf(http.StatusBadGateway, "GitHub cut short the file list of %s", folderPath)
 	}
 	blobSHAByPath := map[string]string{}
 	for _, entry := range tree.Tree {
@@ -193,7 +267,18 @@ func readBlobSHAsInFolder(ctx context.Context, repo *DBRepo, ref string, folderP
 			blobSHAByPath[folderPath+"/"+entry.Path] = entry.SHA
 		}
 	}
-	return blobSHAByPath, nil
+	return conditionalFolderListing{blobSHAByPath: blobSHAByPath, etag: res.Header.Get("ETag")}, nil
+}
+
+// Returns how many of `values` are `true`.
+func countTrue(values []bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 // Returns the git blob sha of file content `content`, the value GitHub gives as the sha of a file.
@@ -408,6 +493,8 @@ func (changes FileChangesCommit) check() error {
 //     If it leaves results in outer variables, it must set them from scratch on every call.
 //   - One attempt costs "4 + number of files read" GitHub requests (branch tip, one per file read, tree, commit, branch move),
 //     plus the requests that `buildFileChangesCommit` sends.
+//     A file that the request already read is asked for with its `ETag` (`readDBRepoFileThroughCache`),
+//     so on a retry an unchanged file is a 304 with no body.
 //     Files that are only written or deleted cost no extra request, except one for each written file that isn't UTF-8 text (`commitFiles`).
 //     That one is sent again on every attempt.
 //     This is the price of putting several files in one commit with no in-between state.
@@ -428,10 +515,11 @@ func UpdateDBRepoFiles(ctx context.Context, repo *DBRepo, paths []string, buildF
 		}
 		timingStep = beginServerTimingStep(ctx, "w-read")
 		filesAtCommit, err := readDBRepoFilesAtCommit(ctx, repo, paths, head.commit)
-		timingStep.end()
 		if err != nil {
+			timingStep.end()
 			return err
 		}
+		timingStep.endWithDesc(fmt.Sprintf("%s, %d from cache (304)", FormatCount(len(paths), "file"), filesAtCommit.fromCacheCount))
 		timingStep = beginServerTimingStep(ctx, "w-build")
 		changes, err := buildFileChangesCommit(filesAtCommit)
 		timingStep.end()

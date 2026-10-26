@@ -1,5 +1,5 @@
 // Cache of the DB repository files that one request has read: what it holds, and how it rides on the `ctx` of the request.
-// How a read uses it (a conditional request with `If-None-Match`) is in `readDBRepoFileAtRef` (`db_repo_io.go`).
+// How a read uses it (a conditional request with `If-None-Match`) is in `readDBRepoFileThroughCache` (`db_repo_io.go`).
 package core
 
 import (
@@ -8,8 +8,7 @@ import (
 )
 
 // Files of the DB repository that one request has read, by path, each with the `ETag` GitHub gave for it.
-// A later read of the same path sends that `ETag`, and GitHub answers 304 if the content is the same (`readDBRepoFileAtRef`).
-// So a kept content is used only when GitHub says it is still the content, and it can't be stale.
+// A kept content is used only after GitHub answers 304 for its `ETag` (`readDBRepoFileThroughCache`), so it can't be stale.
 // It lives only as long as the request (`ServeAPIRequest`), so nothing has to be dropped.
 // A `nil` cache keeps nothing and finds nothing, so code without a request (a test, a tool) needs no check.
 type dbRepoFileCache struct {

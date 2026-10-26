@@ -129,6 +129,12 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	}, nil
 }
 
+// Commit sha of the code this deployment was built from, from Vercel's system environment variable (docs).
+// It is empty where it isn't set, such as in dev-server and tests that don't set it.
+func readDeploymentCommitSHA() string {
+	return os.Getenv("VERCEL_GIT_COMMIT_SHA")
+}
+
 // Reads the environment variable `key`, or returns `fallback` if it is missing or empty
 func readEnv(key string, fallback string) string {
 	if v := os.Getenv(key); v != "" {

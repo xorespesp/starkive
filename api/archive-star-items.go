@@ -336,7 +336,6 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 			commitSummary = "edit note of " + item.Name
 		}
 		if body.StarListIDs != nil {
-			// The star list check and the save use the same commit, so an ID of a star list deleted meanwhile can't be saved
 			ids, err := tx.CheckStarListIDs(*body.StarListIDs)
 			if err != nil {
 				return core.CommitMessage{}, err

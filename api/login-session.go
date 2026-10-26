@@ -161,6 +161,8 @@ func handleLoginSessionDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	w.Header().Add("Set-Cookie", core.ClearSessionCookie)
+	// The archive file answers may be kept in the browser cache (`ETag`). Signing out clears them from this browser (docs: `Clear-Site-Data`)
+	w.Header().Set("Clear-Site-Data", `"cache"`)
 	core.WriteAPIJSONResponse(w, http.StatusOK, map[string]bool{"ok": true})
 	return nil
 }

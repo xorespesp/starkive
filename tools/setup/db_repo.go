@@ -81,8 +81,7 @@ This is your personal archive repository for the [starkive](https://github.com/x
 // Adds the initial files that are missing from the DB repository, in one commit.
 // If none is missing, it doesn't commit.
 // A file that is already there isn't overwritten, because the user may have edited it.
-// The archive item shards are made only in a new repository, one whose root has no data folder (`addEmptyStarItemShardsIfNewDBRepo`).
-// If the data folder is there, every shard must be there too, and missing ones aren't filled in.
+// It also adds the empty archive item shards to a new repository (`addEmptyStarItemShardsIfNewDBRepo`).
 //
 // NOTE: The first commit of an empty repository can hold only the marker.
 // GitHub refuses to make a tree or a commit with several files in an empty repository (Git Data API 409, GraphQL "Branch not found", measured).
