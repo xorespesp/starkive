@@ -1,8 +1,8 @@
 // The star catalog: the archive items (the shards under `db/star-items/`, `StarItem`) and the star list definitions
 // (`db/star-lists.json`, `StarList`), the user's own data.
 // It holds both types, the rules about star lists (name comparison, ID issuing, the star list IDs stored in items),
-// and the writes: `UpdateStarCatalog` changes either or both in one commit, `UpdateStarLists` changes the star lists alone,
-// and `AddStarredReposToStarCatalog` puts GitHub Stars in as new items.
+// and the writes: `UpdateStarCatalog` changes either or both in one commit, `UpdateStarItem` changes one item reading only its shard,
+// `UpdateStarLists` changes the star lists alone, and `AddStarredReposToStarCatalog` puts GitHub Stars in as new items.
 // The snapshots are in `archive_repo_meta.go` (metadata) and `archive_readmes.go` (README).
 // Reading Stars and star lists from GitHub is in `github_stars.go`.
 // The file format is in `data_file.go`, and writing goes through the storage engine (`UpdateDBRepoFiles` in `db_repo_io.go`).
@@ -10,6 +10,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -182,6 +183,64 @@ func (tx *StarCatalogTransaction) AddReadmeToCommit(itemID int64, fetched Fetche
 	tx.readmesToSave[itemID] = fetched
 }
 
+// One change of one archive item, made as one commit (`UpdateStarItem`).
+// It shows only that item, not a list of items.
+// Only the shard of the item is read, so a list here would be a part of the archive that looks like the whole.
+type StarItemTransaction struct {
+	id      int64                   // ID of the item this transaction changes
+	catalog *StarCatalogTransaction // The items of that shard and the star lists, read at one commit
+}
+
+// Returns the item as read, and `true`.
+// The zero value and `false` if the archive doesn't have it.
+func (tx *StarItemTransaction) Item() (StarItem, bool) {
+	i := slices.IndexFunc(tx.catalog.StarItems, func(s StarItem) bool { return s.ID == tx.id })
+	if i < 0 {
+		return StarItem{}, false
+	}
+	return tx.catalog.StarItems[i], true
+}
+
+// Puts `item` in the archive: it replaces the item as read, or goes at the front of its shard if the archive doesn't have it.
+// It is written when the transaction commits.
+//
+// Returns:
+//   - An error if `item.ID` isn't the ID of this transaction
+func (tx *StarItemTransaction) SetItem(item StarItem) error {
+	if item.ID != tx.id {
+		return fmt.Errorf("refusing to set star item %d in the transaction of item %d", item.ID, tx.id)
+	}
+	if i := slices.IndexFunc(tx.catalog.StarItems, func(s StarItem) bool { return s.ID == tx.id }); i >= 0 {
+		tx.catalog.StarItems[i] = item
+		return nil
+	}
+	tx.catalog.StarItems = append([]StarItem{item}, tx.catalog.StarItems...)
+	return nil
+}
+
+// Removes the item from the archive.
+// Its README snapshots are deleted in the same commit.
+//
+// Returns:
+//   - `true` if the archive had it
+func (tx *StarItemTransaction) RemoveItem() bool {
+	before := len(tx.catalog.StarItems)
+	tx.catalog.StarItems = slices.DeleteFunc(tx.catalog.StarItems, func(s StarItem) bool { return s.ID == tx.id })
+	return len(tx.catalog.StarItems) < before
+}
+
+// Checks that all star list IDs `ids` exist, and returns them cleaned up for storing in the item (`StarCatalog.CheckStarListIDs`).
+// The star lists are read at the same commit as the item, so an ID of a star list deleted in the meantime can't be saved.
+func (tx *StarItemTransaction) CheckStarListIDs(ids []int64) ([]int64, error) {
+	return tx.catalog.CheckStarListIDs(ids)
+}
+
+// Adds `fetched` to the commit as the README snapshot of the item (`StarCatalogTransaction.AddReadmeToCommit`).
+// It is dropped if the item isn't in the archive when `change` returns.
+func (tx *StarItemTransaction) AddReadmeToCommit(fetched FetchedReadme) {
+	tx.catalog.AddReadmeToCommit(tx.id, fetched)
+}
+
 // Reads the whole star catalog from one commit, changes it with `change`, and writes only the changed files in one commit.
 // It works on top of `UpdateDBRepoFiles`.
 //
@@ -203,10 +262,39 @@ func (tx *StarCatalogTransaction) AddReadmeToCommit(itemID int64, fetched Fetche
 // The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
 // Each removed item and each saved README costs one more request (a listing of its folder).
 func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
-	paths := append(starItemsDataFile.buildPaths(), starListsDataFile.path)
+	return updateStarCatalogInShards(ctx, repo, listAllStarItemShardIndexes(), change)
+}
+
+// Reads one archive item and the star lists from one commit, changes them with `change`, and writes the changes in one commit.
+// Only the shard of the item is read and written, so the cost doesn't grow with the archive.
+//
+// Args:
+//   - `id`: ID of the item. It doesn't have to be in the archive yet (Add puts it in with `SetItem`)
+//   - `change`: Changes the item through `tx` and returns a commit message.
+//     If it returns an error, nothing is written.
+//     If another commit gets in, it is called again with a new transaction read at the new commit
+//
+// Returns:
+//   - An error from `change` or from the write. A 404 `HTTPError` for an ID that isn't positive, which no item can have
+func UpdateStarItem(ctx context.Context, repo *DBRepo, id int64, change func(tx *StarItemTransaction) (CommitMessage, error)) error {
+	if id <= 0 { // `computeShardIndexOfStarItem` takes only a positive ID
+		return Errorf(http.StatusNotFound, "Not in the archive")
+	}
+	return updateStarCatalogInShards(ctx, repo, []int{computeShardIndexOfStarItem(id)}, func(catalog *StarCatalogTransaction) (CommitMessage, error) {
+		return change(&StarItemTransaction{id: id, catalog: catalog})
+	})
+}
+
+// Does the work of `UpdateStarCatalog`, reading only the archive item shards `shardIndexes`.
+// Then `tx.StarItems` holds only the items of those shards.
+// It stays private so code outside never sees a part of the archive as if it were the whole:
+// `UpdateStarCatalog` reads every shard, and `UpdateStarItem` hides the items behind a transaction of one item.
+// An item put into a shard that wasn't read is refused before anything is written (`trackedShardedStarItemsDataFile.addIfChanged`).
+func updateStarCatalogInShards(ctx context.Context, repo *DBRepo, shardIndexes []int, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
+	paths := append(starItemsDataFile.buildShardPaths(shardIndexes), starListsDataFile.path)
 	return UpdateDBRepoFiles(ctx, repo, paths, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
 		tx := &StarCatalogTransaction{}
-		trackedStarItems, err := starItemsDataFile.decodeForWriting(filesAtCommit, &tx.StarItems)
+		trackedStarItems, err := starItemsDataFile.decodeShardsForWriting(filesAtCommit, shardIndexes, &tx.StarItems)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

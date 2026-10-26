@@ -9,7 +9,8 @@
 //	PATCH  ?id=<id>  { note?, star_list_ids? } -> The changed item. Only the fields that were sent change
 //	DELETE ?id=<id>  -> { ok: true }
 //
-// For every write, the server reads the star catalog at one commit, applies the change, and writes it as one commit (`core.UpdateStarCatalog`).
+// For every write, the server reads the data it needs at one commit, applies the change, and writes it as one commit
+// (`core.UpdateStarItem` for one item, `core.UpdateStarCatalog` for Import).
 // The browser sends only what to change.
 // So it doesn't overwrite changes made meanwhile on another device, and sending the same Import request again gives the same result.
 
@@ -21,7 +22,6 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -67,35 +67,6 @@ func parseRepoFullNameOrURL(fullNameOrURL string) string {
 	return owner + "/" + name
 }
 
-// Finds one archive item, changes it with `change`, and commits.
-//
-// Args:
-//   - `id`: ID of the item to change (the GitHub repository ID)
-//   - `change`: A function that gets the transaction `tx` (the catalog read at one commit) and the item `s` in it.
-//     It changes `s` and returns the commit message.
-//     If it returns an error, nothing is written.
-//     If another commit gets in the way, it may be called again with a new transaction
-//
-// Returns:
-//   - The changed item. A 404 `HTTPError` if the item doesn't exist
-//
-// NOTE: `change` gets the whole catalog so that some checks happen at the same commit as the save.
-// The star list ID check is one of them: it needs another file (`db/star-lists.json`).
-// If that file were read separately, an ID pointing to a star list deleted meanwhile could be saved.
-func updateStarItem(ctx context.Context, dbRepo *core.DBRepo, id int64, change func(tx *core.StarCatalogTransaction, s *core.StarItem) (core.CommitMessage, error)) (core.StarItem, error) {
-	var updated core.StarItem
-	err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
-		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
-		if i < 0 {
-			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
-		}
-		message, err := change(tx, &tx.StarItems[i])
-		updated = tx.StarItems[i] // Set again if called again
-		return message, err
-	})
-	return updated, err
-}
-
 // Returns all archive items to a signed-in user.
 // Answers 401 if not signed in.
 // Answers 409 if the DB repository can't be used (not set up yet, a foreign repository, or a different major format version).
@@ -118,31 +89,23 @@ const maxStarredRepoIDsPerRequest = 100_000
 // One that doesn't come in time, or fails, is fetched by sync, so Add doesn't keep the user waiting
 const addReadmeTimeout = 5 * time.Second
 
-// Result of looking up the repository to add on GitHub
-type repoToAdd struct {
-	item   core.StarItem       // The new item, without star lists
-	readme *core.FetchedReadme // Its README. `nil` if it wasn't fetched
-	err    error               // Why the repository couldn't be looked up. A README that wasn't fetched isn't an error
-}
-
-// Looks up the repository `fullName` on GitHub and fetches its README.
-// If fetching the README fails (an error, or no answer within `addReadmeTimeout`), the result has no README and the failure is only logged.
+// Looks up the repository `fullName` on GitHub, and makes the new item for it (without star lists).
 //
 // Returns:
-//   - The new item and its README.
-//     `err` is set if the lookup fails: a 404 `HTTPError` if GitHub can't find the repository, or the GitHub error
-func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) repoToAdd {
+//   - The new item.
+//     A 404 `HTTPError` if GitHub can't find the repository, or the GitHub error
+func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) (core.StarItem, error) {
 	res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), "/repos/"+fullName, core.GitHubAPIRequest{})
 	if err != nil {
-		return repoToAdd{err: err}
+		return core.StarItem{}, err
 	}
 	defer res.Body.Close()
 	// A missing repository and a private one the token can't see are both 404 (docs)
 	if res.StatusCode == http.StatusNotFound {
-		return repoToAdd{err: core.Errorf(http.StatusNotFound, "Repository not found: %s", fullName)}
+		return core.StarItem{}, core.Errorf(http.StatusNotFound, "Repository not found: %s", fullName)
 	}
 	if err := core.CheckGitHubResponse(res); err != nil {
-		return repoToAdd{err: err}
+		return core.StarItem{}, err
 	}
 	var repo struct {
 		ID       int64  `json:"id"`        // Repository ID. Becomes the item ID
@@ -150,29 +113,38 @@ func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) 
 		FullName string `json:"full_name"` // `owner/repo` as GitHub answers it (the letter case may differ from the input)
 	}
 	if err := core.DecodeGitHubResponse(res, &repo); err != nil {
-		return repoToAdd{err: err}
+		return core.StarItem{}, err
 	}
-	found := repoToAdd{item: core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}}
+	return core.StarItem{ID: repo.ID, NodeID: repo.NodeID, Name: repo.FullName, StarredAt: core.FormatNow()}, nil
+}
 
+// Fetches the README of the repository to add, whose `node_id` is `nodeID`.
+// `name` is the repository name, only for the log.
+// If it fails (an error, or no answer within `addReadmeTimeout`), the failure is only logged, and sync fetches it later.
+//
+// Returns:
+//   - The README. `nil` if it wasn't fetched
+func fetchReadmeToAdd(ctx context.Context, dbRepo *core.DBRepo, nodeID string, name string) *core.FetchedReadme {
 	// Only fetching the README gets the shorter deadline `addReadmeTimeout`, so a slow GitHub doesn't keep the user waiting.
 	// `WithTimeout` makes it a child of `ctx`, so it never ends later than the deadline of the request.
 	// The commit uses `ctx`, not this child, so a slow README can't make the save fail.
 	// `cancel` frees the timer of the child right away, because nothing after the README uses it
 	addReadmeCtx, cancel := context.WithTimeout(ctx, addReadmeTimeout)
-	readmes, readmeErr := core.FetchReadmesByNodeIDs(addReadmeCtx, dbRepo.EnvConfig(), []string{repo.NodeID})
+	readmes, err := core.FetchReadmesByNodeIDs(addReadmeCtx, dbRepo.EnvConfig(), []string{nodeID})
 	cancel()
-	if readmeErr == nil && readmes[0] == nil {
-		readmeErr = errors.New("GitHub can't tell about the README now") // Sync asks it again later
+	if err == nil && readmes[0] == nil {
+		err = errors.New("GitHub can't tell about the README now") // Sync asks it again later
 	}
-	if readmeErr != nil {
-		log.Printf("add %s: README not saved: %v", repo.FullName, readmeErr)
-		return found
+	if err != nil {
+		if ctx.Err() == nil { // Cut at the end of the request (the save failed first, so nobody waits for it): nothing to report
+			log.Printf("add %s: README not saved: %v", name, err)
+		}
+		return nil
 	}
-	found.readme = readmes[0]
-	return found
+	return readmes[0]
 }
 
-// Looks up one repository on GitHub, adds it to the front of the archive, and answers with the new item as JSON (Add).
+// Looks up one repository on GitHub, adds it to the archive, and answers with the new item as JSON (Add).
 // It can add a repository without a Star.
 // The time it was added goes where the Star time would be.
 // Its README snapshot is saved in the same commit.
@@ -186,70 +158,64 @@ func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) 
 //   - A 400 `HTTPError` if the input shape is wrong or a star list ID doesn't exist.
 //     A 404 if GitHub can't find the repository, and a 409 if it's already in the archive
 //
-// NOTE: The lookup on GitHub (`lookUpRepoToAdd`) and the start of the save run at the same time.
-// They don't need each other until `change` adds the item.
-// The lookup takes about 0.8 to 1 second (most of it is the README, `addReadmeTimeout`),
-// and reading the files before `change` about 0.7 seconds with 20,000 items (measured).
-// So Add ends sooner by about the shorter of the two.
-// The lookup is taken once and used again when `change` runs again after a conflict.
+// NOTE: The save reads only the shard of the new item, so it needs the repository ID first.
+// The repository lookup (`lookUpRepoToAdd`) is quick and comes first.
+// The README (`fetchReadmeToAdd`, about 1 second, measured) is fetched at the same time as the save reads its files.
+// `change` waits for the README only when it adds the item.
+// The README is taken once and used again when `change` runs again after a conflict.
 func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
 	fullName := parseRepoFullNameOrURL(fullNameOrURL)
 	if fullName == "" {
 		return core.Errorf(http.StatusBadRequest, "Enter owner/repo or a GitHub repository URL")
 	}
+	found, err := lookUpRepoToAdd(ctx, dbRepo, fullName)
+	if err != nil {
+		return err
+	}
 	// `chan`: a typed queue between goroutines.
-	// Every path below takes the result (`takeLookup`), so the goroutine ends before this function returns.
-	// Room for one result keeps the send from waiting for that, so the goroutine can't be left blocked.
-	lookupDone := make(chan repoToAdd, 1)
-	// `go`: runs the function in a goroutine (a lightweight thread), so the save below starts without waiting.
-	// `lookupDone <- v` sends `v` to the channel.
-	// A panic in the lookup becomes its error (`core.RunWithPanicAsError`), so the goroutine still sends one result
-	go func() {
-		var found repoToAdd
-		if err := core.RunWithPanicAsError(func() error { found = lookUpRepoToAdd(ctx, dbRepo, fullName); return nil }); err != nil {
-			found = repoToAdd{err: err}
+	// Room for one result keeps the send from waiting, so the goroutine ends on its own even if the save fails before taking it.
+	// `readmeDone <- v` sends `v` to the channel.
+	// A panic in the fetch becomes a missing README (`core.RunWithPanicAsError`), so the goroutine still sends one result
+	readmeDone := make(chan *core.FetchedReadme, 1)
+	go func() { // `go`: runs the function in a goroutine (a lightweight thread), so the save below starts without waiting
+		var readme *core.FetchedReadme
+		if err := core.RunWithPanicAsError(func() error { readme = fetchReadmeToAdd(ctx, dbRepo, found.NodeID, found.Name); return nil }); err != nil {
+			log.Printf("add %s: README not saved: %v", found.Name, err)
 		}
-		lookupDone <- found
+		readmeDone <- readme
 	}()
-	var lookup *repoToAdd // `nil` until the result is taken from `lookupDone`
-	// Returns the lookup result.
+	var readme *core.FetchedReadme // Set by the first `takeReadme`
+	readmeTaken := false
+	// Returns the README.
 	// The first call waits for it, and later calls get the same result
-	takeLookup := func() repoToAdd {
-		if lookup == nil {
-			found := <-lookupDone // Waits until the goroutine sends its result
-			lookup = &found
+	takeReadme := func() *core.FetchedReadme {
+		if !readmeTaken {
+			readme = <-readmeDone // Waits until the goroutine sends its result
+			readmeTaken = true
 		}
-		return *lookup
+		return readme
 	}
 
-	var item core.StarItem
-	err := core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
-		found := takeLookup()
-		if found.err != nil {
-			return core.CommitMessage{}, found.err
-		}
-		item = found.item
+	item := found
+	err = core.UpdateStarItem(ctx, dbRepo, found.ID, func(tx *core.StarItemTransaction) (core.CommitMessage, error) {
+		item = found                                 // Set again if called again
 		ids, err := tx.CheckStarListIDs(starListIDs) // Reports a bad request (400) before "already there" (409)
 		if err != nil {
 			return core.CommitMessage{}, err
 		}
-		if slices.ContainsFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == item.ID }) {
+		if _, exists := tx.Item(); exists { // The same ID can only be in this item's shard, so this is the whole archive's answer
 			return core.CommitMessage{}, core.Errorf(http.StatusConflict, "%s is already in the archive", item.Name)
 		}
 		item.StarListIDs = ids
-		tx.StarItems = append([]core.StarItem{item}, tx.StarItems...)
-		if found.readme != nil {
-			tx.AddReadmeToCommit(item.ID, *found.readme)
+		if err := tx.SetItem(item); err != nil {
+			return core.CommitMessage{}, err
+		}
+		if fetched := takeReadme(); fetched != nil {
+			tx.AddReadmeToCommit(*fetched)
 		}
 		return core.NewCommitMessage("user(star-items)", "add "+item.Name), nil
 	})
 	if err != nil {
-		// The save can fail before `change` runs (for example, GitHub fails while the files are read).
-		// A repository that doesn't exist still answers 404, not with the error of the save.
-		// So this waits for the lookup if it is still running
-		if found := takeLookup(); found.err != nil {
-			return found.err
-		}
 		return err
 	}
 	core.WriteAPIJSONResponse(w, http.StatusOK, item)
@@ -358,20 +324,30 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 		}
 		body.Note = &trimmed
 	}
-	updated, err := updateStarItem(ctx, dbRepo, id, func(tx *core.StarCatalogTransaction, s *core.StarItem) (core.CommitMessage, error) {
-		commitSummary := "edit " + s.Name
+	var updated core.StarItem
+	err = core.UpdateStarItem(ctx, dbRepo, id, func(tx *core.StarItemTransaction) (core.CommitMessage, error) {
+		item, found := tx.Item()
+		if !found {
+			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
+		}
+		commitSummary := "edit " + item.Name
 		if body.Note != nil {
-			s.Note = *body.Note
-			commitSummary = "edit note of " + s.Name
+			item.Note = *body.Note
+			commitSummary = "edit note of " + item.Name
 		}
 		if body.StarListIDs != nil {
+			// The star list check and the save use the same commit, so an ID of a star list deleted meanwhile can't be saved
 			ids, err := tx.CheckStarListIDs(*body.StarListIDs)
 			if err != nil {
 				return core.CommitMessage{}, err
 			}
-			s.StarListIDs = ids
-			commitSummary = "change star lists of " + s.Name
+			item.StarListIDs = ids
+			commitSummary = "change star lists of " + item.Name
 		}
+		if err := tx.SetItem(item); err != nil {
+			return core.CommitMessage{}, err
+		}
+		updated = item // Set again if called again
 		return core.NewCommitMessage("user(star-items)", commitSummary), nil
 	})
 	if err != nil {
@@ -382,7 +358,7 @@ func handleArchiveStarItemsPatch(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Deletes one item from the archive and answers `{ ok: true }`.
-// Its README snapshots are deleted in the same commit (`core.UpdateStarCatalog`).
+// Its README snapshots are deleted in the same commit (`core.UpdateStarItem`).
 // Its metadata snapshot is removed in the next sync.
 // Answers 400 if `id` isn't a number, and 404 if the item doesn't exist.
 func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error {
@@ -395,14 +371,13 @@ func handleArchiveStarItemsDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	err = core.UpdateStarCatalog(ctx, dbRepo, func(tx *core.StarCatalogTransaction) (core.CommitMessage, error) {
-		i := slices.IndexFunc(tx.StarItems, func(s core.StarItem) bool { return s.ID == id })
-		if i < 0 {
+	err = core.UpdateStarItem(ctx, dbRepo, id, func(tx *core.StarItemTransaction) (core.CommitMessage, error) {
+		item, found := tx.Item()
+		if !found {
 			return core.CommitMessage{}, core.Errorf(http.StatusNotFound, "Not in the archive")
 		}
-		name := tx.StarItems[i].Name // `slices.Delete` shifts the later items into place, so the name is taken out before deleting
-		tx.StarItems = slices.Delete(tx.StarItems, i, i+1)
-		return core.NewCommitMessage("user(star-items)", "remove "+name), nil
+		tx.RemoveItem()
+		return core.NewCommitMessage("user(star-items)", "remove "+item.Name), nil
 	})
 	if err != nil {
 		return err

@@ -107,7 +107,8 @@ func (t *trackedDataFile[T]) addIfChanged(changes *FileChangesCommit) error {
 
 // The archive items as one data file, split by ID into `StarItemShardCount` shards under `StarItemsDBDir`.
 // Each shard is a data file of its own, holding only the items of that shard (`computeShardIndexOfStarItem`).
-// It has the same methods as `dataFile`, so a write reads all shards as one list and writes back only the shards that changed.
+// It has the methods of `dataFile`, so a write reads the shards as one list and writes back only the shards that changed.
+// A write may read only some shards (`decodeShardsForWriting`), for example the one shard of the item it changes.
 // The item type is fixed to `StarItem`, because splitting needs the item ID.
 type shardedStarItemsDataFile struct {
 	shards [StarItemShardCount]dataFile[StarItem] // Data file of each shard, by shard index
@@ -129,11 +130,25 @@ func newShardedStarItemsDataFile() shardedStarItemsDataFile {
 
 // Builds the paths of all shards, to read them together with other files at one commit (`UpdateDBRepoFiles`).
 func (f shardedStarItemsDataFile) buildPaths() []string {
-	paths := make([]string, 0, StarItemShardCount)
-	for _, shard := range f.shards {
-		paths = append(paths, shard.path)
+	return f.buildShardPaths(listAllStarItemShardIndexes())
+}
+
+// Builds the paths of the shards `shardIndexes`, to read them together with other files at one commit (`UpdateDBRepoFiles`).
+func (f shardedStarItemsDataFile) buildShardPaths(shardIndexes []int) []string {
+	paths := make([]string, 0, len(shardIndexes))
+	for _, index := range shardIndexes {
+		paths = append(paths, f.shards[index].path)
 	}
 	return paths
+}
+
+// Returns the indexes of all archive item shards, from 0 to `StarItemShardCount` - 1.
+func listAllStarItemShardIndexes() []int {
+	indexes := make([]int, 0, StarItemShardCount)
+	for index := range StarItemShardCount {
+		indexes = append(indexes, index)
+	}
+	return indexes
 }
 
 // Reads all shards at commit `commitSHA` into one list, for code that reads the items without writing.
@@ -240,21 +255,24 @@ func (f shardedStarItemsDataFile) decodeShardContents(contents [StarItemShardCou
 	return items, nil
 }
 
-// Decodes all shards from `filesAtCommit` into `*items` as one list, and starts tracking that variable.
+// Decodes the shards `shardIndexes` from `filesAtCommit` into `*items` as one list, and starts tracking that variable.
 // After the change, `addIfChanged` on the result adds to the commit only the shards whose items changed.
+// With only some shards, `*items` holds only their items, and an item that belongs to another shard can't be written.
 //
 // Args:
 //   - `filesAtCommit`: The files that `UpdateDBRepoFiles` read at one commit
+//   - `shardIndexes`: The shards to decode, each once (`listAllStarItemShardIndexes` for all, `computeShardIndexOfStarItem` for the one of an item)
 //   - `items`: The variable to decode into. The write must change this variable, not a copy of it
 //
 // Returns:
 //   - An error if a shard can't be decoded, or is missing or breaks the layout (`checkStarItemShard`).
 //     `*items` is set only when every shard is good.
 //     It panics if a shard wasn't among the paths given to `UpdateDBRepoFiles` (`DBRepoFilesAtCommit.FileContent`)
-func (f shardedStarItemsDataFile) decodeForWriting(filesAtCommit *DBRepoFilesAtCommit, items *[]StarItem) (*trackedShardedStarItemsDataFile, error) {
+func (f shardedStarItemsDataFile) decodeShardsForWriting(filesAtCommit *DBRepoFilesAtCommit, shardIndexes []int, items *[]StarItem) (*trackedShardedStarItemsDataFile, error) {
 	tracked := &trackedShardedStarItemsDataFile{items: items}
 	decoded := []StarItem{}
-	for index, shard := range f.shards {
+	for _, index := range shardIndexes {
+		shard := f.shards[index]
 		var err error
 		tracked.shards[index], err = shard.decodeForWriting(filesAtCommit, &tracked.shardItems[index])
 		if err != nil {
@@ -269,12 +287,12 @@ func (f shardedStarItemsDataFile) decodeForWriting(filesAtCommit *DBRepoFilesAtC
 	return tracked, nil
 }
 
-// The archive items decoded from all shards into one variable for a change (`shardedStarItemsDataFile.decodeForWriting`).
+// The archive items decoded from some or all shards into one variable for a change (`shardedStarItemsDataFile.decodeShardsForWriting`).
 // Each shard is tracked as its own data file (`trackedDataFile`),
 // and `addIfChanged` splits the one variable back into the shards before they are compared.
 type trackedShardedStarItemsDataFile struct {
 	shardItems [StarItemShardCount][]StarItem                 // Items of each shard. `shards` tracks these variables
-	shards     [StarItemShardCount]*trackedDataFile[StarItem] // Each shard as read, to tell whether its items changed
+	shards     [StarItemShardCount]*trackedDataFile[StarItem] // Each shard as read, to tell whether its items changed. `nil` for a shard that wasn't read
 	items      *[]StarItem                                    // The variable the shards were decoded into. A pointer, so the latest value is seen even if the change replaces the slice
 }
 
@@ -286,6 +304,8 @@ type trackedShardedStarItemsDataFile struct {
 // Returns:
 //   - An error, with nothing added, if an ID isn't positive or appears twice.
 //     The next read would refuse such a shard (`checkStarItemShard`), so it is never written.
+//     An error, with nothing added, if an item belongs to a shard that wasn't read.
+//     Writing that shard would replace its items with only the new ones.
 //     An error if a shard can't be encoded
 func (t *trackedShardedStarItemsDataFile) addIfChanged(changes *FileChangesCommit) error {
 	var split [StarItemShardCount][]StarItem      // Items of each shard after the change
@@ -296,10 +316,16 @@ func (t *trackedShardedStarItemsDataFile) addIfChanged(changes *FileChangesCommi
 		}
 		isSeen[item.ID] = true
 		index := computeShardIndexOfStarItem(item.ID)
+		if t.shards[index] == nil {
+			return fmt.Errorf("refusing to write star item %d: its shard %s wasn't read", item.ID, BuildStarItemShardPath(index))
+		}
 		split[index] = append(split[index], item)
 	}
 	t.shardItems = split // The tracked variables of `shards` now hold the items after the change
 	for index := range StarItemShardCount {
+		if t.shards[index] == nil {
+			continue // Not read, and none of its items is in `split`, as checked above
+		}
 		if err := t.shards[index].addIfChanged(changes); err != nil {
 			return err
 		}

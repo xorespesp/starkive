@@ -2,6 +2,7 @@
 package test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,6 +38,50 @@ func TestStarItemsGetRereadsAShardThatGaveAPassing404(t *testing.T) {
 	rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"a/one"`) || gh.blobReads != 1 {
 		t.Errorf("got %d %s, blob reads %d", rec.Code, rec.Body, gh.blobReads)
+	}
+}
+
+// Tests that a write of one item reads only the shard of that item and the star lists (`core.UpdateStarItem`).
+//   - It refuses to put an item with another ID
+//   - An ID that isn't positive, which no item can have, is a 404 for a change and a delete, and nothing is read or written
+func TestOneItemWriteReadsOnlyItsShard(t *testing.T) {
+	ctx := t.Context()
+	gh := setup(t, sampleStarItems, sampleStarLists)
+	cookie := login(t)
+	gh.mu.Lock()
+	gh.fileReads = nil
+	gh.mu.Unlock()
+	if rec := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id=2", `{"note":"one shard"}`, cookie); rec.Code != 200 {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
+	}
+	gh.mu.Lock()
+	reads := slices.Clone(gh.fileReads)
+	gh.mu.Unlock()
+	slices.Sort(reads)
+	if want := []string{core.BuildStarItemShardPath(2), core.StarListsDBPath}; !slices.Equal(reads, want) {
+		t.Errorf("read %q, want %q", reads, want)
+	}
+
+	repo := openTestDBRepo(t)
+	err := core.UpdateStarItem(ctx, repo, 2, func(tx *core.StarItemTransaction) (core.CommitMessage, error) {
+		item, _ := tx.Item()
+		item.ID = 10 // Another item in the same shard (10 % 8 is 2), so only the ID check of `SetItem` can refuse it
+		return core.NewCommitMessage("user(star-items)", "edit"), tx.SetItem(item)
+	})
+	if err == nil || !strings.Contains(gh.readStarItems(), `"id":2,`) {
+		t.Errorf("another ID: %v", err)
+	}
+
+	commitsBefore := len(gh.commits)
+	for _, id := range []string{"0", "-8"} {
+		gh.mu.Lock()
+		gh.fileReads = nil
+		gh.mu.Unlock()
+		patch := call(api.HandleArchiveStarItems, "PATCH", "/api/archive-star-items?id="+id, `{"note":"x"}`, cookie)
+		remove := call(api.HandleArchiveStarItems, "DELETE", "/api/archive-star-items?id="+id, "", cookie)
+		if patch.Code != 404 || remove.Code != 404 || len(gh.fileReads) != 0 || len(gh.commits) != commitsBefore {
+			t.Errorf("ID %s: patch %d, delete %d, reads %q, commits %d -> %d", id, patch.Code, remove.Code, gh.fileReads, commitsBefore, len(gh.commits))
+		}
 	}
 }
 

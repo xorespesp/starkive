@@ -68,6 +68,7 @@ type fakeGitHub struct {
 	treeListCalls       int                           // Number of folder listing requests (tree API with `<commit>:<folder>`)
 	blobs               map[string]string             // Created blob sha -> content
 	blobReads           int                           // Number of blob reads by sha (`/git/blobs/<sha>`)
+	fileReads           []string                      // Paths of the file reads (Contents API), in the order they came
 	readmes             map[int64]fakeReadme          // READMEs of repositories by repository ID. A repository not in it has no README. GraphQL finds it by `node_id` `R_<ID>`
 	readmeQueries       int                           // Number of README queries by GraphQL (folder listings and file contents)
 	readmeListedIDs     [][]string                    // `node_id`s of each README folder listing query, in the order the queries came
@@ -487,6 +488,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			files = previous
 		}
 		path := strings.TrimPrefix(r.URL.Path, contents)
+		f.fileReads = append(f.fileReads, path)
 		if isBranch && path == f.branchReadNotFound {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 			return

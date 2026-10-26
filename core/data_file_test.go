@@ -198,7 +198,7 @@ func TestShardedStarItemsDataFileRefusesBrokenShards(t *testing.T) {
 		},
 		"decode for writing": func(contentByIndex map[int]string) ([]StarItem, error) {
 			var items []StarItem
-			_, err := starItemsDataFile.decodeForWriting(newTestShardFiles(contentByIndex), &items)
+			_, err := starItemsDataFile.decodeShardsForWriting(newTestShardFiles(contentByIndex), listAllStarItemShardIndexes(), &items)
 			return items, err
 		},
 		"read at a commit": func(contentByIndex map[int]string) ([]StarItem, error) {
@@ -245,10 +245,10 @@ func TestShardedStarItemsDataFileRefusesBrokenShards(t *testing.T) {
 //   - An ID that isn't positive or appears twice is refused, and nothing is added
 func TestTrackedShardedStarItemsDataFileAddsOnlyChangedShards(t *testing.T) {
 	var items []StarItem
-	tracked, err := starItemsDataFile.decodeForWriting(newTestShardFiles(map[int]string{
+	tracked, err := starItemsDataFile.decodeShardsForWriting(newTestShardFiles(map[int]string{
 		1: "[\n  {\"id\":1,\"node_id\":\"\",\"name\":\"a/one\",\"note\":\"\",\"star_list_ids\":[],\"starred_at\":\"\"}\n]\n", // Another layout
 		2: "[\n{\"id\":2,\"name\":\"b/two\",\"note\":\"\",\"star_list_ids\":[],\"starred_at\":\"\"}\n]\n",
-	}), &items)
+	}), listAllStarItemShardIndexes(), &items)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,13 +286,43 @@ func TestTrackedShardedStarItemsDataFileAddsOnlyChangedShards(t *testing.T) {
 	}
 }
 
+// Tests a write that read only one shard.
+//   - The items are only the ones of that shard
+//   - An item that belongs to a shard that wasn't read is refused, and nothing is added,
+//     so a shard can't be replaced by only the new items
+//   - A change of its own item rewrites only that shard
+func TestTrackedShardedStarItemsDataFileWritesOnlyTheShardsRead(t *testing.T) {
+	var items []StarItem
+	tracked, err := starItemsDataFile.decodeShardsForWriting(newTestShardFiles(map[int]string{
+		1: `[{"id":9,"name":"a/nine"},{"id":1,"name":"a/one"}]`,
+		2: `[{"id":2,"name":"b/two"}]`,
+	}), []int{1}, &items)
+	if ids := listTestStarItemIDs(items); err != nil || !slices.Equal(ids, []int64{9, 1}) {
+		t.Fatalf("items of shard 1: %v, %v", ids, err)
+	}
+
+	withOtherShard := append(slices.Clone(items), StarItem{ID: 3, Name: "c/three"})
+	items = withOtherShard
+	changes := FileChangesCommit{FilesToWrite: map[string][]byte{}}
+	if err := tracked.addIfChanged(&changes); err == nil || !strings.Contains(err.Error(), BuildStarItemShardPath(3)) || len(changes.FilesToWrite) != 0 {
+		t.Errorf("item of a shard not read: %v, added %q", err, changes.FilesToWrite)
+	}
+
+	items = withOtherShard[:2]
+	items[0].Note = "changed"
+	changes = FileChangesCommit{FilesToWrite: map[string][]byte{}}
+	if err := tracked.addIfChanged(&changes); err != nil || len(changes.FilesToWrite) != 1 || !strings.Contains(string(changes.FilesToWrite[BuildStarItemShardPath(1)]), `"note":"changed"`) {
+		t.Errorf("change in the shard read: %v, added %q", err, changes.FilesToWrite)
+	}
+}
+
 // Tests that a change which edits the star list IDs of an item in place is still written.
 // The items share their `StarListIDs` arrays with the shards as decoded, so each shard as read must be encoded before the change
 func TestTrackedShardedStarItemsDataFileSeesAChangeMadeInPlace(t *testing.T) {
 	var items []StarItem
-	tracked, err := starItemsDataFile.decodeForWriting(newTestShardFiles(map[int]string{
+	tracked, err := starItemsDataFile.decodeShardsForWriting(newTestShardFiles(map[int]string{
 		1: "[\n{\"id\":1,\"node_id\":\"\",\"name\":\"a/one\",\"note\":\"\",\"star_list_ids\":[100,200],\"starred_at\":\"\"}\n]\n",
-	}), &items)
+	}), listAllStarItemShardIndexes(), &items)
 	if err != nil {
 		t.Fatal(err)
 	}
