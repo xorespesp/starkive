@@ -37,6 +37,29 @@ const (
 // The last two digits of real IDs spread evenly (measured), so a folder holds about 200 files at 20,000 repositories.
 const ReadmesDBDir = "db/readmes"
 
+// Folder of the archive items (`StarItem`).
+// The items are split by ID into `StarItemShardCount` files (shards), and an item is only in the shard of `computeShardIndexOfStarItem`.
+// A write then writes only the shards whose items changed, not the whole archive.
+// All shards always exist, even when empty, so a missing shard is an error and never reads as an empty archive.
+const StarItemsDBDir = "db/star-items"
+
+// Number of archive item shards.
+// At 20,000 items one shard is about 400KB, and writing it costs about 0.15 seconds more than a tiny file (measured).
+// Changing it moves almost every item to another shard, so it is part of the format.
+const StarItemShardCount = 8
+
+// Builds the path of shard `shardIndex` (0 to `StarItemShardCount` - 1), like `db/star-items/03.json`.
+func BuildStarItemShardPath(shardIndex int) string {
+	return fmt.Sprintf("%s/%02d.json", StarItemsDBDir, shardIndex)
+}
+
+// Returns the index of the shard that holds the item with ID `id`.
+// `id` must be positive, because Go's `%` keeps the sign of a negative number.
+// The last digits of real repository IDs spread evenly (measured: 19,991 IDs, each shard within 3.5% of the mean).
+func computeShardIndexOfStarItem(id int64) int {
+	return int(id % StarItemShardCount)
+}
+
 // Version of the DB repository format (`format` in the marker file)
 type DBRepoFormatVersion struct {
 	Major int `json:"major"` // Raised by a change that other versions can't read or call correctly. A different value stops the server and the setup tool
