@@ -222,7 +222,7 @@ func buildAPIETag(r *http.Request, sourceETag string) string {
 // Returns:
 //   - The source `ETag` to send as `GitHubAPIRequest.IfNoneMatch`. Empty if there is none to use
 func parseSourceETagFromAPIETag(r *http.Request) string {
-	for _, candidate := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+	for candidate := range strings.SplitSeq(r.Header.Get("If-None-Match"), ",") {
 		candidate = strings.Trim(strings.TrimPrefix(strings.TrimSpace(candidate), "W/"), `"`) // A proxy may have made it weak (`W/`)
 		parts := strings.SplitN(candidate, "-", 4)                                            // At most 4 parts, so a `-` in the base64 of the last one stays in it
 		if len(parts) != 4 {
@@ -281,7 +281,7 @@ func writeAPIBodyGzipIfAccepted(w http.ResponseWriter, r *http.Request, content 
 // Each item can have a preference like `;q=0.5`.
 // `q=0` means "not accepted" (docs: RFC 9110).
 func isGzipAccepted(r *http.Request) bool {
-	for _, item := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+	for item := range strings.SplitSeq(r.Header.Get("Accept-Encoding"), ",") {
 		name, params, _ := strings.Cut(item, ";")
 		if !strings.EqualFold(strings.TrimSpace(name), "gzip") {
 			continue

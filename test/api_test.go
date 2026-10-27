@@ -355,9 +355,7 @@ func (f *fakeGitHub) moveHead(next string, files map[string]string) {
 // Changing it without a copy would also change the files of past commits.
 func copyFiles(files map[string]string) map[string]string {
 	out := make(map[string]string, len(files))
-	for k, v := range files {
-		out[k] = v
-	}
+	maps.Copy(out, files)
 	return out
 }
 
@@ -1249,7 +1247,7 @@ func callGitHubLoginCallback(query string, cookie string) *httptest.ResponseReco
 //   - `name=value`. An empty string if the cookie is missing, or if there is only a `Set-Cookie` with an empty value (one that deletes the cookie)
 func readSetCookie(rec *httptest.ResponseRecorder, name string) string {
 	for _, header := range rec.Header().Values("Set-Cookie") {
-		pair := strings.SplitN(header, ";", 2)[0]
+		pair, _, _ := strings.Cut(header, ";")
 		if strings.HasPrefix(pair, name+"=") && pair != name+"=" {
 			return pair
 		}
@@ -1390,7 +1388,7 @@ func TestDBRepoAccessKey(t *testing.T) {
 	}
 	cookie := login(t)
 	before := gh.repoLookups
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if rec := call(api.HandleArchiveStarItems, "GET", "/api/archive-star-items", "", cookie); rec.Code != 200 {
 			t.Fatalf("list: %d %s", rec.Code, rec.Body)
 		}
@@ -1470,7 +1468,7 @@ func TestNothingIsWrittenToUnpreparedRepo(t *testing.T) {
 			// A live session.
 			// This repository has no App settings, so sign-in isn't possible.
 			// The session cookie is made directly, signed with the server token
-			cookie := strings.SplitN(core.NewSessionCookie(&core.EnvConfig{DBRepoAccessToken: testToken}, time.Now()), ";", 2)[0]
+			cookie, _, _ := strings.Cut(core.NewSessionCookie(&core.EnvConfig{DBRepoAccessToken: testToken}, time.Now()), ";")
 
 			if _, err := core.OpenDBRepoFromEnv(ctx); !errors.Is(err, c.want) {
 				t.Errorf("open: %v", err)

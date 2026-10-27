@@ -82,7 +82,7 @@ var scheduledAt = time.Date(2026, 10, 14, 18, 17, 0, 0, time.UTC)
 func findSyncDay(t *testing.T, repo *core.DBRepo) int {
 	ctx := context.Background()
 	due := -1
-	for day := 0; day < 3; day++ { // Runs each of the three days and finds the day that synced
+	for day := range 3 { // Runs each of the three days and finds the day that synced
 		got, err := core.SyncOnWorkflowCall(ctx, repo, testLongStepsEndBy(), scheduledAt.AddDate(0, 0, day))
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +337,7 @@ func TestSyncCanBeTurnedOnAndOff(t *testing.T) {
 		return call(api.HandleSyncArchive, "PATCH", "/api/sync-archive", body, cookie)
 	}
 
-	for i := 0; i < 2; i++ { // The second turn-off finds it already off, so it must write nothing to GitHub or the repository
+	for i := range 2 { // The second turn-off finds it already off, so it must write nothing to GitHub or the repository
 		commits := countCommits(gh)
 		if rec := patch(`{"enabled":false}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"workflow":"disabled_manually"`) || !strings.Contains(rec.Body.String(), `"enabled_since":null`) {
 			t.Fatalf("turn off %d: %d %s", i, rec.Code, rec.Body)

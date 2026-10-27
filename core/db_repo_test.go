@@ -33,10 +33,10 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 		MarkerDBPath, ConfigDBPath, StarItemsDBDir, shardRule, StarListsDBPath, RepoMetaDBPath, SyncWorkflowPath,
 		ReadmesDBDir, readmePath, absentMarkerPath, readmeTruncationLine,
 		string(EncodeDBRepoMarker()),
-		describeJSONShape(reflect.TypeOf(dbConfigFile{})),
-		describeJSONShape(reflect.TypeOf(StarItem{})),
-		describeJSONShape(reflect.TypeOf(StarList{})),
-		describeJSONShape(reflect.TypeOf(RepoMeta{})),
+		describeJSONShape(reflect.TypeFor[dbConfigFile]()),
+		describeJSONShape(reflect.TypeFor[StarItem]()),
+		describeJSONShape(reflect.TypeFor[StarList]()),
+		describeJSONShape(reflect.TypeFor[RepoMeta]()),
 	}, "\n")
 	const reviewed = "f2639a82a616b0b209d19d3b1f8e4c74e72410556cabe0aabcab12309ce73e56"
 	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(shape))); got != reviewed {
@@ -49,7 +49,7 @@ func TestDBRepoFormatChangeIsReviewed(t *testing.T) {
 // For a pointer, slice or map, it writes the shape of the element.
 // For a type that makes its own JSON (`json.Marshaler`, e.g. `time.Time`) and for everything else, it writes the type name
 func describeJSONShape(t reflect.Type) string {
-	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem() // Idiom to get an interface type: take the element of the type of a nil pointer
+	marshaler := reflect.TypeFor[json.Marshaler]()
 	if t.Implements(marshaler) || reflect.PointerTo(t).Implements(marshaler) {
 		return t.String()
 	}
@@ -62,8 +62,7 @@ func describeJSONShape(t reflect.Type) string {
 		return "map[" + describeJSONShape(t.Key()) + "]" + describeJSONShape(t.Elem())
 	case reflect.Struct:
 		fields := []string{}
-		for i := 0; i < t.NumField(); i++ {
-			field := t.Field(i)
+		for field := range t.Fields() {
 			if !field.IsExported() || field.Tag.Get("json") == "-" { // Fields that don't appear in JSON
 				continue
 			}

@@ -155,15 +155,13 @@ func readDBRepoFilesAtCommit(ctx context.Context, repo *DBRepo, paths []string, 
 	errs := make([]error, len(paths))
 	var wg sync.WaitGroup // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
 	for i, path := range paths {
-		wg.Add(1)
-		go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
-			defer wg.Done()
+		wg.Go(func() { // `wg.Go`: runs the function at the same time in a lightweight thread (goroutine), and `wg.Wait` waits for it
 			errs[i] = RunWithPanicAsError(func() error { // A panic in a goroutine would end the whole process
 				var err error
 				contents[i], isFromCache[i], err = readDBRepoFileThroughCache(ctx, repo, path, commitSHA) // Each goroutine writes its own slot, so no lock is needed
 				return err
 			})
-		}()
+		})
 	}
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: combines several errors into one. `nil` if all are `nil`

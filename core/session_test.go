@@ -26,7 +26,7 @@ func TestSignKnownValue(t *testing.T) {
 func TestSessionCookieRoundTrip(t *testing.T) {
 	cfg := &EnvConfig{DBRepoAccessToken: "token-a"}
 	set := NewSessionCookie(cfg, time.Now())
-	value := strings.SplitN(set, ";", 2)[0] // The `Set-Cookie` value without attributes: "session=<expiry>.<signature>"
+	value, _, _ := strings.Cut(set, ";") // The `Set-Cookie` value without attributes: "session=<expiry>.<signature>"
 
 	req := httptest.NewRequest("GET", "/api/login-session", nil)
 	req.Header.Set("Cookie", value)

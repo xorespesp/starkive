@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -109,9 +110,7 @@ func TestAddSavesTheReadme(t *testing.T) {
 		if c.readme != nil {
 			gh.readmes[linuxID] = *c.readme
 		}
-		for path, content := range c.savedBefore {
-			gh.files[path] = content
-		}
+		maps.Copy(gh.files, c.savedBefore)
 		commitsBefore := len(gh.commits)
 
 		rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"torvalds/linux"}`, cookie)

@@ -88,10 +88,8 @@ func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, e
 	next := 2
 	var failure error     // The error of the first page that failed. Once it is set, no more pages are read
 	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
-	for w := 0; w < starredPagesParallel; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range starredPagesParallel {
+		wg.Go(func() {
 			for {
 				mu.Lock()
 				if failure != nil || next > lastPage {
@@ -116,7 +114,7 @@ func FetchAllStarredRepos(ctx context.Context, cfg *EnvConfig) ([]StarredRepo, e
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if failure != nil {

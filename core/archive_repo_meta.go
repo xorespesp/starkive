@@ -115,10 +115,8 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 	fresh := map[int64]RepoMeta{} // New snapshots of the repositories found (repository info only)
 	gone := map[int64]bool{}      // Repositories that GitHub answered it can't find
 	var wg sync.WaitGroup         // Counter that waits until all goroutines end (like `std::thread::join`)
-	for w := 0; w < repoMetaFetchParallel; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range repoMetaFetchParallel {
+		wg.Go(func() {
 			for {
 				mu.Lock()
 				// Send the next request only if it ends before `budgetEndsAt` even when it waits the longest for GitHub (`githubTimeout`)
@@ -171,7 +169,7 @@ func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget t
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if rateLimited != nil {

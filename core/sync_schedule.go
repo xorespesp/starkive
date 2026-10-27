@@ -307,21 +307,18 @@ func ReadSyncStatus(ctx context.Context, repo *DBRepo) (SyncStatus, error) {
 	errs := make([]error, 3)
 	now := time.Now()
 	var wg sync.WaitGroup // Counter that waits until all started goroutines end (like `std::thread::join`)
-	wg.Add(3)
 	// Each goroutine writes different variables, so writing without a lock doesn't overlap.
-	// Each runs through `RunWithPanicAsError`, because a panic in a goroutine would end the whole process
-	go func() {
-		defer wg.Done()
+	// Each runs through `RunWithPanicAsError`, because a panic in a goroutine would end the whole process.
+	// `wg.Go` runs the function in a goroutine, and `wg.Wait` below waits for all of them
+	wg.Go(func() {
 		errs[0] = RunWithPanicAsError(func() error { var err error; settings, err = readSyncConfig(ctx, repo); return err })
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		errs[1] = RunWithPanicAsError(func() error { var err error; workflow, err = readSyncWorkflow(ctx, repo); return err })
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		errs[2] = RunWithPanicAsError(func() error { var err error; runList, err = readRecentSyncWorkflowRuns(ctx, repo, now); return err })
-	}()
+	})
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: joins several errors into one. `nil` if all are `nil`
 		return SyncStatus{}, err

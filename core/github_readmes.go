@@ -249,7 +249,7 @@ func FetchReadmesByNodeIDs(ctx context.Context, cfg *EnvConfig, nodeIDs []string
 		}
 	}
 
-	for contentQueries := 0; contentQueries < maxReadmeContentQueries; contentQueries++ {
+	for contentQueries := range maxReadmeContentQueries {
 		// A query after the first content query is only for repositories whose pick was binary.
 		// If it fails, those stay `nil` and are asked again later, and the READMEs already settled are kept
 		isFirstRound := contentQueries == 0

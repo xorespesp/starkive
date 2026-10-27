@@ -187,26 +187,22 @@ func (f shardedStarItemsDataFile) readLatestFromDBRepoIfChanged(ctx context.Cont
 	var wg sync.WaitGroup // Counter to wait until all started goroutines finish (similar to `std::thread::join`)
 	// Without an `ETag`, asks for the listing and the shards at the same time, so the answer comes in about one round trip
 	if listingETag == "" {
-		wg.Add(1)
-		go func() { // `go`: runs the function at the same time in a lightweight thread (goroutine)
-			defer wg.Done()
+		wg.Go(func() { // `wg.Go`: runs the function at the same time in a lightweight thread (goroutine), and `wg.Wait` waits for it
 			errs[StarItemShardCount] = RunWithPanicAsError(func() error { // A panic in a goroutine would end the whole process
 				var err error
 				listing, err = readBlobSHAsInFolderIfChanged(ctx, repo, ref, StarItemsDBDir, "")
 				return err
 			})
-		}()
+		})
 	}
 	for index, shard := range f.shards {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[index] = RunWithPanicAsError(func() error {
 				var err error
 				contents[index], err = readDBRepoFileAtRef(ctx, repo, shard.path, ref) // Each goroutine writes its own slot, so no lock is needed
 				return err
 			})
-		}()
+		})
 	}
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil { // `errors.Join`: combines several errors into one. `nil` if all are `nil`

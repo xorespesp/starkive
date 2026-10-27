@@ -463,10 +463,8 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 	var failure error // The failure of one call, kept for `errReadmesAllFailed`
 	var stopErr error
 	var wg sync.WaitGroup // Counter that waits until all goroutines end (like `std::thread::join`)
-	for w := 0; w < readmeFetchParallel; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range readmeFetchParallel {
+		wg.Go(func() {
 			for {
 				mu.Lock()
 				if stopErr == nil && next < len(groups) && time.Now().Add(httpClient.Timeout).After(fetchEndBy) {
@@ -519,7 +517,7 @@ func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarIte
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if failed > 0 {
