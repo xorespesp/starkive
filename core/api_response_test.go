@@ -4,6 +4,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -96,5 +97,62 @@ func TestServeAPIRequestLogsTheCauseOf502(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "dial tcp") || !strings.Contains(logged.String(), "dial tcp: connection refused") {
 		t.Errorf("answer %d %s, log %q", rec.Code, rec.Body, logged.String())
+	}
+}
+
+// Tests that our `ETag` gives back the source `ETag` it was made from, and only to a request it fits.
+//   - It is found among several values, and also after a proxy made it weak (`W/`)
+//   - A source `ETag` whose base64 has a `-` comes back whole
+//   - A value of another build, another encoding, or another shape gives nothing, so the file is read again
+//   - Without a build commit or a source `ETag`, there is no `ETag` at all
+func TestAPIETagGivesBackTheSourceETag(t *testing.T) {
+	t.Setenv("VERCEL_GIT_COMMIT_SHA", "0123456789abcdef0123456789abcdef01234567")
+	newRequest := func(gzip bool, ifNoneMatch string) *http.Request {
+		r := httptest.NewRequest("GET", "http://example.test/api/archive-star-lists", nil)
+		if gzip {
+			r.Header.Set("Accept-Encoding", "gzip")
+		}
+		r.Header.Set("If-None-Match", ifNoneMatch)
+		return r
+	}
+	const source = `W/">>>"` // Its base64 (`Vy8iPj4-Ig`) has a `-`
+	if !strings.Contains(base64.RawURLEncoding.EncodeToString([]byte(source)), "-") {
+		t.Fatal("the sample source ETag must have a - in its base64")
+	}
+	plain := buildAPIETag(newRequest(false, ""), source)
+	gzipped := buildAPIETag(newRequest(true, ""), source)
+	if plain == "" || gzipped == "" || plain == gzipped {
+		t.Fatalf("ETags: plain %q, gzip %q", plain, gzipped)
+	}
+
+	for name, c := range map[string]struct {
+		gzip        bool
+		ifNoneMatch string
+		want        string
+	}{
+		"same":             {false, plain, source},
+		"weak":             {false, "W/" + plain, source},
+		"among others":     {true, `"other", ` + gzipped + `, "last"`, source},
+		"other encoding":   {false, gzipped, ""},
+		"other shape":      {false, `"sk0` + strings.TrimPrefix(plain, `"sk1`), ""},
+		"not base64":       {false, `"sk1-0123456789abcdef0123456789abcdef01234567-id-!!"`, ""},
+		"not ours":         {false, `"abc"`, ""},
+		"no If-None-Match": {false, "", ""},
+	} {
+		if got := parseSourceETagFromAPIETag(newRequest(c.gzip, c.ifNoneMatch)); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+
+	t.Setenv("VERCEL_GIT_COMMIT_SHA", "fedcba9876543210fedcba9876543210fedcba98") // A new build
+	if got := parseSourceETagFromAPIETag(newRequest(false, plain)); got != "" {
+		t.Errorf("other build: %q", got)
+	}
+	if got := buildAPIETag(newRequest(false, ""), ""); got != "" {
+		t.Errorf("no source ETag: %q", got)
+	}
+	t.Setenv("VERCEL_GIT_COMMIT_SHA", "")
+	if got := buildAPIETag(newRequest(false, ""), source); got != "" {
+		t.Errorf("no build commit: %q", got)
 	}
 }
