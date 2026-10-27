@@ -23,7 +23,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -37,10 +39,16 @@ import (
 //
 // Args:
 //   - `path`: Path of the file to read. If the file doesn't exist, it does nothing
-func loadEnvFile(path string) {
+//
+// Returns:
+//   - An error if the file exists but can't be opened or read to the end
+func loadEnvFile(path string) error {
 	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return
+		return err
 	}
 	defer f.Close() // Closes the file when the function ends (like a scope guard in C++)
 	sc := bufio.NewScanner(f)
@@ -58,7 +66,11 @@ func loadEnvFile(path string) {
 			os.Setenv(k, v)
 		}
 	}
+	if err := sc.Err(); err != nil { // `Scan` returns `false` on a read error too, so the loop alone can't tell it from the end of the file
+		return err
+	}
 	log.Printf("loaded %s", path)
+	return nil
 }
 
 // Reads from `vercel.json` (`path`) the response headers added to every path (`"source": "/(.*)"`).
@@ -102,7 +114,9 @@ func main() {
 	addr := flag.String("addr", "localhost:3000", "listen address")
 	flag.Parse()
 
-	loadEnvFile(".env.local")
+	if err := loadEnvFile(".env.local"); err != nil {
+		log.Fatalf("read .env.local: %v", err) // Starting with only part of the settings could reach the wrong repository
+	}
 	headers := readVercelHeaders("vercel.json")
 
 	mux := http.NewServeMux()
