@@ -301,7 +301,8 @@ func (u *webUI) handleFile(path string, contentType string) http.HandlerFunc {
 	}
 }
 
-// Handler that answers the progress (`GET /state?since=<number>`) as JSON. It returns lines from the `since`-th line.
+// Handler that answers the progress (`GET /state?since=<number>`) as JSON.
+// It returns lines from the `since`-th line.
 // The first time it sends the finished state, it releases the wait in `waitUntilSeen`
 func (u *webUI) handleState(w http.ResponseWriter, r *http.Request) {
 	setSetupPageHeaders(w)

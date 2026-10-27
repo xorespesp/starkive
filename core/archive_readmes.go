@@ -140,7 +140,7 @@ func readReadmeSnapshotPaths(ctx context.Context, repo *DBRepo, commitSHA string
 //     Every other snapshot of the item (an old extension, the absent marker) is deleted, so the item keeps one file
 //   - An absent README keeps a saved README, because keeping what it was is the point.
 //     Only an absent marker next to it is deleted
-//   - An absent README of an item with no saved README is written as the absent marker
+//   - An absent README of an item with no saved README is written as the absent marker, unless the marker is already there
 func planReadmeSnapshotUpdate(itemID int64, fetched FetchedReadme, saved []readmeSnapshot, changes *FileChangesCommit) {
 	if fetched.isAbsent && slices.ContainsFunc(saved, func(snapshot readmeSnapshot) bool { return !snapshot.isAbsent }) {
 		for _, snapshot := range saved {
@@ -307,7 +307,6 @@ const readmeCommitReserve = 2 * githubTimeout
 //  1. Picks the items to check: items with no snapshot first, then today's group (`readmeRefreshGroups`),
 //     then every other item with only the absent marker, each in random order.
 //     With `refreshEarly`, the other items with a saved README come last, in random order.
-//     Their turn to be refreshed hasn't come yet.
 //     Items in `skippedIDs` aren't asked
 //  2. Fetches up to `maxReadmesPerCommit` READMEs (`fetchReadmesInParallel`), and writes them in one commit (`writeFetchedReadmesInSingleCommit`)
 //  3. Goes on with the next batch while time is left
@@ -444,7 +443,6 @@ var errReadmesAllFailed = errors.New("every README call of a batch failed")
 //     `nil` if every call ended and at least one succeeded
 //
 // NOTE: A call usually has up to three queries in a row, each ending in a few seconds as a rule (measured).
-// One cut at `fetchEndBy` counts as running out of time, not as a failure of GitHub, and its items are asked again later.
 // A failure about one repository isn't a failed call: GraphQL answers the others, and that one isn't fetched.
 func fetchReadmesInParallel(ctx context.Context, cfg *EnvConfig, items []StarItem, fetchEndBy time.Time) (map[int64]FetchedReadme, error) {
 	// `WithDeadline` makes a `ctx` with an earlier deadline, `fetchEndBy` (never later than the deadline of `ctx`).

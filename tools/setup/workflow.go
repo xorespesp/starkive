@@ -17,13 +17,10 @@ import (
 //
 // NOTE: These are the contract with the server: the config key `dashboard_url`, the secret name, the request shape,
 // and the response that counts as success (200 with `status` `not_due` or `synced`, the return values of `core.SyncOnWorkflowCall`).
-// Raise the major version of `core.DBRepoFormat` for a contract change.
-// Then a repository with a server and a workflow of different contracts stops with a clear error.
-// Raise the minor version for a change that keeps the contract but installed workflows need, such as a script bug fix.
+// A contract change raises the major version of `core.DBRepoFormat`, so a server and a workflow of different contracts stop with a clear error.
 // This tool never replaces an installed workflow (`installWorkflowIfAbsent`).
-// So such a change reaches installed workflows only through a format conversion.
-// A change that only new installs need, such as a comment, doesn't raise it.
-// (`TestSyncWorkflowChangeIsReviewed` reports that the content changed.)
+// So a script fix that installed workflows need reaches them only through a format conversion, and raises the minor version.
+// A change that only new installs need, such as a comment, raises nothing (`TestSyncWorkflowChangeIsReviewed` reports any change).
 // A run ends in success only when success is clearly confirmed.
 // Everything else is a failure.
 // With "only known failures fail", unexpected cases would end as success, and GitHub wouldn't send a failure notice.
@@ -106,8 +103,7 @@ jobs:
 // NOTE: It only tries to create a tree that holds the workflow file.
 // Without the permission, GitHub rejects it with 403 at the tree creation step (measured).
 // The created tree isn't linked to any commit, so it doesn't affect the branch or the schedule.
-// This way the permission is checked before the GitHub App is created,
-// and the workflow itself can be installed last, after the dashboard address is recorded.
+// This way the permission is checked before the GitHub App is created, and the workflow can still be installed last (`finishDBRepo`).
 func checkWorkflowsPermission(ctx context.Context, dbRepo *core.DBRepo) error {
 	var ref struct {
 		Object struct {
@@ -127,8 +123,7 @@ func checkWorkflowsPermission(ctx context.Context, dbRepo *core.DBRepo) error {
 	}
 	entries := []map[string]string{{"path": core.SyncWorkflowPath, "mode": "100644", "type": "blob", "content": syncWorkflowContent}}
 	body := map[string]any{"base_tree": commit.Tree.SHA, "tree": entries}
-	// Creates only a tree, not a commit.
-	// Without the Workflows permission, GitHub rejects it here with 403
+	// Creates only a tree, not a commit
 	res, err := core.CallGitHubAPI(ctx, dbRepo.EnvConfig(), dbRepo.BuildAPIPath("/git/trees"), core.GitHubAPIRequest{Method: http.MethodPost, Body: body})
 	if err != nil {
 		return err
@@ -138,7 +133,7 @@ func checkWorkflowsPermission(ctx context.Context, dbRepo *core.DBRepo) error {
 }
 
 // Checks that the token can read the DB repository's Actions (the workflow list and run history).
-// With this permission, the dashboard reads the sync workflow's state and run history, turns the workflow on and off, and starts a run (Sync now).
+// The dashboard reads the sync workflow's state and run history with it (turning the workflow on and off and Sync now also need write).
 // Without the permission, it returns GitHub's 403 error, with the needed permission added to its message (`core.CheckGitHubResponse`).
 //
 // NOTE: There is no way to check the write permission without side effects, so only reading is checked.

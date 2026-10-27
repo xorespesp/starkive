@@ -181,9 +181,10 @@ const maxReadmeContentQueries = 3
 //   - READMEs in the same order and length as `nodeIDs`.
 //     A README is absent (`isAbsent`) when GitHub says the repository isn't found,
 //     when none of the three folders has a README that isn't binary, or when the README is blank (`buildReadmeSnapshotFile`).
-//     `nil` where it can't tell now: an ID that isn't a repository, a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`,
-//     a file gone between the queries, or a repository whose next pick is still unread after `maxReadmeContentQueries` content queries or after a later query failed.
-//     Ask those again later
+//     It is `nil` where it can't be told now, and those are asked again later.
+//     That is an ID that isn't a repository, or a repository or folder that GraphQL can't give for a reason other than `NOT_FOUND`.
+//     It is also a file gone between the queries,
+//     or a repository whose next pick is still unread when the queries stop (`maxReadmeContentQueries` reached, or a later query failed)
 //   - An error that wraps `ErrGitHubRateLimited` if GitHub says the rate limit was reached before the first content query is answered (`callGraphQL`).
 //     Any other error means a query failed, including one cut at the deadline (`context.DeadlineExceeded`), and says nothing about the READMEs.
 //     If a later query fails, even for the rate limit, the READMEs settled so far are returned without an error
@@ -196,8 +197,7 @@ const maxReadmeContentQueries = 3
 // Text over 512,000 bytes comes cut (measured), which still holds more than `maxReadmeBytes`.
 func FetchReadmesByNodeIDs(ctx context.Context, cfg *EnvConfig, nodeIDs []string) ([]*FetchedReadme, error) {
 	// Lists the `.github` folder and the root folder.
-	// GitHub looks for a README in `.github`, then the root, then `docs` (docs).
-	// Most READMEs are in the first two (measured on 300 repositories), so `docs` is listed later, only when needed.
+	// Most READMEs are in `.github` or the root (measured on 300 repositories), so `docs` is listed later, only when needed.
 	// The root listing also tells whether `docs` exists and how its name is cased.
 	// A `.github` folder in another case (`.GitHub`) is listed later too
 	const listingQuery = `query($ids: [ID!]!) {

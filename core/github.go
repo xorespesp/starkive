@@ -173,7 +173,7 @@ func newGitHubUnreadableError(err error) error {
 // NOTE: GraphQL can answer HTTP 200 and still report failures in `errors` in the body.
 // A rate limit is answered the same way, with no points left or a `Retry-After` header (docs).
 // The error type `RATE_LIMITED` isn't in the docs and wasn't measured, so it is only one of the signs.
-// With no points left, any error counts as the rate limit, even beside usable `data`.
+// With no points left or a `Retry-After` header, any error counts as the rate limit, even beside usable `data`.
 // That `data` is dropped, because the next request would be refused anyway.
 func callGraphQL(ctx context.Context, cfg *EnvConfig, query string, variables map[string]any, dst any) (err error) {
 	mark := readGitHubRateLimitMark(ctx)
@@ -402,7 +402,6 @@ func hasGitHubStatusBetween(err error, lowest int, highest int) bool {
 // For example: a refused token (401), a missing permission (403), a missing repository (404),
 // a request GitHub rejects (422), an answer that can't be read, or a file of ours that is broken.
 // A 4xx or 5xx status that GitHub answered is judged by the status, even if the deadline of `ctx` has passed since then.
-// GitHub did answer it, so the deadline didn't cut it.
 // For other errors, whether the deadline cut the work is told by `ctx.Err()`, not by the error,
 // because a single slow request (`githubTimeout`) can give the same error (measured).
 func isTemporaryGitHubError(ctx context.Context, err error) bool {

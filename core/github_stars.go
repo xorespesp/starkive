@@ -41,9 +41,7 @@ var lastPageLink = regexp.MustCompile(`[?&]page=(\d+)>; rel="last"`)
 //   - The last page number. Same as `page` if there is only one page
 //   - An error that wraps `ErrGitHubRateLimited` if GitHub answers with the rate limit
 //
-// NOTE: Each page can be read on its own.
-// So even thousands of Stars can be split into several requests and read at the same time.
-// In the dashboard, one request becomes one GitHub call, so it stays within the function time limit.
+// NOTE: Each page can be read on its own, so even thousands of Stars can be split into several requests and read at the same time.
 func FetchStarredPage(ctx context.Context, cfg *EnvConfig, page int) ([]StarredRepo, int, error) {
 	res, err := CallGitHubAPI(ctx, cfg, fmt.Sprintf("/user/starred?per_page=%d&page=%d", StarsPerPage, page),
 		GitHubAPIRequest{Accept: "application/vnd.github.star+json"})

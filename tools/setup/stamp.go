@@ -2,6 +2,7 @@
 // The release workflow (`.github/workflows/release.yml`) stamps the repository address and the release tag with `-ldflags -X`.
 // Go stamps the commit it builds from by itself (`readStampedVCS`).
 // The commit to deploy to Vercel is picked from these values in `resolveVercelDeployCommit`.
+// No build time is stamped, so two builds of the same commit with the same Go version and flags give the same file and checksum.
 package main
 
 import (
@@ -65,7 +66,6 @@ func readVersionLabel() string {
 //
 // NOTE: The release workflow runs the setup tool with `-version` and looks for the address and the tag in this output (`.github/workflows/release.yml`).
 // So keep printing both.
-// The build time isn't stamped, so two builds of the same commit with the same Go version and flags give the same file and the same checksum.
 func printVersion() error {
 	fmt.Println("starkive setup tool " + readVersionLabel())
 	vercelDeployCommit, hasUncommittedChanges, err := resolveVercelDeployCommit()

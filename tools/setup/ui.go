@@ -27,7 +27,7 @@ type ui interface {
 	link(label string, target string) // A link the person can open if they want, and its label. The setup goes on even if they don't open it
 	open(label string, target string) // A link the person must open and act on before the setup can go on, and its label. The person opens it when ready: the setup page shows a button, and the terminal prints the link
 	// Tells that the setup finished with success.
-	// `text` is the last message, and `label` and `target` are the next link to open and its label.
+	// `text` is the last message, `target` is the next link to open, and `label` is its label.
 	// The setup page shows a result card, and the terminal prints the message and the link
 	done(text string, label string, target string)
 	// Asks for one line and returns the answer with leading and trailing spaces removed.

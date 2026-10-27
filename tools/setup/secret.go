@@ -16,8 +16,7 @@ import (
 	"github.com/xorespesp/starkive/core"
 )
 
-// Public key for the Actions secrets of the DB repository.
-// A secret value can be sent only after it is encrypted with this key
+// Public key for the Actions secrets of the DB repository
 type secretsPublicKey struct {
 	KeyID string `json:"key_id"` // ID of the public key. Sent with a secret to say which key encrypted it
 	Key   string `json:"key"`    // 32-byte Curve25519 public key in base64

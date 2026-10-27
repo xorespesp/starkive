@@ -50,7 +50,6 @@ var errDashboardOtherValue = errors.New("the dashboard is deployed with a differ
 // NOTE: The person finishes the deployment on Vercel's page, so the tool can't know when it ends.
 // So it checks a known address in the background again and again.
 // Entering the address by hand is for the case where Vercel gave another address.
-// So when the person chooses that, the check stops.
 // The canonical address doesn't change (the sign-in callback and the workflow use it).
 // So if an address is registered, an address entered by hand must be that address too.
 func askDashboardURL(u ui, cfg *core.EnvConfig, defaultSite string, registered bool) (string, error) {
@@ -108,16 +107,11 @@ func askDashboardURL(u ui, cfg *core.EnvConfig, defaultSite string, registered b
 // It accepts only https, and accepts http only for a local dev server (localhost, 127.0.0.1).
 // It doesn't accept an address with a path or a query (a trailing `/` is removed).
 //
-// Args:
-//   - `input`: The address the user entered
-//
 // Returns:
 //   - The normalized address. The host is lowercase and has no default port (`:443`, `:80`) (`core.NormalizeSiteURL`)
 //
 // NOTE: This address becomes the App's homepage and sign-in callback.
-// When sign-in starts, the server compares the request address with this address.
-// Browsers lowercase the host and drop the default port in requests.
-// So if the address were saved as typed (uppercase, `:443`), the comparison would always fail and sign-in could never start.
+// The server compares it with the request address when sign-in starts, so it is stored in the shape of `core.NormalizeSiteURL`.
 func normalizeDashboardURL(input string) (string, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(input), "/"))
 	if err != nil || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
@@ -196,6 +190,7 @@ func checkDashboard(cfg *core.EnvConfig, site string) error {
 // Args:
 //   - `u`: Where to open the start page
 //   - `server`: The server opened only on this computer. It serves the start page and receives the returning request
+//   - `dbRepo`: The DB repository. Its full name goes into the App manifest, and the App owner must be the owner of its token
 //   - `site`: The dashboard address. It becomes the App's homepage and sign-in callback
 //
 // Returns:

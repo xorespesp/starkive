@@ -77,12 +77,8 @@ func AuthorizeSyncWorkflowCall(r *http.Request) (*DBRepo, error) {
 // So the boundary is 06:00, the time farthest from the schedule.
 const syncDayStart = 6 * time.Hour
 
-// Reports whether `now` falls on a day that fits the interval.
+// Reports whether `now` falls on a day that fits the auto sync interval `intervalDays` (1 or more).
 // A sync day is a day whose count from 1970-01-01 is a multiple of the interval (every day if the interval is 1).
-//
-// Args:
-//   - `intervalDays`: Auto sync interval (days). 1 or more
-//   - `now`: Time to judge
 //
 // NOTE: It is decided by date math alone, so the last sync time doesn't need to be recorded.
 // Sync now in the dashboard doesn't shift these days.
@@ -99,7 +95,7 @@ func syncDayNumber(now time.Time) int64 {
 // A call from a run started by hand (Sync now) runs `SyncArchiveWithGitHub` right away, whatever the interval.
 // It also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet (`refreshReadmesEarly`).
 // A call from a scheduled run runs `SyncArchiveWithGitHub` on a sync day, and otherwise does nothing.
-// If the last finished scheduled run failed, a scheduled run syncs again whatever the interval, unless it is Manual only.
+// If the last finished scheduled run failed, a scheduled run syncs again whatever the interval.
 // With "Manual only" (`manualOnlyIntervalDays`), a scheduled run never syncs.
 //
 // Args:
@@ -119,8 +115,7 @@ func syncDayNumber(now time.Time) int64 {
 // If the workflow runs, it syncs, and the page reports any mismatch with the setting.
 // So a running workflow doesn't run for nothing just because the setting alone is off.
 // If the return values change or new ones are added, also fix the workflow content of the setup tool (`syncWorkflowContent`) and raise the major version of `DBRepoFormat`.
-// The call doesn't say which run sent it, and the installed workflow can't be changed to say it.
-// So the run is found in the run list (`isCallFromManualWorkflowRun`).
+// Which run sent the call is found in the run list (`isCallFromManualWorkflowRun`).
 // The workflow's `concurrency` runs one run at a time, so syncs don't overlap (docs, measured).
 func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.Time, now time.Time) (string, error) {
 	runList, err := readRecentSyncWorkflowRuns(ctx, repo, now)
@@ -171,10 +166,7 @@ func SyncOnWorkflowCall(ctx context.Context, repo *DBRepo, longStepsEndBy time.T
 //   - The state is made from what was written, not read again.
 //     GitHub can briefly show a branch that just moved at its old commit (measured).
 //     Reading again could then return the old setting, and the page would show the opposite.
-//     What was written can be trusted.
-//     `UpdateDBRepoFiles` reads the files at the commit by sha.
-//     A commit made on a stale commit is refused when the branch moves, and the work starts over.
-//     So what a successful write saw is the latest content.
+//     What a successful write saw is the latest content (`UpdateDBRepoFiles` starts over when the branch moves).
 //   - The two values are written in one commit.
 //     So there is no state where one is saved and the other failed.
 //     The workflow is changed before that.
@@ -307,8 +299,6 @@ type SyncStatus struct {
 //
 // NOTE: The three questions to GitHub (config file, workflow state, recent runs) are sent at the same time, not one after another.
 // So the answer takes as long as the slowest question, not the sum of all three.
-// The recent runs usually take one page of the run list (`readRecentSyncWorkflowRuns`).
-// More pages are read only if they have no finished scheduled run (`findLastFinishedScheduledWorkflowRun`).
 // If there is no workflow, the run list request is wasted, but that is rare.
 func ReadSyncStatus(ctx context.Context, repo *DBRepo) (SyncStatus, error) {
 	var settings syncConfig

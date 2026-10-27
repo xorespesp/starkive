@@ -11,13 +11,9 @@ import (
 // The zero value (`var c cache[T]`) can be used right away, and it is safe when many requests (goroutines) use it at once.
 // `[V any]` is a type parameter, like a C++ template, so a separate cache is made for each value type, like `cache[GitHubUser]`.
 //
-// NOTE: It keeps the value that every API goes through (the DB repository) from being asked of GitHub every time.
-// It also keeps requests that are open before sign-in (sign-in start and callback) from using the server token's rate limit (5,000 per hour, docs),
-// even when they repeat.
-// Serverless instances can start fresh at any time, and they don't share memory.
+// NOTE: Serverless instances can start fresh at any time, and they don't share memory.
 // So it only holds values that may be a little stale.
-// The state and the sync key are checked without this cache.
-// The allowed user (the token owner) is kept in it, but the token is part of the key, and the owner of a token never changes.
+// The session, the sign-in state and the sync key are never checked through it.
 type cache[V any] struct {
 	entries sync.Map // Key -> `cacheEntry[V]`. `sync.Map` is a map that many goroutines can use without a separate lock
 }
@@ -28,10 +24,7 @@ type cacheEntry[V any] struct {
 	expires time.Time // After this time, it counts as missing
 }
 
-// Gets a kept value.
-//
-// Args:
-//   - `key`: Cache key (`buildEnvCacheKey`, `buildDBRepoCacheKey`)
+// Gets the value kept under `key`.
 //
 // Returns:
 //   - The kept value and `true`. The zero value of `V` and `false` if it is missing or expired

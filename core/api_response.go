@@ -1,6 +1,6 @@
 // Making the answers of our API.
 // It covers error answers (`HTTPError`, `Errorf`), running a handler under the request deadline (`requestTimeLimit`, `ServeAPIRequest`),
-// and JSON answers, including a DB repository file sent as it is.
+// and JSON answers: a DB repository file sent as it is, all archive items as one array, and their `ETag` and 304 answers.
 // Reading and checking the requests is in `api_request.go`.
 package core
 
@@ -137,8 +137,7 @@ func WriteAPIJSONResponse(w http.ResponseWriter, status int, body any) {
 
 // Answers with a data file of the DB repository as it is.
 // If the browser accepts it, the answer is compressed with gzip.
-// The browser may keep it and ask again with its `ETag` (`buildAPIETag`): if the file didn't change, the answer is 304 with no body,
-// and GitHub's 304 behind it doesn't count toward the rate limit (measured).
+// The browser may keep it and ask again with its `ETag` (`buildAPIETag`): if the file didn't change, the answer is 304 with no body.
 //
 // Args:
 //   - `path`: File path in the DB repository (`StarListsDBPath` and so on). The archive items have their own answer, `WriteAPIAllStarItemsResponse`
@@ -166,11 +165,10 @@ func WriteAPIDBFileResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo
 	return writeAPIBodyGzipIfAccepted(w, r, content, buildAPIETag(r, read.etag))
 }
 
-// Answers with all archive items as one JSON array, one item per line.
-// It reads every shard at the latest commit (`shardedStarItemsDataFile.readLatestFromDBRepoIfChanged`), so the items are from one commit and are checked.
+// Answers with all archive items as one JSON array, one item per line, read from one commit
+// (`shardedStarItemsDataFile.readLatestFromDBRepoIfChanged`).
 // If the browser accepts it, the answer is compressed with gzip.
 // Like `WriteAPIDBFileResponse`, it answers 304 if the browser's `ETag` still matches, and then reads no shard.
-// The `ETag` comes from GitHub's listing of the shard folder, which changes only when a shard changes.
 func WriteAPIAllStarItemsResponse(w http.ResponseWriter, r *http.Request, repo *DBRepo) error {
 	ctx := r.Context() // The deadline that `ServeAPIRequest` set for this request
 	timingStep := beginServerTimingStep(ctx, "github-read")
@@ -192,16 +190,15 @@ func WriteAPIAllStarItemsResponse(w http.ResponseWriter, r *http.Request, repo *
 
 // Makes our `ETag` of an archive file answer: the build of this deployment, the encoding of the body,
 // and `sourceETag`, the `ETag` of the source the answer was made from (GitHub's, for a file or a folder listing),
-// like `"sk1-0123456789ab-gz-<sourceETag in base64>"`.
+// like `"sk1-<build commit sha>-gz-<sourceETag in base64>"`.
 // The source `ETag` goes inside, so the next request can send it back to the source (`parseSourceETagFromAPIETag`).
 //
 // Returns:
-//   - Our `ETag`. Empty if this deployment has no build commit (`readDeploymentCommitSHA`) or the source gave no `ETag`.
+//   - Our `ETag`. Empty if this deployment has no build commit (`readDeploymentCommitSHA`, empty in dev-server) or the source gave no `ETag`.
 //     Then the browser doesn't keep the answer
 //
 // NOTE: The build is in it because the server joins and encodes the archive.
 // A new build may answer the same source files with another body, and a kept old body must not be used then.
-// Without a build commit (dev-server), there is no such guard, so no `ETag` is given at all.
 // The encoding is in it because the gzip and plain bodies differ for the same files.
 // The source `ETag` is in base64 because it has quotes of its own, which can't be inside our `ETag` (docs: RFC 9110),
 // and the code doesn't assume what else it holds.

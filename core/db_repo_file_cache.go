@@ -18,7 +18,7 @@ type dbRepoFileCache struct {
 
 // One file kept in `dbRepoFileCache`
 type keptDBRepoFile struct {
-	etag    string // `ETag` GitHub gave with the content (for a file, its git blob sha in quotes, measured)
+	etag    string // `ETag` GitHub gave with the content, or the one `keepCommittedDBRepoFiles` made
 	content []byte // The content
 }
 

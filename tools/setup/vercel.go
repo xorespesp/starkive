@@ -1,7 +1,8 @@
 // The step that deploys the dashboard to Vercel.
 // It picks and checks the commit to deploy to Vercel (`resolveVercelDeployCommit`: the commit this setup tool was built from, in the Vercel deploy repository).
-// It builds the Vercel Deploy link (`vercel.com/new/clone`) with the dashboard name (`buildDashboardName`) and opens it.
-// Then it checks the default address of that name (`https://<dashboard name>.vercel.app`) every few seconds, and moves to the next step when the Vercel deployment is done.
+// It builds the Vercel Deploy link (`vercel.com/new/clone`) with the dashboard name (`buildDashboardName`).
+// It checks the default address of that name (`https://<dashboard name>.vercel.app`) every few seconds (`watchVercelDeployment`),
+// so the setup can move on once the Vercel deployment is done.
 // If the check doesn't pass (for example, the account already has a repository with the same name, so Vercel gave another name), the person enters the address by hand.
 package main
 
@@ -50,7 +51,7 @@ func isValidCommitSHA(sha string) bool {
 //     `go run` builds from that folder, so `HEAD` is the code that runs
 //
 // Returns:
-//   - `hasUncommittedChanges`: The changes are in the running code, but not in the deployed commit
+//   - `hasUncommittedChanges`: `true` if the running code has uncommitted changes. They aren't in the deployed commit
 //   - `err`: An error if the release build is broken (a wrong repository address, or no stamped commit), or the reason git can't read the folder
 func resolveVercelDeployCommit() (vercelDeployCommit commitRef, hasUncommittedChanges bool, err error) {
 	stampedSHA, stampedHasChanges, _ := readStampedVCS()

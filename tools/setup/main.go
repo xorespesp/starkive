@@ -234,8 +234,6 @@ func main() {
 //
 // NOTE: The permission checks (Workflows, Actions) run before the GitHub App is created.
 // If the App were created while permissions are missing, an unusable App would be left on GitHub.
-// The workflow itself is installed last, after the dashboard address is recorded in `config.json`.
-// That way, the address to call already exists when the workflow runs for the first time.
 func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit commitRef) error {
 	// 1. Archive name, DB repository and its token, repository preparation and sync key.
 	// The owner (username) isn't known before the token is entered, so only the repository name is decided first
@@ -398,8 +396,7 @@ func run(ctx context.Context, u ui, server *localServer, vercelDeployCommit comm
 		}
 	}
 
-	// 4. Record the dashboard address and install the workflow if it is missing.
-	// The workflow comes last, so the address to call is already recorded when it first runs
+	// 4. Record the dashboard address and install the workflow if it is missing
 	u.step(4)
 	if err := finishDBRepo(ctx, dbRepo, app.SiteURL); err != nil {
 		return err
@@ -427,7 +424,7 @@ func readGitHubAPIURL() string {
 // The server refers to the repository by ID, not by name (the ID stays the same after a rename), so it gets the ID.
 //
 // Returns:
-//   - `public`: `true` if it is a public repository. Anyone can read the archive in a public repository, so the user is told
+//   - `public`: `true` if it is a public repository (anyone can read the archive in it)
 //   - If the token can't see it (not created, created with another name, or private and not selected by the token),
 //     an error that explains all these cases together.
 //     GitHub answers 404 for all of them (docs: a private repository without read access is also 404)

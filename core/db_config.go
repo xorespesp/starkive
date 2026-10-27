@@ -21,8 +21,6 @@ import (
 // NOTE: It is written as indented multi-line JSON (`encodeDBConfigFile`), so when one value changes, only that line shows in the diff.
 // The key `dashboard_url` is a contract with the workflow in the DB repository.
 // Renaming it requires raising the major version of `DBRepoFormat`.
-// Each writing function (`UpdateSyncSettings`, `RecordSyncEnabled`, `SaveDashboardURL`, `SaveGitHubApp`) changes only its own field.
-// So changing one value never resets another value to a default or changes it.
 type dbConfigFile struct {
 	DashboardURL string         `json:"dashboard_url,omitempty"` // Dashboard address for the workflow to call. The setup tool records the address registered in the GitHub App (`GitHubApp.SiteURL`)
 	Sync         syncConfig     `json:"sync"`                    // Sync settings
@@ -90,11 +88,12 @@ func encodeDBConfigFile(file dbConfigFile) ([]byte, error) {
 // Every write to the config file goes through this function.
 //
 // Args:
-//   - `change`: Changes only the fields it owns in the given config file, and returns a commit message.
+//   - `change`: Changes only the fields it owns in the given config file, so writing one value never resets another.
+//     It returns a commit message.
 //     If another commit gets in, it is called again with the new content
 //
 // Returns:
-//   - The 409 error from `decodeDBConfigFile` if the file can't be read (nothing is written).
+//   - The 409 error from `decodeDBConfigFile` if the file can't be decoded (nothing is written).
 //     Otherwise an error from `change` or `UpdateDBRepoFiles`
 //
 // NOTE: The file before and after `change` is written in the same shape (`encodeDBConfigFile`) and compared.

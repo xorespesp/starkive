@@ -50,13 +50,12 @@ const (
 	MaxStarListDescriptionLength = 300  // Star list description
 )
 
-// Checks the length of a text field.
+// Checks the length of the text field `value`.
 // Length is counted in characters (runes), not bytes.
 // A Korean letter is 3 bytes in UTF-8, but it counts as one character.
 //
 // Args:
 //   - `field`: Field name for the error message (English)
-//   - `value`: Value to check
 //   - `required`: If `true`, an empty value is refused too
 //   - `max`: Maximum number of characters
 //

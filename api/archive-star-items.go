@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xorespesp/starkive/core"
@@ -31,12 +32,9 @@ import (
 // Characters allowed in one part of a repository name (the owner or the repository): letters, digits, `_`, `.` and `-`
 var repoNamePart = regexp.MustCompile(`^[\w.-]+$`)
 
-// Extracts `owner/repo` from what the user typed (`owner/repo` or a GitHub repository address).
+// Extracts `owner/repo` from `fullNameOrURL`, the text the user typed (`owner/repo` or a GitHub repository address).
 // It drops `https://` or `http://`, `www.` and `github.com/` at the front.
 // It also drops `?...`, `#...`, paths like `/tree/main`, and `.git` at the end.
-//
-// Args:
-//   - `fullNameOrURL`: The text the user typed
 //
 // Returns:
 //   - `owner/repo`. An empty string if the shape is wrong
@@ -125,7 +123,7 @@ func lookUpRepoToAdd(ctx context.Context, dbRepo *core.DBRepo, fullName string) 
 // Returns:
 //   - The README. `nil` if it wasn't fetched
 func fetchReadmeToAdd(ctx context.Context, dbRepo *core.DBRepo, nodeID string, name string) *core.FetchedReadme {
-	// Only fetching the README gets the shorter deadline `addReadmeTimeout`, so a slow GitHub doesn't keep the user waiting.
+	// Only fetching the README gets the shorter deadline `addReadmeTimeout`.
 	// `WithTimeout` makes it a child of `ctx`, so it never ends later than the deadline of the request.
 	// The commit uses `ctx`, not this child, so a slow README can't make the save fail.
 	// `cancel` frees the timer of the child right away, because nothing after the README uses it
@@ -160,7 +158,7 @@ func fetchReadmeToAdd(ctx context.Context, dbRepo *core.DBRepo, nodeID string, n
 //
 // NOTE: The save reads only the shard of the new item, so it needs the repository ID first.
 // The repository lookup (`lookUpRepoToAdd`) is quick and comes first.
-// The README (`fetchReadmeToAdd`, about 1 second, measured) is fetched at the same time as the save reads its files.
+// The README (`fetchReadmeToAdd`, up to `addReadmeTimeout`) is fetched at the same time as the save reads its files.
 // `change` waits for the README only when it adds the item.
 // The README is taken once and used again when `change` runs again after a conflict.
 func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
@@ -184,17 +182,10 @@ func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *
 		}
 		readmeDone <- readme
 	}()
-	var readme *core.FetchedReadme // Set by the first `takeReadme`
-	readmeTaken := false
 	// Returns the README.
-	// The first call waits for it, and later calls get the same result
-	takeReadme := func() *core.FetchedReadme {
-		if !readmeTaken {
-			readme = <-readmeDone // Waits until the goroutine sends its result
-			readmeTaken = true
-		}
-		return readme
-	}
+	// `sync.OnceValue` runs the function on the first call only, so the first call waits for the goroutine,
+	// and later calls get the same result
+	takeReadme := sync.OnceValue(func() *core.FetchedReadme { return <-readmeDone })
 
 	item := found
 	err = core.UpdateStarItem(ctx, dbRepo, found.ID, func(tx *core.StarItemTransaction) (core.CommitMessage, error) {

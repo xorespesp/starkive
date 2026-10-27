@@ -42,11 +42,11 @@ func readStarListBody(r *http.Request) (name string, description string, err err
 }
 
 // Checks whether another star list with the same name already exists.
-// `core.IsSameStarListName` decides whether names are the same (it ignores leading and trailing spaces, Unicode normalization (NFC) and letter case).
+// `core.IsSameStarListName` decides whether names are the same.
 //
 // Args:
 //   - `starLists`: The star lists in the archive now
-//   - `name`: The name to use
+//   - `name`: The new name, to compare with the others
 //   - `exceptID`: ID of a star list to leave out of the comparison (itself, when renaming). 0 when creating
 //
 // Returns:

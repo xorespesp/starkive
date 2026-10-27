@@ -102,7 +102,7 @@ func NewStarListID(starLists []StarList) int64 {
 //   - The cleaned ID list (same rules as `CleanStarListIDs`).
 //     A 400 `HTTPError` if even one ID doesn't exist
 //
-// NOTE: Call it inside the `change` of `UpdateStarCatalog`.
+// NOTE: Call it inside the `change` of the write that saves the IDs.
 // Then the "does this star list exist?" check and the save use the catalog at the same commit.
 // An ID of a star list deleted in the meantime can't be saved.
 func (c *StarCatalog) CheckStarListIDs(ids []int64) ([]int64, error) {
@@ -191,7 +191,7 @@ type StarItemTransaction struct {
 	catalog *StarCatalogTransaction // The items of that shard and the star lists, read at one commit
 }
 
-// Returns the item as read, and `true`.
+// Returns the item in the working copy, and `true`.
 // The zero value and `false` if the archive doesn't have it.
 func (tx *StarItemTransaction) Item() (StarItem, bool) {
 	i := slices.IndexFunc(tx.catalog.StarItems, func(s StarItem) bool { return s.ID == tx.id })
@@ -230,7 +230,7 @@ func (tx *StarItemTransaction) RemoveItem() bool {
 }
 
 // Checks that all star list IDs `ids` exist, and returns them cleaned up for storing in the item (`StarCatalog.CheckStarListIDs`).
-// The star lists are read at the same commit as the item, so an ID of a star list deleted in the meantime can't be saved.
+// The star lists are read at the same commit as the item.
 func (tx *StarItemTransaction) CheckStarListIDs(ids []int64) ([]int64, error) {
 	return tx.catalog.CheckStarListIDs(ids)
 }
@@ -241,8 +241,8 @@ func (tx *StarItemTransaction) AddReadmeToCommit(fetched FetchedReadme) {
 	tx.catalog.AddReadmeToCommit(tx.id, fetched)
 }
 
-// Reads the whole star catalog from one commit, changes it with `change`, and writes only the changed files in one commit.
-// It works on top of `UpdateDBRepoFiles`.
+// Reads the whole star catalog from one commit, changes it with `change`, and writes only the changed files in one commit
+// (`updateStarCatalogInShards`).
 //
 // Args:
 //   - `change`: Changes the working copy in `tx` in place and returns a commit message.
@@ -250,22 +250,12 @@ func (tx *StarItemTransaction) AddReadmeToCommit(fetched FetchedReadme) {
 //     It can ask for READMEs to be saved in the same commit (`AddReadmeToCommit`).
 //     If it returns an error, nothing is written.
 //     If another commit gets in, it is called again with a new transaction read at the new commit
-//
-// NOTE: The items and the star lists are read together from the same commit.
-// So checks like "does this star list exist" and the save use data from the same point.
-// The metadata snapshots aren't read.
-// They are the largest archive file, and no change of the catalog uses them
-// (measured with 20,000 items and 14,000 snapshots: 6MB of the 9.2MB read).
-// Only the shards and files whose data changed are written (`trackedShardedStarItemsDataFile`, `trackedDataFile`).
-// The config file (`config.json`) is not part of the archive, so it is not read here.
-// This keeps each save request from making one extra read for nothing.
-// The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
-// Each removed item and each saved README costs one more request (a listing of its folder).
 func UpdateStarCatalog(ctx context.Context, repo *DBRepo, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
 	return updateStarCatalogInShards(ctx, repo, listAllStarItemShardIndexes(), change)
 }
 
-// Reads one archive item and the star lists from one commit, changes them with `change`, and writes the changes in one commit.
+// Reads one archive item and the star lists from one commit, changes them with `change`, and writes the changes in one commit
+// (`updateStarCatalogInShards`).
 // Only the shard of the item is read and written, so the cost doesn't grow with the archive.
 //
 // Args:
@@ -290,6 +280,13 @@ func UpdateStarItem(ctx context.Context, repo *DBRepo, id int64, change func(tx 
 // It stays private so code outside never sees a part of the archive as if it were the whole:
 // `UpdateStarCatalog` reads every shard, and `UpdateStarItem` hides the items behind a transaction of one item.
 // An item put into a shard that wasn't read is refused before anything is written (`trackedShardedStarItemsDataFile.addIfChanged`).
+//
+// NOTE: The items and the star lists are read from the same commit,
+// so checks like "does this star list exist" and the save use data from the same point.
+// The metadata snapshots and `config.json` aren't read: no change of the catalog uses them, and the snapshots are the largest archive file.
+// Only the shards and files whose data changed are written (`trackedShardedStarItemsDataFile`, `trackedDataFile`).
+// The README snapshots of items that `change` removes are deleted in the same commit, so none is left without its item.
+// Each removed item and each saved README costs one more request (a listing of its folder).
 func updateStarCatalogInShards(ctx context.Context, repo *DBRepo, shardIndexes []int, change func(tx *StarCatalogTransaction) (CommitMessage, error)) error {
 	paths := append(starItemsDataFile.buildShardPaths(shardIndexes), starListsDataFile.path)
 	return UpdateDBRepoFiles(ctx, repo, paths, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
@@ -415,7 +412,6 @@ func AddStarredReposToStarCatalog(ctx context.Context, repo *DBRepo, starredRepo
 	added := 0
 	err := UpdateStarCatalog(ctx, repo, func(tx *StarCatalogTransaction) (CommitMessage, error) {
 		added = 0 // If called again after a conflict, count again from zero
-		// Both the star list check and the duplicate check below use the catalog right before the commit (`tx`)
 		requested, err := tx.CheckStarListIDs(starListIDs)
 		if err != nil {
 			return CommitMessage{}, err

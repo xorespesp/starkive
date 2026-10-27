@@ -98,7 +98,7 @@ func readSyncWorkflowRunPage(ctx context.Context, repo *DBRepo, page int) ([]Syn
 	}
 	query := fmt.Sprintf("?per_page=%d&page=%d", syncWorkflowRunsPerPage, page)
 	err := callDBRepoAPI(ctx, repo, http.MethodGet, syncWorkflowAPIPath+"/runs"+query, nil, &list)
-	if hasGitHubStatus(err, http.StatusNotFound) { // If there is no workflow, its run list is 404 too
+	if hasGitHubStatus(err, http.StatusNotFound) {
 		return []SyncWorkflowRun{}, nil
 	}
 	if err != nil {

@@ -121,7 +121,8 @@ type GitHubUser struct {
 var tokenOwnerCache cache[GitHubUser]
 
 // How long to keep the token owner.
-// The owner of a token doesn't change, so it is kept for a long time
+// The owner of a token doesn't change, so it is kept for a long time.
+// The owner's username can still change, so a kept username can be this old
 const tokenOwnerTTL = 24 * time.Hour
 
 // Reads the owner of the server token from GitHub (`GET /user`).
@@ -130,10 +131,6 @@ const tokenOwnerTTL = 24 * time.Hour
 //
 // Returns:
 //   - The token owner. A 502 `HTTPError` if GitHub returns a user with no ID or name
-//
-// NOTE: The owner of a token stays the same until the token changes.
-// So it is kept, and GitHub is not asked again on every call.
-// The owner's username can still change, so a kept owner can have an old username for up to `tokenOwnerTTL`.
 func FetchTokenOwner(ctx context.Context, cfg *EnvConfig) (GitHubUser, error) {
 	if owner, found := tokenOwnerCache.get(buildEnvCacheKey(cfg)); found {
 		return owner, nil

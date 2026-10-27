@@ -45,7 +45,7 @@ type EnvConfig struct {
 //   - `nonce`: Random value that the setup tool makes for each check. It stops an old answer from being reused
 //
 // NOTE: If the values match, the deployment's environment variable is set to this repository ID and this token.
-// The answer alone reveals neither the token nor the repository, so it is open without sign-in.
+// The answer alone reveals neither the token nor the repository.
 // The server and the setup tool must agree on the format, so it lives in this file.
 // If it lived in two places, one side could change alone and the check would always fail.
 func SignDeploymentNonce(cfg *EnvConfig, nonce string) string {
@@ -111,11 +111,6 @@ func parseDBRepoAccessKey(value string) (repoID int64, token string, err error) 
 //
 // Returns:
 //   - The server config. A 500 `HTTPError` if the environment variable is missing or malformed
-//
-// NOTE: The sign-in cookie and the sync key are checked with this config alone.
-// So a request without sign-in, or a call from the sync workflow without the key, causes no GitHub request.
-// Even if someone calls it again and again, it doesn't use the server token's rate limit.
-// After the check, `OpenDBRepo` finds the repository.
 func LoadEnvConfig() (*EnvConfig, error) {
 	repoID, token, err := parseDBRepoAccessKey(os.Getenv(DBRepoAccessKeyEnv))
 	if err != nil {

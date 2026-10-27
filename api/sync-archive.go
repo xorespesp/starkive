@@ -33,16 +33,12 @@ const syncWrapUpTime = 50 * time.Second
 
 // Handles a call from the sync workflow.
 // Checks the sync key, syncs or not as `core.SyncOnWorkflowCall` decides, and answers `{ status }`.
-// It syncs for a run started by hand.
-// For a scheduled run, it syncs on a due day or after a failed scheduled run, and never with Manual only.
 // Answers 401 if the key is missing or wrong, 409 if the DB repository can't be used, and 502 if the sync fails.
 //
 // NOTE: The response has only the status, without counts or error details.
 // The response body ends up in the workflow log, and an error text can contain repository names.
 // If the DB repository is public, anyone can read that log (docs).
 // The details go only to the server log.
-// The key is checked before anything is asked of GitHub.
-// So even if someone calls this address over and over, it doesn't use the server token's rate limit.
 func handleSyncArchiveGet(w http.ResponseWriter, r *http.Request) error {
 	dbRepo, err := core.AuthorizeSyncWorkflowCall(r)
 	if err != nil {

@@ -25,8 +25,7 @@ type ArchiveSyncResult struct {
 //  2. Refreshes the metadata snapshots within `repoMetaSyncBudget`, or the time left before `longStepsEndBy` if that is shorter (`SyncRepoMetaSnapshotsWithGitHub`)
 //  3. Refreshes the README snapshots with the time left before `longStepsEndBy` (`SyncReadmeSnapshotsWithGitHub`).
 //     Repositories that the metadata step found missing aren't asked.
-//     If that step failed, none are skipped.
-//     With `refreshReadmesEarly`, it also uses the time left to refresh the saved READMEs whose turn to be refreshed hasn't come yet
+//     If that step failed, none are skipped
 //
 // Args:
 //   - `ctx`: Deadline of the whole sync. Every request, commits included, ends by it

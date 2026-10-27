@@ -16,8 +16,7 @@ import (
 )
 
 // Most time one sync spends refreshing the metadata snapshots.
-// A request for 100 repositories takes about 4.5 seconds (measured), and 6 are sent at once.
-// So this is enough to check thousands at a time.
+// With `repoMetaFetchParallel` requests at once, this is enough to check thousands at a time.
 // Repositories not checked yet get checked in the next sync.
 // It is capped so that a large archive can't use up the time of the whole sync
 const repoMetaSyncBudget = 40 * time.Second
@@ -25,7 +24,9 @@ const repoMetaSyncBudget = 40 * time.Second
 // One repository metadata snapshot (one line of `db/repo-meta.json`).
 // It keeps the last checked values, so "what it was" remains even if the repository is deleted or made private.
 // The field order is the key order in the file.
-// Changing the order changes the whole file in the diff
+// Changing the order changes the whole file in the diff.
+// It has no check time, so the file doesn't change when the content is the same,
+// and the commit diff isn't buried under lines that change every day
 type RepoMeta struct {
 	ID               int64    `json:"id"`                // ID of the archive item (GitHub repository ID)
 	Name             string   `json:"name"`              // Last checked `owner/repo`. Follows renames
@@ -59,7 +60,7 @@ type RepoMetaSyncResult struct {
 }
 
 // Refreshes the metadata snapshots (`db/repo-meta.json`) of the repositories in the archive with GitHub's current values.
-//   - Shuffles the repositories and asks 100 at a time.
+//   - Shuffles the repositories and asks `MaxRepoMetaNodeIDs` at a time.
 //     A new request is sent only if it can finish within `budget` even when the answer takes the longest wait (`githubTimeout`)
 //   - Updates the snapshot of each repository found.
 //     If the content is the same, `UpdatedAt` stays too.
@@ -79,15 +80,12 @@ type RepoMetaSyncResult struct {
 //
 // Returns:
 //   - The number checked and the IDs not found
-//   - An error from reading the archive or from the commit, or the failure of one batch when every batch sent failed with a failure that needs a person.
+//   - An error from reading the archive or from the commit, or the failure of one batch (see the list above).
 //     When every batch sent failed with a GitHub failure that passes on its own, it isn't an error, and the next sync goes on
 //
-// NOTE: Because of the random order, different repositories get checked in each run, even when there are too many to check at once.
-// Items have no check time, so the file doesn't change when the content is the same.
-// The commit diff isn't buried under lines that change every day.
-// A disappearance is recorded only when GitHub clearly answers `NOT_FOUND`.
+// NOTE: A disappearance is recorded only when GitHub clearly answers `NOT_FOUND`.
 // A temporary outage must not mark hundreds of repositories as gone.
-// Repositories are never deleted automatically.
+// A repository that is gone never removes its item from the archive.
 func SyncRepoMetaSnapshotsWithGitHub(ctx context.Context, repo *DBRepo, budget time.Duration) (RepoMetaSyncResult, error) {
 	budgetEndsAt := time.Now().Add(budget)
 	starItems, err := starItemsDataFile.readLatestFromDBRepo(ctx, repo)
@@ -281,7 +279,7 @@ func UpdateRepoMetaSnapshots(ctx context.Context, repo *DBRepo, change func(star
 	var committed []RepoMeta
 	paths := append(starItemsDataFile.buildPaths(), repoMetaDataFile.path)
 	err := UpdateDBRepoFiles(ctx, repo, paths, func(filesAtCommit *DBRepoFilesAtCommit) (FileChangesCommit, error) {
-		starItems, err := starItemsDataFile.decodeForReading(filesAtCommit) // Only read, so changes to it aren't written
+		starItems, err := starItemsDataFile.decodeForReading(filesAtCommit)
 		if err != nil {
 			return FileChangesCommit{}, err
 		}

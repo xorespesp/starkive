@@ -63,10 +63,7 @@ func newGitHubAppCipher(cfg *EnvConfig) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// Makes the additional authenticated data (AAD) that ties the ciphertext to one App.
-//
-// Args:
-//   - `appID`, `clientID`: ID and client ID of the App that the ciphertext belongs to
+// Makes the additional authenticated data (AAD) that ties the ciphertext to the App with ID `appID` and client ID `clientID`.
 //
 // NOTE: It decrypts only with the same values.
 // So if this ciphertext is copied into another App's settings, it won't decrypt.
@@ -135,7 +132,7 @@ func decodeGitHubApp(cfg *EnvConfig, file *githubAppFile) (GitHubApp, GitHubAppS
 // The key is `buildDBRepoCacheKey` (the same DB repository and token give the same key)
 //
 // NOTE: Sign-in start and callback are open before sign-in, so anyone can call them again and again.
-// Keeping the settings means GitHub is not read each time.
+// Keeping the settings means GitHub is not read each time, and the server token's rate limit (5,000 per hour, docs) isn't used up.
 var githubAppCache cache[githubAppRecord]
 
 // Value kept in `githubAppCache`: the GitHub App settings and their state

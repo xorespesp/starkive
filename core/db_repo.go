@@ -55,19 +55,18 @@ func BuildStarItemShardPath(shardIndex int) string {
 
 // Returns the index of the shard that holds the item with ID `id`.
 // `id` must be positive, because Go's `%` keeps the sign of a negative number.
-// The last digits of real repository IDs spread evenly (measured: 19,991 IDs, each shard within 3.5% of the mean).
+// Real repository IDs spread evenly over the shards (measured: 19,991 IDs, each shard within 3.5% of the mean).
 func computeShardIndexOfStarItem(id int64) int {
 	return int(id % StarItemShardCount)
 }
 
 // Version of the DB repository format (`format` in the marker file)
 type DBRepoFormatVersion struct {
-	Major int `json:"major"` // Raised by a change that other versions can't read or call correctly. A different value stops the server and the setup tool
-	Minor int `json:"minor"` // Raised by a change that keeps the contract, such as a fix in the workflow script. A different value stops nothing
+	Major int `json:"major"` // A different value stops the server and the setup tool (`newDBRepoFormatError`)
+	Minor int `json:"minor"` // A different value stops nothing
 }
 
 // Format version of the DB repository that this code reads and writes.
-// If the repository has a different major version, both the server and the setup tool stop (`newDBRepoFormatError`).
 //
 // NOTE: This keeps different versions of the dashboard, setup tool and workflow from reading or writing one repository wrongly.
 // It doesn't try to adapt or convert anything.
@@ -77,7 +76,7 @@ type DBRepoFormatVersion struct {
 //
 // History:
 //   - 1.0 (2026-10-20): The first format
-//   - 2.0: The archive items are split by ID into fixed files (`StarItemsDBDir`)
+//   - 2.0 (2026-10-27): The archive items are split by ID into fixed files (`StarItemsDBDir`)
 var DBRepoFormat = DBRepoFormatVersion{Major: 2, Minor: 0}
 
 // Reports whether this code can read and write a DB repository of format version `v` (the major versions are the same).
@@ -176,7 +175,8 @@ func newDBRepoFormatError(found *DBRepoFormatVersion) error {
 // Cache of the result of finding the DB repository by ID (`FindDBRepo`).
 // The key is `buildEnvCacheKey`.
 //
-// NOTE: The name and the state are kept as one unit.
+// NOTE: Every API finds the DB repository, so this keeps it from being asked of GitHub every time.
+// The name and the state are kept as one unit.
 // So a kept name is always used together with the state checked for that name.
 var dbRepoCache cache[dbRepoResult]
 
@@ -240,8 +240,7 @@ func FindDBRepo(ctx context.Context, cfg *EnvConfig) (*DBRepo, error) {
 // NOTE: Every path where the server reaches the DB repository (`Authorize`, `OpenDBRepoFromEnv`, `AuthorizeSyncWorkflowCall`) passes through this function.
 // So there can't be a write path that skips the check.
 // The server writes nothing to a foreign repository or to an empty repository that hasn't been set up.
-// The token has permission to write workflows.
-// This guard keeps starkive files from being committed to the wrong repository (e.g. the user's code repository).
+// The token can write files and workflows, so this guard keeps starkive files out of the wrong repository (e.g. the user's code repository).
 // Only the setup tool writes to an empty repository for the first time.
 func OpenDBRepo(ctx context.Context, cfg *EnvConfig) (*DBRepo, error) {
 	repo, err := FindDBRepo(ctx, cfg)
@@ -304,15 +303,13 @@ func fetchDBRepoByID(ctx context.Context, cfg *EnvConfig) (DBRepo, error) {
 //
 // NOTE: Whether it is empty is decided by a value that GitHub defines (GraphQL `Repository.isEmpty`, docs).
 // If this check wrongly said "empty", the setup tool would write a marker into a foreign repository.
-// Emptiness and the marker are read in one query, at the same point.
-// `HEAD` is the default branch.
 // A repository with only a README and no marker is also treated as foreign.
 // There is no exception like "allow it if it only has the initial files GitHub made".
 // This keeps the rule simple.
 func readDBRepoState(ctx context.Context, repo *DBRepo) (DBRepoState, error) {
 	owner, name, _ := strings.Cut(repo.fullName, "/")
-	// Asks, in one go, whether the DB repository is empty and what the marker file at the tip of the default branch is.
-	// `$marker` is `HEAD:<marker path>`
+	// Asks in one query, so at one point, whether the DB repository is empty and what the marker file at the tip of the default branch is.
+	// `$marker` is `HEAD:<marker path>` (`HEAD` is the default branch)
 	const query = `query($owner: String!, $name: String!, $marker: String!) {
 		repository(owner: $owner, name: $name) {
 			isEmpty
@@ -355,7 +352,7 @@ type dbRepoMarker struct {
 	Format *DBRepoFormatVersion `json:"format"` // A pointer: `nil` if the key is missing, so a marker without a version isn't read as 0.0
 }
 
-// Makes the content of the marker file, like `{"format":{"major":2,"minor":0}}` (`DBRepoFormat`).
+// Makes the content of the marker file, `{"format":{"major":<major>,"minor":<minor>}}` of `DBRepoFormat`.
 // Only the setup tool writes the marker, but this lives in `core` so its shape matches what `readDBRepoState` reads.
 func EncodeDBRepoMarker() []byte {
 	content, _ := json.Marshal(dbRepoMarker{Format: &DBRepoFormat}) // A struct of numbers always encodes, so the error is ignored

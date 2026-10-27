@@ -110,10 +110,9 @@ func addInitialFiles(ctx context.Context, dbRepo *core.DBRepo) error {
 //   - An error naming a missing shard if the data folder is there but a shard isn't (a broken repository, or a passing 404 of the listing).
 //     Nothing is added then
 //
-// NOTE: A listing of the root tells "no data folder" for sure, unlike a 404 for one file, which can be a passing one.
-// An empty shard written over a real one would lose its items.
-// An empty shard is `[]` and a line break, the same bytes the server writes for no items.
-// The server reads any JSON array, so a different layout would only be rewritten on the next change of that shard.
+// NOTE: An empty shard written over a real one would lose its items.
+// So a new repository is told by a listing of the root, which says "no data folder" for sure.
+// A 404 for one file can be a passing one.
 func addEmptyStarItemShardsIfNewDBRepo(ctx context.Context, dbRepo *core.DBRepo, commitSHA string, changes *core.FileChangesCommit) error {
 	var root struct {
 		Tree []struct {
@@ -132,6 +131,8 @@ func addEmptyStarItemShardsIfNewDBRepo(ctx context.Context, dbRepo *core.DBRepo,
 		}
 	}
 	if !hasDataFolder {
+		// `[]` and a line break, the same bytes the server writes for no items.
+		// The server reads any JSON array, so a different layout would only be rewritten on the next change of that shard
 		for index := range core.StarItemShardCount {
 			changes.FilesToWrite[core.BuildStarItemShardPath(index)] = []byte("[]\n")
 		}
@@ -161,7 +162,6 @@ func addEmptyStarItemShardsIfNewDBRepo(ctx context.Context, dbRepo *core.DBRepo,
 	return nil
 }
 
-// The last step of the setup.
 // Records the dashboard address in `config.json`, and installs the sync workflow if it is missing.
 // Only when it installs the workflow, it writes to the config file that sync is on (`core.RecordSyncEnabled`).
 //
@@ -172,7 +172,6 @@ func addEmptyStarItemShardsIfNewDBRepo(ctx context.Context, dbRepo *core.DBRepo,
 // NOTE: The address is recorded first, and the workflow is installed after.
 // This way the workflow has an address to call from its first run.
 // The workflow can then always treat a config file it can't read as a failure, not as "not set up yet".
-// If the workflow already exists, the sync options aren't touched.
 func finishDBRepo(ctx context.Context, dbRepo *core.DBRepo, site string) error {
 	if err := core.SaveDashboardURL(ctx, dbRepo, site); err != nil {
 		return err
@@ -185,8 +184,7 @@ func finishDBRepo(ctx context.Context, dbRepo *core.DBRepo, site string) error {
 	if workflow != nil {
 		return nil // Keeps the sync options the person chose
 	}
-	// Records sync as on in the sync options, because GitHub turns a new workflow on (measured).
-	// This comes before the install.
+	// Records sync as on before the install, because a new workflow starts on (`core.RecordSyncEnabled`).
 	// Otherwise, if this failed after the install, the next run would see the workflow and never record it
 	if err := core.RecordSyncEnabled(ctx, dbRepo); err != nil {
 		return err
