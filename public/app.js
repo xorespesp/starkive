@@ -474,14 +474,15 @@ function buildView(item, live, snap, missing) {
  *
  * @param {string} fullNameOrUrl owner/repo or a GitHub repository address. The server parses it
  * @param {number} starListId ID of the star list to add it to. 0 means no star list
+ * @param {string} note Note of the new item. The server trims it. An empty string means no note
  * @returns {Promise<object>} The added archive item
  * @throws {ApiError} Repository not found (404), already in the archive (409), star list not found (400) and so on
  *
  * NOTE: Live details are only for display, so they are not awaited.
  * `render` requests them for the new item (`requestLiveMeta`), and until then `view` uses the saved name.
  */
-async function addRepo(fullNameOrUrl, starListId) {
-  const item = await api('archive-star-items', { method: 'POST', body: { repo_full_name_or_url: fullNameOrUrl, star_list_id: starListId } });
+async function addRepo(fullNameOrUrl, starListId, note) {
+  const item = await api('archive-star-items', { method: 'POST', body: { repo_full_name_or_url: fullNameOrUrl, star_list_id: starListId, note } });
   state.starItems = [item, ...state.starItems];
   render();
   return item;
@@ -935,6 +936,7 @@ function openAddRepo(prefill = '') {
   const input = el('input', { value: prefill, placeholder: 'owner/repo or GitHub URL', spellcheck: false });
   const inputHint = el('p', { className: 'input-hint invalid', hidden: true }); // Says right away why Add is locked, under the input
   const select = starListSelect('No list');
+  const note = el('textarea', { rows: 3, maxLength: TEXT_LIMITS.note, placeholder: 'Optional' });
   // Names shown for the archive items now (`view`). GitHub names ignore case
   const archivedNames = new Set(state.starItems.map((item) => view(item).name.toLowerCase()));
   // State of what is typed now: `empty`, `invalid` (not a repository), `archived` (already in the archive) or `ok`
@@ -957,11 +959,11 @@ function openAddRepo(prefill = '') {
   updateHint();
   showDialog({
     title: 'Add repository',
-    body: [el('label', {}, 'Repository', input), inputHint, el('label', {}, 'List', select)],
+    body: [el('label', {}, 'Repository', input), inputHint, el('label', {}, 'List', select), el('label', {}, 'Note', note)],
     confirmLabel: 'Add',
     canConfirm: () => inputState() === 'ok',
     onConfirm: async () => {
-      const item = await addRepo(input.value, Number(select.value));
+      const item = await addRepo(input.value, Number(select.value), note.value);
       showNotice(`Added ${item.name}`);
     },
   });

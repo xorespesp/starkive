@@ -1612,6 +1612,7 @@ func TestArchiveFilesGetReturnsFile(t *testing.T) {
 // Tests adding a repository directly (`repo_full_name_or_url` in `POST /api/archive-star-items`).
 //   - It also accepts a GitHub address (including a trailing `/tree/...`).
 //     It puts the repository in the chosen star list and adds it at the top of the archive
+//   - A note sent with it is trimmed and saved in the same commit. A note that is too long gives 400 and no commit
 //   - Already there: 409. A missing star list: 400. Path tricks (`../user`): 400. A repository not on GitHub: 404
 //   - The lookup runs while the files are read.
 //     If reading the files fails, a repository not on GitHub still gives 404, and one that exists gives 502
@@ -1619,15 +1620,23 @@ func TestStarItemsAdd(t *testing.T) {
 	gh := setup(t, sampleStarItems, sampleStarLists)
 	cookie := login(t)
 
-	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"https://github.com/torvalds/linux/tree/master","star_list_id":200}`, cookie)
+	tooLong := `{"repo_full_name_or_url":"torvalds/linux","note":"` + strings.Repeat("a", core.MaxNoteLength+1) + `"}`
+	if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", tooLong, cookie); rec.Code != 400 || len(gh.commits) != 0 {
+		t.Fatalf("note too long: got %d %s with %d commits, want 400 and no commit", rec.Code, rec.Body, len(gh.commits))
+	}
+
+	rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", `{"repo_full_name_or_url":"https://github.com/torvalds/linux/tree/master","star_list_id":200,"note":"  read later  "}`, cookie)
 	var added core.StarItem
 	json.Unmarshal(rec.Body.Bytes(), &added)
-	if rec.Code != 200 || added.Name != "torvalds/linux" || len(added.StarListIDs) != 1 || added.StarListIDs[0] != 200 {
+	if rec.Code != 200 || added.Name != "torvalds/linux" || added.Note != "read later" || len(added.StarListIDs) != 1 || added.StarListIDs[0] != 200 {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body)
 	}
 	firstLine := strings.Split(gh.readFile(core.BuildStarItemShardPath(shardIndexOf(2325298))), "\n")[1]
-	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_2325298","name":"torvalds/linux","note":"","star_list_ids":[200],`) {
+	if !strings.HasPrefix(firstLine, `{"id":2325298,"node_id":"R_2325298","name":"torvalds/linux","note":"read later","star_list_ids":[200],`) {
 		t.Errorf("new entry should be first in its shard: %s", firstLine)
+	}
+	if len(gh.commits) != 1 {
+		t.Errorf("add with a note made %d commits, want 1", len(gh.commits))
 	}
 
 	cases := []struct {
@@ -2082,8 +2091,8 @@ func TestStarItemsImportIsIdempotentAtScale(t *testing.T) {
 		t.Errorf("archive has %d entries (want 2500 + 2 existing), newest at %d", len(archive), newest)
 	}
 
-	// Bad input: empty, or both shapes mixed
-	for _, body := range []string{`{"starred_repo_ids":[]}`, `{"repo_full_name_or_url":"a/b","starred_repo_ids":[1]}`} {
+	// Bad input: empty, both shapes mixed, or a note for many items
+	for _, body := range []string{`{"starred_repo_ids":[]}`, `{"repo_full_name_or_url":"a/b","starred_repo_ids":[1]}`, `{"starred_repo_ids":[1],"note":"x"}`} {
 		if rec := call(api.HandleArchiveStarItems, "POST", "/api/archive-star-items", body, cookie); rec.Code != 400 {
 			t.Errorf("%s: got %d", body, rec.Code)
 		}

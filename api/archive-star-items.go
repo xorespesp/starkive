@@ -2,9 +2,10 @@
 // Add and delete also write or delete the item's README snapshot (`db/readmes/`) in the same commit.
 //
 //	GET              -> All items as one JSON array, one item per line
-//	POST             { repo_full_name_or_url, star_list_id? } -> The added item (Add: adds one repository directly, without a Star)
+//	POST             { repo_full_name_or_url, star_list_id?, note? } -> The added item (Add: adds one repository directly, without a Star)
 //	                 `repo_full_name_or_url` is `owner/repo` or a GitHub repository address.
-//	                 `star_list_id` is the star list to put it in (none if missing or 0)
+//	                 `star_list_id` is the star list to put it in (none if missing or 0).
+//	                 `note` is the note of the new item (none if missing or empty)
 //	POST             { starred_repo_ids: [...], star_list_id? } -> { added, skipped } (Import: adds the chosen ones from my GitHub Stars at once)
 //	PATCH  ?id=<id>  { note?, star_list_ids? } -> The changed item. Only the fields that were sent change
 //	DELETE ?id=<id>  -> { ok: true }
@@ -151,9 +152,10 @@ func fetchReadmeToAdd(ctx context.Context, dbRepo *core.DBRepo, nodeID string, n
 // Args:
 //   - `fullNameOrURL`: The `owner/repo` or GitHub repository address the user typed
 //   - `starListIDs`: IDs of the star lists to put the new item in. If empty, it goes in no star list
+//   - `note`: Note of the new item. It is trimmed at both ends. If empty, the item has no note
 //
 // Returns:
-//   - A 400 `HTTPError` if the input shape is wrong or a star list ID doesn't exist.
+//   - A 400 `HTTPError` if the input shape is wrong, the note is too long, or a star list ID doesn't exist.
 //     A 404 if GitHub can't find the repository, and a 409 if it's already in the archive
 //
 // NOTE: The save reads only the shard of the new item, so it needs the repository ID first.
@@ -161,15 +163,22 @@ func fetchReadmeToAdd(ctx context.Context, dbRepo *core.DBRepo, nodeID string, n
 // The README (`fetchReadmeToAdd`, up to `addReadmeTimeout`) is fetched at the same time as the save reads its files.
 // `change` waits for the README only when it adds the item.
 // The README is taken once and used again when `change` runs again after a conflict.
-func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64) error {
+// The note is saved in the commit that adds the item.
+// A separate edit after the add could fail and leave the item without the note the user typed.
+func addRepoByFullNameOrURL(ctx context.Context, w http.ResponseWriter, dbRepo *core.DBRepo, fullNameOrURL string, starListIDs []int64, note string) error {
 	fullName := parseRepoFullNameOrURL(fullNameOrURL)
 	if fullName == "" {
 		return core.Errorf(http.StatusBadRequest, "Enter owner/repo or a GitHub repository URL")
+	}
+	note = strings.TrimSpace(note)
+	if err := core.CheckTextLength("Note", note, false, core.MaxNoteLength); err != nil {
+		return err
 	}
 	found, err := lookUpRepoToAdd(ctx, dbRepo, fullName)
 	if err != nil {
 		return err
 	}
+	found.Note = note
 	// `chan`: a typed queue between goroutines.
 	// Room for one result keeps the send from waiting, so the goroutine ends on its own even if the save fails before taking it.
 	// `readmeDone <- v` sends `v` to the channel.
@@ -258,6 +267,7 @@ func addStarredRepoIDs(ctx context.Context, w http.ResponseWriter, dbRepo *core.
 // Takes Add and Import requests and handles each by the shape of the body.
 // Exactly one of `repo_full_name_or_url` and `starred_repo_ids` must be present.
 // Otherwise it answers 400.
+// A `note` with `starred_repo_ids` also gets 400, because one note can't belong to many items.
 func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	dbRepo, err := core.Authorize(r)
@@ -270,6 +280,7 @@ func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 		RepoFullNameOrURL string  `json:"repo_full_name_or_url"` // Add: the one repository to add directly
 		StarredRepoIDs    []int64 `json:"starred_repo_ids"`      // Import: the repository IDs chosen from my GitHub Stars
 		StarListID        int64   `json:"star_list_id"`          // Star list for the new items. 0 means none
+		Note              string  `json:"note"`                  // Add: note of the new item. Empty means none
 	}
 	if err := core.ReadAPIRequestJSON(r, &body); err != nil {
 		return err
@@ -282,7 +293,10 @@ func handleArchiveStarItemsPost(w http.ResponseWriter, r *http.Request) error {
 		starListIDs = []int64{body.StarListID}
 	}
 	if body.RepoFullNameOrURL != "" {
-		return addRepoByFullNameOrURL(ctx, w, dbRepo, body.RepoFullNameOrURL, starListIDs)
+		return addRepoByFullNameOrURL(ctx, w, dbRepo, body.RepoFullNameOrURL, starListIDs, body.Note)
+	}
+	if body.Note != "" {
+		return core.Errorf(http.StatusBadRequest, "Send note only with repo_full_name_or_url")
 	}
 	return addStarredRepoIDs(ctx, w, dbRepo, body.StarredRepoIDs, starListIDs)
 }
